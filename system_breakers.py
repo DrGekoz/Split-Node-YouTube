@@ -1485,14 +1485,30 @@ def _render_video(shots: list[dict], episode_num: int) -> str:
             for c in clip_files:
                 f.write(f"file '{c}'\n")
         output_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}.mp4")
-        concat_cmd = [
-            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-            "-i", str(concat_list),
-            "-c:v", "hevc_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "28", "-b:v", "0",
-            "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart",
-            output_path
-        ]
+        # Stream-copy concat (NO re-encode): every clip is rendered with identical
+        # hevc_nvenc/aac params by _render_clip, so the demuxer merges them
+        # losslessly and ~100x faster than re-encoding. Re-encoding 100+ files
+        # through NVENC+AAC is the NaN AAC corruption failure mode (Qavg: 65461).
+        if mixed_audio and os.path.isfile(mixed_audio):
+            # Video only - the audio is replaced by the separate mix below
+            concat_cmd = [
+                "ffmpeg", "-y", "-v", "error", "-fflags", "+genpts",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-c:v", "copy", "-an",
+                "-movflags", "+faststart",
+                output_path
+            ]
+        else:
+            # No mix available: keep each clip's narration audio, still stream copy
+            concat_cmd = [
+                "ffmpeg", "-y", "-v", "error", "-fflags", "+genpts",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-c:v", "copy", "-c:a", "copy",
+                "-movflags", "+faststart",
+                output_path
+            ]
         r = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=600)
         if r.returncode != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) < 1000:
             print(f"  [RENDER] Concat failed: {r.stderr[-200:]}")
