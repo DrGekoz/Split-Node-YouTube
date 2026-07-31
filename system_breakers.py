@@ -1490,6 +1490,7 @@ def _render_video(shots: list[dict], episode_num: int) -> str:
             "-i", str(concat_list),
             "-c:v", "hevc_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "28", "-b:v", "0",
             "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
             output_path
         ]
         r = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=600)
@@ -1505,6 +1506,8 @@ def _render_video(shots: list[dict], episode_num: int) -> str:
                 "-i", output_path, "-i", mixed_audio,
                 "-map", "0:v:0", "-map", "1:a:0",
                 "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart",
                 "-shortest", final_path
             ]
             r2 = subprocess.run(mux_cmd, capture_output=True, text=True, timeout=300)
