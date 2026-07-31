@@ -75,7 +75,7 @@ RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY", "")
 RUNPOD_ENDPOINT = "https://api.runpod.ai/v2/z-image-turbo/runsync"
 
 # TTS: built-in male PocketTTS voice (no voice clone)
-TTS_VOICE = "marius"
+TTS_VOICE = "alba"
 
 # Channel / branding
 CHANNEL_NAME = "Split Node"
@@ -205,6 +205,18 @@ RENDER_STYLE = (
     "subsurface scattering, lifelike expressive eyes, realistic hair, high-fidelity "
     "Unreal Engine 5 Metahuman-quality 3D render, cinematic lighting, moody atmosphere, "
     "dark color grade, film grain, high detail, 8k, dramatic documentary recreation"
+)
+
+# Scene-only style for shots with NO character (establishing/landscape/object shots).
+# Deliberately contains zero human/anatomy language so the image generator never
+# adds a person - previously no-character shots reused RENDER_STYLE and the
+# "human character with perfect anatomy" text made RunPod render a topless man.
+SCENE_STYLE = (
+    "Realistic 3D render style, Unreal Engine 5 Metahuman-quality environment and "
+    "prop render, cinematic lighting, moody atmosphere, dark color grade, film grain, "
+    "high detail, 8k, dramatic documentary recreation. EMPTY SCENE - no people, no "
+    "humans, no characters, no figures, no silhouettes, no faces, no bodies, no hands, "
+    "no clothing, no anatomy, absolutely no persons in the frame"
 )
 
 # Camera logic per the documentary shot-list framework
@@ -952,6 +964,13 @@ CHARACTER_SHEET_SYSTEM_PROMPT = (
     "texture), body build, height, posture, age, ethnicity, and a complete outfit "
     "with specific garments, colors, and materials. "
     "\n\n"
+    "CLOTHING IS MANDATORY: every character is ALWAYS fully clothed in every single "
+    "shot. The OUTFIT line is REQUIRED - never omit it, never leave it blank. Describe "
+    "the complete head-to-toe outfit: what they wear on top (shirt/jacket/sweater with "
+    "color, fabric, fit, sleeves), on the bottom (trousers/jeans/skirt), footwear "
+    "(shoes/boots with color), and any accessories (tie, hat, glasses, watch, bag). "
+    "Every view description must state what the character is wearing. The FULL BODY "
+    "paragraph MUST include the complete outfit description.\n\n"
     "Respond EXACTLY in this format, nothing else:\n"
     "NAME: <character name>\n"
     "ROLE: <role in the story>\n"
@@ -960,22 +979,24 @@ CHARACTER_SHEET_SYSTEM_PROMPT = (
     "BUILD: <height, body type, posture, distinguishing physical traits>\n"
     "FACE: <face shape, skin tone, eye color+shape, eyebrows, nose, mouth, jaw, any facial hair or marks - highly specific>\n"
     "HAIR: <color, style, length, texture - highly specific>\n"
-    "OUTFIT: <complete outfit: specific garments, colors, fabrics, fit - highly specific>\n"
+    "OUTFIT: <complete head-to-toe outfit: top, bottom, footwear, accessories with colors, fabrics, fit - highly specific, REQUIRED>\n"
     "FRONT VIEW: <how the character looks from directly in front: full body front, face forward, outfit front - 1-2 sentences>\n"
     "LEFT VIEW: <how the character looks from the left side/profile: profile silhouette, hair side, outfit side - 1-2 sentences>\n"
     "RIGHT VIEW: <how the character looks from the right side/profile - 1-2 sentences>\n"
     "BACK VIEW: <how the character looks from behind: hair back, back of outfit, silhouette - 1-2 sentences>\n"
-    "FULL BODY: <complete canonical description combining everything above into one dense paragraph to prepend to every image prompt>\n"
+    "FULL BODY: <complete canonical description combining everything above INCLUDING the full outfit into one dense paragraph to prepend to every image prompt>\n"
 )
 
 def _build_character_sheets(shots: list[dict], narration: list[str]) -> dict:
     """Stage 2b: poll the LLM once per unique character for a precise repeatable sheet."""
     print("\n[LLM] Stage 2b: building character sheets...")
-    # Collect unique named characters in order of first appearance
+    # Collect unique named characters in order of first appearance (case-insensitive
+    # so 'ARS' and 'Ars' are treated as the same character - previously each casing
+    # variant got its own sheet and separate image-generation treatment)
     names = []
     for s in shots:
         c = s.get("character", "NONE")
-        if c != "NONE" and c not in names:
+        if c != "NONE" and c.lower() not in [n.lower() for n in names]:
             names.append(c)
     if not names:
         print("  [LLM] No named characters found - skipping sheets")
@@ -1058,8 +1079,9 @@ def _character_prompt_block(sheet: dict, angle: str) -> str:
     view = _character_view_block(sheet, angle)
     if view:
         parts.append(f"View: {view}")
-    # Full body canonical description last as the anchor
-    if sheet.get("full_body") and len(parts) < 8:
+    # Full body canonical description last as the anchor (always included when
+    # present - it carries the full outfit, so dropping it would lose the clothing)
+    if sheet.get("full_body"):
         parts.append(f"Canonical: {sheet['full_body']}")
     return " ".join(parts)
 
@@ -1117,7 +1139,17 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         cam_desc = f", {shot['shot_type']} framing, {angle} camera angle"
 
     char_name = shot.get("character", "NONE")
-    sheet = character_sheets.get(char_name) if char_name != "NONE" else None
+    sheet = None
+    if char_name != "NONE":
+        # Case-insensitive lookup: sheet keys and shot character names can differ
+        # in casing ('ARS' vs 'Ars') - a missed match would wrongly fall through
+        # to the scene-only branch and drop the character entirely.
+        sheet = character_sheets.get(char_name)
+        if sheet is None:
+            for k, v in character_sheets.items():
+                if k.lower() == char_name.lower():
+                    sheet = v
+                    break
     if sheet:
         char_block = _character_prompt_block(sheet, angle)
         prompt = (
@@ -1125,9 +1157,10 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
             f"16:9 widescreen cinematic documentary frame"
         )
     else:
-        # No character (establishing shot) or sheet missing - plain scene
+        # No character (establishing/landscape/object shot) - use the scene-only
+        # style with zero human language so no person is ever generated.
         prompt = (
-            f"{RENDER_STYLE}. {shot['scene']}{cam_desc}, "
+            f"{SCENE_STYLE}. {shot['scene']}{cam_desc}, "
             f"16:9 widescreen cinematic documentary frame"
         )
     return prompt
@@ -1154,7 +1187,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
 # -- TTS (PocketTTS built-in male voice, 0dB normalized) -------------
 
 def _pocket_tts_generate(text: str, output_path: str, timeout: int = 180) -> bool:
-    """Generate TTS via PocketTTS HTTP API using built-in male voice (marius)."""
+    """Generate TTS via PocketTTS HTTP API using built-in catalog voice (alba)."""
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     import urllib.request as _ur
     boundary = "----splitnode" + str(int(time.time() * 1000))
@@ -1459,6 +1492,31 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
         return r2.returncode == 0 and os.path.isfile(output_path) and os.path.getsize(output_path) > 1000
     return True
 
+def _master_gain_filter(audio_path: str) -> str:
+    """Measure the mixed WAV's peak and return an ffmpeg -af filter string that
+    raises the loudest peak to 0dB (0.0dB gain if already at/near 0dB).
+    Relative levels inside the mix are preserved: voice 0dB, music -18dB, SFX -14dB."""
+    try:
+        probe = subprocess.run(
+            ["ffmpeg", "-i", audio_path, "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60)
+        m = re.search(r"max_volume:\s*(-?[\d.]+)\s*dB", probe.stderr)
+        if not m:
+            print("  [AUDIO] volumedetect failed, no master gain applied")
+            return ""
+        peak_db = float(m.group(1))
+        gain_db = -peak_db
+        # Safety: never boost more than +6dB, never reduce
+        gain_db = max(0.0, min(gain_db, 6.0))
+        if gain_db < 0.05:
+            print(f"  [AUDIO] Master peak already {peak_db:.1f}dB, no gain")
+            return ""
+        print(f"  [AUDIO] Master gain +{gain_db:.1f}dB (peak {peak_db:.1f}dB -> 0dB)")
+        return f"volume={gain_db:.2f}dB,alimiter=limit=1.0"
+    except Exception as e:
+        print(f"  [AUDIO] Master gain probe error: {e}")
+        return ""
+
 def _render_video(shots: list[dict], episode_num: int) -> str:
     """Render all shots into one 1080p video with full audio mix."""
     print("\n[VIDEO] Rendering 1080p documentary...")
@@ -1543,14 +1601,21 @@ def _render_video(shots: list[dict], episode_num: int) -> str:
             print(f"  [RENDER] Concat failed: {r.stderr[-200:]}")
             return ""
 
-        # Mux the full mixed audio (voice + music + sfx) over the video
+        # Mux the full mixed audio (voice + music + sfx) over the video,
+        # with a final master gain so the loudest peak reaches 0dB
+        # (voice 0dB, music -18dB, SFX -14dB relative in the mix).
         if mixed_audio and os.path.isfile(mixed_audio):
             final_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_final.mp4")
+            master_filter = _master_gain_filter(mixed_audio)
             mux_cmd = [
                 "ffmpeg", "-y", "-v", "error",
                 "-i", output_path, "-i", mixed_audio,
                 "-map", "0:v:0", "-map", "1:a:0",
                 "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            ]
+            if master_filter:
+                mux_cmd += ["-af", master_filter]
+            mux_cmd += [
                 "-avoid_negative_ts", "make_zero",
                 "-movflags", "+faststart",
                 "-shortest", final_path
@@ -1941,55 +2006,26 @@ except ImportError:
 
 # -- Discord announcement --------------------------------------------
 
-ANNOUNCE_SYSTEM_PROMPT = (
-    "You are the community manager for SPLIT NODE, a YouTube channel that tells true "
-    "stories of ordinary people who beat the system (hackers, lottery mathematicians, "
-    "card counters, loophole finders). A new episode has just been uploaded. "
-    "Write a punchy Discord announcement message for the community. Rules:\n"
-    "- 3-5 sentences, hype but not cringe\n"
-    "- Lead with the hook of THIS episode's story\n"
-    "- Mention it's live on YouTube\n"
-    "- Include the YouTube link\n"
-    "- No em dashes, no asterisks, no markdown formatting beyond the link\n"
-    "- Plain text, conversational, energetic\n"
-    "- No hashtags\n"
-    "- Start with 'NEW EPISODE' in caps"
-)
-
-def _generate_announcement(topic: str, video_id: str, episode_num: int) -> str:
-    """Write the Discord announcement with the local LLM."""
-    try:
-        url = f"https://youtu.be/{video_id}"
-        text = _llm_chat([
-            {"role": "system", "content": ANNOUNCE_SYSTEM_PROMPT},
-            {"role": "user", "content": (
-                f"Episode #{episode_num:03d} of Split Node\n"
-                f"Topic: {topic}\n"
-                f"YouTube link: {url}\n\n"
-                f"Write the Discord announcement."
-            )}
-        ], max_tokens=300, temp=0.85)
-        text = text.strip().strip('"\'')
-        # Ensure the link is in the message
-        if url not in text:
-            text = f"{text}\n\n{url}"
-        return text
-    except Exception as e:
-        print(f"  [DISCORD] Announcement LLM failed: {e}")
-        return (f"NEW EPISODE - {topic}\n\n"
-                f"Split Node episode #{episode_num:03d} is live on YouTube!\n\n"
-                f"https://youtu.be/{video_id}")
-
-
 def _post_discord_announcement(topic: str, video_id: str, episode_num: int,
-                               wait_seconds: int = 60) -> None:
-    """Wait, then write + post the announcement to all Discord channels."""
+                               wait_seconds: int = 60, description: str = "") -> None:
+    """Wait, then post the announcement to all Discord channels.
+
+    Uses the video's own YouTube description as the announcement body,
+    wrapped in a hype line at top + bottom, with the YouTube link.
+    """
     if not video_id:
         print("  [DISCORD] No video ID - skipping announcement")
         return
     print(f"\n  [DISCORD] Waiting {wait_seconds}s before announcing...")
     time.sleep(wait_seconds)
-    message = _generate_announcement(topic, video_id, episode_num)
+    url = f"https://youtu.be/{video_id}"
+    body = (description or f"{topic}\n\nSplit Node episode #{episode_num:03d} is live on YouTube!").strip()
+    message = (
+        f"NEW EPISODE IS LIVE ON YOUTUBE!\n\n"
+        f"{body}\n\n"
+        f"Watch the full episode now, and join the Discord for early access to future episodes!\n\n"
+        f"{url}"
+    )
     print(f"  [DISCORD] Announcement:\n    {message[:120]}...")
     for ch_id in DISCORD_ANNOUNCE_CHANNELS:
         try:
@@ -2000,6 +2036,7 @@ def _post_discord_announcement(topic: str, video_id: str, episode_num: int,
                 headers={
                     "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
                     "Content-Type": "application/json",
+                    "User-Agent": "DiscordBot (https://discord.gg/YSdqKR4wVB, 1.0)",
                 },
                 method="POST"
             )
@@ -2224,7 +2261,8 @@ def _resume_episode(state: dict) -> None:
             _add_video_to_playlist(video_id)
             EPISODE_COUNTER_FILE.write_text(str(episode_num))
             print(f"  [OK] Episode #{episode_num:03d} uploaded! https://youtu.be/{video_id}")
-            _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60)
+            _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60,
+                                       description=description)
     else:
         print("  [SKIP] YouTube upload disabled")
 
@@ -2354,8 +2392,9 @@ def main():
             _add_video_to_playlist(video_id)
             EPISODE_COUNTER_FILE.write_text(str(episode_num))
             print(f"  [OK] Episode #{episode_num:03d} uploaded! https://youtu.be/{video_id}")
-            # Announce to Discord: wait 60s, then LLM-written announcement
-            _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60)
+            # Announce to Discord: wait 60s, then post description + hype + link
+            _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60,
+                                       description=description)
         else:
             print(f"  [WARN] Upload failed - video saved locally")
             EPISODE_COUNTER_FILE.write_text(str(episode_num))
