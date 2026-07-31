@@ -59,11 +59,13 @@ THUMBNAILS_DIR = PROJECT_DIR / "thumbnails"
 SFX_DIR = PROJECT_DIR / "cinematic_sounds"
 USED_ARTICLES_FILE = PROJECT_DIR / ".used_articles.json"
 EPISODE_COUNTER_FILE = PROJECT_DIR / ".episode_counter"
+RESUME_FILE = PROJECT_DIR / ".resume_state.json"
+BATCH_TEMP = PROJECT_DIR / "batch_temp"
 
 YOUTUBE_CREDENTIALS = Path.home() / ".youtube-upload-credentials.json"
 CLIENT_SECRETS = PROJECT_DIR / "client_secret_874421706318-sl7gg802bovuib9h2q95hq9lvlb661oi.apps.googleusercontent.com.json"
 
-for d in [TTS_TEMP, SHOTS_DIR, RENDERED_AUDIO, RENDERED_VIDEO, THUMBNAILS_DIR]:
+for d in [TTS_TEMP, SHOTS_DIR, RENDERED_AUDIO, RENDERED_VIDEO, THUMBNAILS_DIR, BATCH_TEMP]:
     d.mkdir(exist_ok=True)
 
 LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
@@ -1106,35 +1108,42 @@ def _runpod_generate(prompt: str, seed: int, size: str = "1280*720", timeout: in
             time.sleep(3)
     return None
 
+def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> str:
+    """Build the RunPod prompt for one shot (shared by full gen and resume regen)."""
+    character_sheets = character_sheets or {}
+    angle = shot.get("angle", "eye-level")
+    cam_desc = ""
+    if shot.get("shot_type"):
+        cam_desc = f", {shot['shot_type']} framing, {angle} camera angle"
+
+    char_name = shot.get("character", "NONE")
+    sheet = character_sheets.get(char_name) if char_name != "NONE" else None
+    if sheet:
+        char_block = _character_prompt_block(sheet, angle)
+        prompt = (
+            f"{RENDER_STYLE}. {char_block}. {shot['scene']}{cam_desc}, "
+            f"16:9 widescreen cinematic documentary frame"
+        )
+    else:
+        # No character (establishing shot) or sheet missing - plain scene
+        prompt = (
+            f"{RENDER_STYLE}. {shot['scene']}{cam_desc}, "
+            f"16:9 widescreen cinematic documentary frame"
+        )
+    return prompt
+
+
 def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = None) -> list[dict]:
     character_sheets = character_sheets or {}
     print(f"\n[IMAGES] Generating {len(shots)} 3D shots via RunPod Z-Image-Turbo...")
     for idx, shot in enumerate(shots):
         seed = 10000 + idx * 137 + random.randint(0, 999)
-        angle = shot.get("angle", "eye-level")
-        cam_desc = ""
-        if shot.get("shot_type"):
-            cam_desc = f", {shot['shot_type']} framing, {angle} camera angle"
-
-        char_name = shot.get("character", "NONE")
-        sheet = character_sheets.get(char_name) if char_name != "NONE" else None
-        if sheet:
-            char_block = _character_prompt_block(sheet, angle)
-            prompt = (
-                f"{RENDER_STYLE}. {char_block}. {shot['scene']}{cam_desc}, "
-                f"16:9 widescreen cinematic documentary frame"
-            )
-        else:
-            # No character (establishing shot) or sheet missing - plain scene
-            prompt = (
-                f"{RENDER_STYLE}. {shot['scene']}{cam_desc}, "
-                f"16:9 widescreen cinematic documentary frame"
-            )
+        prompt = _build_shot_prompt(shot, character_sheets)
         path = _runpod_generate(prompt, seed)
         shot["seed"] = seed
         shot["image_path"] = path
         if path:
-            print(f"  [SHOT {idx+1}/{len(shots)}] image ready (char={char_name})")
+            print(f"  [SHOT {idx+1}/{len(shots)}] image ready (char={shot.get('character','NONE')})")
         else:
             print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED - will use fallback")
         time.sleep(1)
@@ -1458,8 +1467,13 @@ def _render_video(shots: list[dict], episode_num: int) -> str:
         print("  [FAIL] No TTS clips to render")
         return ""
 
-    # Build the full audio mix first (voice+music+sfx)
-    mixed_audio = _build_audio_mix(valid, episode_num)
+    # Build the full audio mix first (voice+music+sfx). Output path is
+    # deterministic, so an already-finished mix is reused on resume.
+    mixed_audio = str(RENDERED_AUDIO / f"ep{episode_num:03d}_mix.wav")
+    if os.path.isfile(mixed_audio) and os.path.getsize(mixed_audio) > 1000:
+        print(f"  [AUDIO] Mix exists, reusing ({os.path.getsize(mixed_audio)//1024}KB)")
+    else:
+        mixed_audio = _build_audio_mix(valid, episode_num)
     if not mixed_audio:
         print("  [WARN] Audio mix failed, falling back to voice-only concat")
 
@@ -1467,14 +1481,29 @@ def _render_video(shots: list[dict], episode_num: int) -> str:
     clip_files = []
     try:
         fallback_img = str(SHOTS_DIR / "_fallback_bg.png")
-        for idx, shot in enumerate(valid):
-            clip_out = str(temp_dir / f"clip_{idx:02d}.mp4")
+        # Persistent clip folder: finished clips survive crashes so a resume
+        # run skips re-rendering them. Deleted after the final video succeeds.
+        clip_dir = BATCH_TEMP / f"ep{episode_num:03d}"
+        clip_dir.mkdir(parents=True, exist_ok=True)
+        reused = 0
+        for idx, shot in enumerate(shots):
+            if not (shot.get("tts_path") and os.path.isfile(shot["tts_path"])):
+                continue
+            clip_out = str(clip_dir / f"clip{idx:02d}.mp4")
+            if (os.path.isfile(clip_out) and os.path.getsize(clip_out) > 1000
+                    and _get_audio_duration(clip_out) > 0.5):
+                clip_files.append(clip_out)
+                reused += 1
+                print(f"  [CLIP {idx+1}/{len(valid)}] reused from batch_temp")
+                continue
             ok = _render_clip(shot.get("image_path", ""), shot["tts_path"], clip_out, fallback_img)
             if ok:
                 clip_files.append(clip_out)
                 print(f"  [CLIP {idx+1}/{len(valid)}] rendered")
             else:
                 print(f"  [CLIP {idx+1}/{len(valid)}] FAILED")
+        print(f"  [CLIPS] {reused}/{len(clip_files)} reused from batch_temp, "
+              f"{len(clip_files) - reused} freshly rendered")
 
         if not clip_files:
             print("  [FAIL] No clips rendered")
@@ -1533,6 +1562,12 @@ def _render_video(shots: list[dict], episode_num: int) -> str:
         dur = _get_audio_duration(output_path)
         size_mb = os.path.getsize(output_path) / 1024 / 1024
         print(f"  [OK] 1080p video: {_fmt_time(dur)}, {size_mb:.1f}MB -> {output_path}")
+        # Episode complete: clean up the batch clips
+        for clip in clip_dir.glob("clip*.mp4"):
+            try: clip.unlink()
+            except: pass
+        try: clip_dir.rmdir()
+        except: pass
         return output_path
     finally:
         shutil.rmtree(str(temp_dir), ignore_errors=True)
@@ -2019,9 +2054,208 @@ def _preflight() -> bool:
     print()
     return ok
 
+def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topic: str = "",
+                       shots: Optional[list] = None, character_sheets: Optional[dict] = None,
+                       titles: Optional[list] = None, description: str = "",
+                       tags: Optional[list] = None, thumb_path: str = "",
+                       video_path: str = "", video_id: str = "") -> None:
+    """Save episode state so it can be resumed if interrupted."""
+    state = {
+        "version": 1,
+        "stage": stage,
+        "episode_num": episode_num,
+        "article_url": article_url,
+        "topic": topic,
+        "shots": shots or [],
+        "character_sheets": character_sheets or {},
+        "titles": titles or [],
+        "description": description,
+        "tags": tags or [],
+        "thumb_path": thumb_path,
+        "video_path": video_path,
+        "video_id": video_id,
+    }
+    try:
+        tmp = RESUME_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, indent=2, default=str))
+        tmp.replace(RESUME_FILE)
+        print(f"  [STATE] Saved resume state (stage={stage}, {len(state['shots'])} shots)")
+    except Exception as e:
+        print(f"  [STATE] Could not save resume state: {e}")
+
+
+def _load_resume_state() -> Optional[dict]:
+    """Load resume state if it exists and is valid."""
+    if not RESUME_FILE.exists():
+        return None
+    try:
+        state = json.loads(RESUME_FILE.read_text())
+        if state.get("version") != 1:
+            return None
+        return state
+    except Exception:
+        return None
+
+
+def _clear_resume_state() -> None:
+    try:
+        if RESUME_FILE.exists():
+            RESUME_FILE.unlink()
+            print("  [STATE] Resume state cleared")
+    except Exception:
+        pass
+
+
+def _resume_episode(state: dict) -> None:
+    """Resume a partially-completed episode from saved state.
+
+    Only regenerates what's missing: images, TTS, render clips (batch_temp),
+    and picks up from the last unfinished stage. Never re-uploads a video
+    that already has a video_id.
+    """
+    episode_num = int(state.get("episode_num", 0))
+    stage = state.get("stage", "story")
+    topic = state.get("topic", "")
+    article_url = state.get("article_url", "")
+    shots = state.get("shots", [])
+    character_sheets = state.get("character_sheets", {})
+    titles = state.get("titles", [])
+    description = state.get("description", "")
+    tags = state.get("tags", [])
+    thumb_path = state.get("thumb_path", "")
+    video_path = state.get("video_path", "")
+    video_id = state.get("video_id", "")
+
+    print(f"\n{'='*60}")
+    print(f"  RESUME - Split Node Episode #{episode_num:03d}")
+    print(f"  Stage: {stage} | Shots: {len(shots)}")
+    print(f"{'='*60}\n")
+
+    # 1. Images: regenerate only the missing ones (same seeds -> same look)
+    missing_img = [s for s in shots if not (s.get("image_path") and os.path.isfile(s["image_path"]))]
+    if missing_img:
+        print(f"\n[IMAGES] Regenerating {len(missing_img)} missing shots...")
+        for shot in missing_img:
+            seed = shot.get("seed") or (10000 + random.randint(0, 999))
+            prompt = _build_shot_prompt(shot, character_sheets)
+            path = _runpod_generate(prompt, seed)
+            shot["seed"] = seed
+            shot["image_path"] = path
+            print(f"  [SHOT] {'image ready' if path else 'IMAGE FAILED - fallback'} "
+                  f"(char={shot.get('character', 'NONE')})")
+            time.sleep(1)
+        _save_resume_state("images", episode_num, article_url, topic, shots,
+                           character_sheets, titles, description, tags,
+                           thumb_path, video_path, video_id)
+    else:
+        print(f"  [RESUME] All {len(shots)} images present")
+
+    # 2. TTS: regenerate only the missing narration clips
+    missing_tts = [s for s in shots if not (s.get("tts_path") and os.path.isfile(s["tts_path"]))]
+    if missing_tts:
+        print(f"\n[TTS] Generating {len(missing_tts)} missing narration clips...")
+        ep_dir = TTS_TEMP / f"ep_{episode_num}"
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        for idx, shot in enumerate(missing_tts):
+            if not shot.get("tts_path"):
+                shot["tts_path"] = str(ep_dir / f"narration_{idx:02d}_resume.wav")
+            out = shot["tts_path"]
+            ok = _pocket_tts_generate(shot["narration"], out)
+            if ok:
+                _normalize_voice_0db(out)
+                print(f"  [TTS] {_get_audio_duration(out):.1f}s - {shot['narration'][:50]}...")
+            else:
+                print(f"  [TTS] FAILED - {shot['narration'][:50]}...")
+            time.sleep(0.5)
+        _save_resume_state("tts", episode_num, article_url, topic, shots,
+                           character_sheets, titles, description, tags,
+                           thumb_path, video_path, video_id)
+    else:
+        print(f"  [RESUME] All {len(shots)} TTS clips present")
+
+    # 3. Video render - reuses finished clips in batch_temp + finished mix
+    if video_path and os.path.isfile(video_path) and os.path.getsize(video_path) > 1000:
+        print(f"  [RESUME] Video exists, skipping: {video_path}")
+    else:
+        print(f"\n[VIDEO] Rendering 1080p (finished clips reused from batch_temp)...")
+        video_path = _render_video(shots, episode_num)
+        if not video_path:
+            print("  [HALT] Video render failed - state kept for another resume.")
+            _save_resume_state("video", episode_num, article_url, topic, shots,
+                               character_sheets, titles, description, tags,
+                               thumb_path, video_path, video_id)
+            return
+        _save_resume_state("video", episode_num, article_url, topic, shots,
+                           character_sheets, titles, description, tags,
+                           thumb_path, video_path, video_id)
+
+    # 4. Titles / description / tags (stored, or regenerated once)
+    if not titles:
+        print("\n[TITLES] Generating...")
+        titles = _generate_titles(topic, episode_num)
+        for i, t in enumerate(titles):
+            print(f"  Title {i+1}: {t}")
+    if not description:
+        description = _generate_description(topic, episode_num, article_url)
+    if not tags:
+        llm_tags = _generate_tags(topic, episode_num)
+        tags = YOUTUBE_BASE_TAGS + [t for t in llm_tags if t not in YOUTUBE_BASE_TAGS]
+    tags_str = ",".join(tags)
+
+    # 5. Thumbnail
+    if not thumb_path:
+        thumb_path = str(THUMBNAILS_DIR / f"ep{episode_num:03d}_thumb.png")
+    thumb_ok = os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 1000
+    if not thumb_ok:
+        thumb_ok = _generate_thumbnail(topic, thumb_path)
+
+    # 6. Upload (skip if already uploaded this episode)
+    print(f"\n  {'='*50}\n  YOUTUBE UPLOAD ({CHANNEL_NAME})\n  {'='*50}")
+    print(f"  Video: {video_path}")
+    if video_id:
+        print(f"  [RESUME] Already uploaded: https://youtu.be/{video_id}")
+    elif YOUTUBE_UPLOAD_ENABLED:
+        title = titles[0] if titles else f"#{episode_num:03d} - {topic[:60]}"
+        print(f"  Title: {title}")
+        video_id = _upload_video_with_progress(video_path, title, description, tags_str)
+        if video_id and thumb_ok:
+            _upload_thumbnail(video_id, thumb_path)
+        if video_id:
+            _add_video_to_playlist(video_id)
+            EPISODE_COUNTER_FILE.write_text(str(episode_num))
+            print(f"  [OK] Episode #{episode_num:03d} uploaded! https://youtu.be/{video_id}")
+            _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60)
+    else:
+        print("  [SKIP] YouTube upload disabled")
+
+    _save_resume_state("upload", episode_num, article_url, topic, shots,
+                       character_sheets, titles, description, tags,
+                       thumb_path, video_path, video_id)
+
+    print(f"\n  {'='*50}")
+    print(f"  EPISODE #{episode_num:03d} COMPLETE (RESUMED)")
+    print(f"  {'='*50}")
+    if video_id:
+        print(f"  YouTube:  https://youtu.be/{video_id}")
+    print(f"  Shots: {len(shots)} | Stage: {stage} -> upload")
+
+    _clear_resume_state()
+
+
 def main():
     print_banner()
     _preflight()
+
+    # Check for a resumable episode (state survives crashes until completion)
+    resume_state = _load_resume_state()
+    if resume_state:
+        ep = resume_state.get("episode_num", 0)
+        stg = resume_state.get("stage", "?")
+        resp = input(f"\n  Resume episode #{ep:03d} (stage '{stg}')? [Y/n]: ").strip().lower()
+        if resp not in ("n", "no"):
+            _resume_episode(resume_state)
+            return
+        print("  [RESUME] Skipping - starting a fresh episode")
 
     # Ask for the episode number every run (default = last + 1)
     last_ep = _load_episode_num()
@@ -2068,12 +2302,15 @@ def main():
 
     # 4b. Stage 2b: character sheets for every named character
     character_sheets = _build_character_sheets(shots, narration)
+    _save_resume_state("story", episode_num, article_url, topic, shots, character_sheets)
 
     # 5. Generate images (character sheet prepended, angle-matched view)
     shots = _generate_all_shots(shots, character_sheets)
+    _save_resume_state("images", episode_num, article_url, topic, shots, character_sheets)
 
     # 6. TTS narration (built-in male voice, 0dB)
     _generate_all_tts(shots, episode_num)
+    _save_resume_state("tts", episode_num, article_url, topic, shots, character_sheets)
 
     # 7. Render 1080p with full audio mix (voice+music+SFX)
     video_path = _render_video(shots, episode_num)
@@ -2081,6 +2318,9 @@ def main():
         print("  [HALT] Video render failed.")
         input("  Press Enter to exit...")
         return
+    _save_resume_state("video", episode_num, article_url, topic, shots,
+                       character_sheets, titles=[], description="",
+                       tags=[], video_path=video_path)
 
     # 8. Titles + description
     titles = _generate_titles(topic, episode_num)
@@ -2090,10 +2330,16 @@ def main():
     llm_tags = _generate_tags(topic, episode_num)
     all_tags = YOUTUBE_BASE_TAGS + [t for t in llm_tags if t not in YOUTUBE_BASE_TAGS]
     tags_str = ",".join(all_tags)
+    _save_resume_state("metadata", episode_num, article_url, topic, shots,
+                       character_sheets, titles=titles, description=description,
+                       tags=all_tags, video_path=video_path)
 
     # 9. Thumbnail
     thumb_path = str(THUMBNAILS_DIR / f"ep{episode_num:03d}_thumb.png")
     thumb_ok = _generate_thumbnail(topic, thumb_path)
+    _save_resume_state("thumbnail", episode_num, article_url, topic, shots,
+                       character_sheets, titles=titles, description=description,
+                       tags=all_tags, thumb_path=thumb_path, video_path=video_path)
 
     # 10. Upload to Split Node channel
     if YOUTUBE_UPLOAD_ENABLED:
@@ -2126,6 +2372,7 @@ def main():
     if YOUTUBE_UPLOAD_ENABLED:
         print(f"  YouTube: {f'https://youtu.be/{video_id}' if video_id else 'NOT UPLOADED'}")
     print(f"\n  Done! Press Enter to exit.")
+    _clear_resume_state()
     input()
 
 if __name__ == "__main__":
