@@ -1,0 +1,2113 @@
+#!/usr/bin/env python3
+"""
+SPLIT NODE
+True stories of ordinary people who beat the system.
+3D mannequin documentary generator (FERN/Black Files style).
+
+Pipeline:
+  RSS (hacker/lottery/loophole stories) -> article -> LLM narration script
+  -> LLM shot list (clothed mannequins, action scenes, camera logic)
+  -> RunPod Z-Image-Turbo 16:9 images per shot
+  -> PocketTTS built-in male voice narration (0dB normalized)
+  -> FFmpeg render 1080p with music (-18dB) + timecoded SFX (-14dB)
+  -> FAL GPT Image 2 thumbnail -> YouTube upload (Split Node channel)
+"""
+
+import json
+import os
+import random
+import re
+import shutil
+import ssl
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Optional
+
+try:
+    from google.oauth2.credentials import Credentials as GoogleCreds
+    from google.auth.transport.requests import Request as AuthRefresh
+    from tqdm import tqdm
+    _HAS_PROGRESS = True
+except ImportError:
+    _HAS_PROGRESS = False
+
+# -- Config ----------------------------------------------------------
+PROJECT_DIR = Path(__file__).parent.resolve()
+
+# -- Local .env loader (secrets stay out of git) ---------------------
+_ENV_FILE = PROJECT_DIR / ".env"
+if _ENV_FILE.is_file():
+    for _line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if not _line or _line.startswith("#") or "=" not in _line:
+            continue
+        _k, _v = _line.split("=", 1)
+        os.environ.setdefault(_k.strip(), _v.strip())
+
+TTS_TEMP = PROJECT_DIR / "tts_temp"
+SHOTS_DIR = PROJECT_DIR / "shots"
+RENDERED_AUDIO = PROJECT_DIR / "rendered_audio"
+RENDERED_VIDEO = PROJECT_DIR / "rendered_video"
+THUMBNAILS_DIR = PROJECT_DIR / "thumbnails"
+SFX_DIR = PROJECT_DIR / "cinematic_sounds"
+USED_ARTICLES_FILE = PROJECT_DIR / ".used_articles.json"
+EPISODE_COUNTER_FILE = PROJECT_DIR / ".episode_counter"
+
+YOUTUBE_CREDENTIALS = Path.home() / ".youtube-upload-credentials.json"
+CLIENT_SECRETS = PROJECT_DIR / "client_secret_874421706318-sl7gg802bovuib9h2q95hq9lvlb661oi.apps.googleusercontent.com.json"
+
+for d in [TTS_TEMP, SHOTS_DIR, RENDERED_AUDIO, RENDERED_VIDEO, THUMBNAILS_DIR]:
+    d.mkdir(exist_ok=True)
+
+LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
+POCKET_TTS_URL = "http://127.0.0.1:8769"
+FAL_API_KEY = os.environ.get("FAL_API_KEY", "")
+RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY", "")
+RUNPOD_ENDPOINT = "https://api.runpod.ai/v2/z-image-turbo/runsync"
+
+# TTS: built-in male PocketTTS voice (no voice clone)
+TTS_VOICE = "marius"
+
+# Channel / branding
+CHANNEL_NAME = "Split Node"
+YOUTUBE_PLAYLIST = "Split Node"
+YOUTUBE_CATEGORY = "Entertainment"
+YOUTUBE_LANGUAGE = "en"
+DISCORD_INVITE = "https://discord.gg/YSdqKR4wVB"
+# Upload enabled - Split Node channel + client secret are live
+YOUTUBE_UPLOAD_ENABLED = True
+# 12 persistent AI-documentary-niche tags (topic tags are LLM-generated per video)
+YOUTUBE_BASE_TAGS = [
+    "split node", "ai documentary", "3d documentary", "ai generated documentary",
+    "true stories", "true crime documentary", "documentary", "unreal engine",
+    "3d animation", "metahuman", "people who beat the system", "incredible true stories",
+]
+
+# RSS feeds for the niche (fallback pool - primary source is HN Algolia search)
+RSS_FEEDS = [
+    "https://www.wired.com/feed/tag/cybersecurity/latest/rss",
+    "https://krebsonsecurity.com/feed/",
+    "https://feeds.feedburner.com/TheHackersNews",
+    "https://news.ycombinator.com/rss",
+    "https://feeds.bbci.co.uk/news/technology/rss.xml",
+    "https://www.theguardian.com/technology/rss",
+    "https://www.bleepingcomputer.com/feed/",
+    "https://www.404media.co/rss/",
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
+    "https://feeds.washingtonpost.com/rss/world",
+    "https://www.theguardian.com/world/rss",
+    "https://www.theguardian.com/uk-news/rss",
+    "https://feeds.bbci.co.uk/news/uk/rss.xml",
+]
+
+# HN Algolia search queries - tuned to the niche: math beating the lottery,
+# hackers making money, loopholes exploited. Each returns scored, dated stories.
+HN_SEARCH_QUERIES = [
+    "lottery math",
+    "lottery loophole",
+    "lottery jackpot mathematics",
+    "won the lottery system",
+    "card counting blackjack",
+    "casino exploit",
+    "gambling system beat",
+    "hacker made millions",
+    "exploit bank millions",
+    "stole millions system",
+    "beat the system loophole",
+    "math professor lottery",
+    "lottery algorithm",
+    "counterfeit scheme",
+    "poker math win",
+    "security flaw millions",
+    "social engineering scam millions",
+    "fraud loophole millions",
+]
+
+# Scoring tiers - strong phrases are worth far more than weak ones
+STRONG_KEYWORDS = [
+    "lottery", "jackpot", "card counting", "blackjack", "casino", "loophole",
+    "exploit", "hacked", "hacker", "million", "millions", "scam", "fraud",
+    "counterfeit", "stole", "heist", "won", "wins", "poker", "gambling",
+    "betting", "math", "mathematician", "algorithm",
+]
+WEAK_KEYWORDS = [
+    "system", "security", "vulnerability", "breach", "hack", "cheat",
+    "bet", "win", "prize", "money", "bank", "scheme",
+]
+# Words that indicate the story is NOT the niche (news-adjacent noise)
+EXCLUDE_WORDS = [
+    "election", "war", "ukraine", "russia", "trump", "biden", "covid",
+    "pandemic", "stocks", "stock market", "nvidia", "iphone", "samsung",
+    "macbook", "playstation", "xbox", "game review", "movie review",
+    "trailer", "tv show", "nba", "nfl", "nhl", "soccer", "football",
+    "cricket", "tennis", "f1", "olympics", "australia election",
+]
+
+def _story_score(title: str, description: str = "") -> int:
+    """Score a story by how strongly it matches the niche."""
+    text = f"{title} {description}".lower()
+    if any(w in text for w in EXCLUDE_WORDS):
+        return 0
+    score = 0
+    for kw in STRONG_KEYWORDS:
+        if kw in text:
+            score += 2
+    for kw in WEAK_KEYWORDS:
+        if kw in text:
+            score += 1
+    return score
+
+def _fetch_hn_algolia(query: str) -> list[dict]:
+    """Search HN Algolia for niche stories. Returns [{title, link, description, score, date}]."""
+    try:
+        ssl_ctx = ssl._create_unverified_context()
+        q = urllib.parse.quote(query)
+        url = (f"https://hn.algolia.com/api/v1/search?query={q}&tags=story"
+               f"&hitsPerPage=15&numericFilters=points%3E20")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 SplitNode/1.0"})
+        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as r:
+            data = json.loads(r.read())
+        items = []
+        for h in data.get("hits", []):
+            title = h.get("title", "")
+            link = h.get("url", "")
+            if not title or not link:
+                continue
+            points = h.get("points", 0)
+            comments = h.get("num_comments", 0)
+            created = h.get("created_at", "")[:10]
+            desc = f"points {points}, comments {comments}, {created}"
+            items.append({
+                "title": title,
+                "link": link,
+                "description": desc,
+                "score": _story_score(title),
+                "hn_points": points,
+            })
+        return items
+    except Exception as e:
+        print(f"  [RSS] HN algolia failed ({query}): {str(e)[:50]}")
+        return []
+
+# Render style base - 3D animation / Unreal Engine / Metahuman with real faces
+RENDER_STYLE = (
+    "Realistic 3D render style, photorealistic human character with perfect anatomy, "
+    "realistic body proportions, detailed natural skin with visible pores and "
+    "subsurface scattering, lifelike expressive eyes, realistic hair, high-fidelity "
+    "Unreal Engine 5 Metahuman-quality 3D render, cinematic lighting, moody atmosphere, "
+    "dark color grade, film grain, high detail, 8k, dramatic documentary recreation"
+)
+
+# Camera logic per the documentary shot-list framework
+CAMERA_LOGIC = """
+DOCUMENTARY CAMERA LOGIC - shot variety by wideness and angle:
+- EWS (Extreme Wide Shot): vast expansive view, entire landscape/exterior. Sets scale and isolation.
+- WS (Wide Shot / Establishing): full body of subject + environment context. Introduces location, character-to-environment space.
+- MS (Medium Shot): waist-up framing. Neutral baseline for interaction, gestures, action.
+- CU (Close-Up): head and shoulders. Raw emotion, intense moments.
+- ECU (Extreme Close-Up): tight focus on a feature or object (hands, tools, documents, money). Key narrative details.
+- Eye-Level: neutral, honest, direct.
+- Low-Angle: camera looks up, subject feels powerful/authoritative.
+- High-Angle: camera looks down, subject feels vulnerable/small.
+- Over-the-Shoulder (OTS): past a subject's shoulder, anchors conversational/confrontational context.
+- From Behind: watching the subject act, mystery/anticipation.
+- Side-On: profile view of the action.
+Vary the shots across the episode - do not repeat the same framing twice in a row.
+"""
+
+# Cinematic SFX library - pre-analyzed: build (attack start), hit (peak), decay (tail end)
+SFX_LIBRARY = {
+    "mixkit-big-cinematic-impact-788.mp3": {"dur": 7.94, "build": 1.9, "hit": 2.15, "decay": 3.2, "desc": "big cinematic impact"},
+    "mixkit-cinematic-mystery-heartbeat-transition-492.wav": {"dur": 67.27, "build": 0.0, "hit": 37.7, "decay": 56.65, "desc": "mystery heartbeat transition"},
+    "mixkit-cinematic-trailer-riser-790.wav": {"dur": 2.57, "build": 1.95, "hit": 2.5, "decay": 2.5, "desc": "trailer riser (builds up)"},
+    "mixkit-cinematic-transition-swoosh-heartbeat-trailer-488.wav": {"dur": 8.11, "build": 0.6, "hit": 3.45, "decay": 3.6, "desc": "transition swoosh + heartbeat"},
+    "mixkit-cinematic-tunnel-reverb-woosh-1486.wav": {"dur": 6.75, "build": 0.4, "hit": 0.6, "decay": 3.0, "desc": "tunnel reverb woosh"},
+    "mixkit-cinematic-whoosh-deep-impact-1143.mp3": {"dur": 4.08, "build": 0.35, "hit": 0.55, "decay": 1.1, "desc": "whoosh deep impact"},
+    "mixkit-cinematic-whoosh-fast-transition-1492.wav": {"dur": 1.33, "build": 0.9, "hit": 1.05, "decay": 1.25, "desc": "fast whoosh transition"},
+    "mixkit-epic-orchestra-transition-2290.wav": {"dur": 7.12, "build": 0.0, "hit": 1.1, "decay": 3.15, "desc": "epic orchestra transition"},
+    "mixkit-glitchy-cinematic-suspense-hit-679.wav": {"dur": 13.33, "build": 0.1, "hit": 0.1, "decay": 6.05, "desc": "glitchy suspense hit"},
+    "mixkit-magic-sparkle-whoosh-2350.wav": {"dur": 3.5, "build": 0.1, "hit": 0.45, "decay": 1.25, "desc": "magic sparkle whoosh"},
+    "mixkit-reverse-cinematic-impact-trailer-784.wav": {"dur": 10.08, "build": 0.1, "hit": 0.1, "decay": 2.65, "desc": "reverse cinematic impact"},
+    "mixkit-short-space-stutter-intro-riser-1144.mp3": {"dur": 6.56, "build": 2.6, "hit": 6.25, "decay": 6.5, "desc": "space stutter riser (slow build)"},
+}
+
+# Music library - tone-tagged
+MUSIC_LIBRARY = {
+    "suspense": [
+        "music-leberch-suspense-511168.mp3",
+        "music-leberch-suspense-516354.mp3",
+    ],
+    "triumphant": [
+        "music-kulakovka-triumphant-276654.mp3",
+        "music-hot_dope-winning-elevation-111355.mp3",
+        "music-paulyudin-cinematic-hero-162489.mp3",
+    ],
+}
+
+# Mix levels (dB)
+VOICE_DB = 0.0
+MUSIC_DB = -18.0
+SFX_DB = -14.0
+
+# Discord announcement bot
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
+DISCORD_ANNOUNCE_CHANNELS = [
+    "1532603687619264512",
+    "1532603486829547680",
+]
+
+# -- State helpers ---------------------------------------------------
+
+def _load_used_articles() -> set:
+    if USED_ARTICLES_FILE.exists():
+        try:
+            return set(json.loads(USED_ARTICLES_FILE.read_text()))
+        except Exception:
+            pass
+    return set()
+
+def _save_used_article(url: str):
+    used = _load_used_articles()
+    used.add(url)
+    USED_ARTICLES_FILE.write_text(json.dumps(list(used), indent=2))
+
+def _load_episode_num() -> int:
+    if EPISODE_COUNTER_FILE.exists():
+        try:
+            return int(EPISODE_COUNTER_FILE.read_text().strip() or "0")
+        except Exception:
+            pass
+    return 0
+
+def _fmt_time(seconds: float) -> str:
+    if seconds < 0:
+        return "0:00"
+    total_secs = int(round(seconds))
+    mins = total_secs // 60
+    secs = total_secs % 60
+    if mins >= 60:
+        hrs = mins // 60
+        mins = mins % 60
+        return f"{hrs}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
+
+def _get_audio_duration(path: str) -> float:
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=15)
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
+
+# -- RSS -------------------------------------------------------------
+
+def _fetch_rss_feed(feed_url: str) -> list[dict]:
+    print(f"  [RSS] {feed_url}")
+    try:
+        ssl_ctx = ssl._create_unverified_context()
+        req = urllib.request.Request(feed_url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as r:
+            raw = r.read()
+        root = ET.fromstring(raw)
+        items = []
+        for item in root.iter("item"):
+            title = item.findtext("title", "")
+            link = item.findtext("link", "")
+            desc = item.findtext("description", "")
+            if title and link:
+                items.append({"title": title, "link": link, "description": desc})
+        if not items:
+            for entry in root.iter("{http://www.w3.org/2005/Atom}entry"):
+                title_el = entry.find("{http://www.w3.org/2005/Atom}title")
+                link_el = entry.find("{http://www.w3.org/2005/Atom}link")
+                title = title_el.text if title_el is not None else ""
+                link = link_el.get("href", "") if link_el is not None else ""
+                if title and link:
+                    items.append({"title": title, "link": link, "description": ""})
+        return items
+    except Exception as e:
+        print(f"  [RSS] failed: {str(e)[:60]}")
+        return []
+
+def _collect_candidate_stories(used: set, skip: set) -> list[dict]:
+    """Find niche stories. Primary: HN Algolia search (scored, curated queries).
+    Fallback: RSS feed keyword scan. used = made episodes, skip = rejected this session."""
+    matches = []
+    seen_links = set()
+
+    # -- Primary: HN Algolia niche search --
+    queries = HN_SEARCH_QUERIES[:]
+    random.shuffle(queries)
+    for query in queries:
+        items = _fetch_hn_algolia(query)
+        for it in items:
+            if it["link"] in used or it["link"] in skip or it["link"] in seen_links:
+                continue
+            if it["score"] < 4:  # needs at least 2 strong keyword hits
+                continue
+            seen_links.add(it["link"])
+            matches.append(it)
+        if len(matches) >= 10:
+            break
+        time.sleep(0.4)
+
+    # Sort by score (strongest niche match first), tiebreak by HN points
+    matches.sort(key=lambda x: (x.get("score", 0), x.get("hn_points", 0)), reverse=True)
+
+    # -- Fallback: RSS feeds if Algolia gave nothing usable --
+    if not matches:
+        print("  [RSS] HN Algolia found nothing, scanning feeds...")
+        feeds = RSS_FEEDS[:]
+        random.shuffle(feeds)
+        for feed_url in feeds:
+            items = _fetch_rss_feed(feed_url)
+            for it in items:
+                if it["link"] in used or it["link"] in skip:
+                    continue
+                text = f"{it['title']} {it['description']}".lower()
+                score = _story_score(it["title"], it["description"])
+                if score >= 3:
+                    it["score"] = score
+                    matches.append(it)
+            if len(matches) >= 8:
+                break
+            time.sleep(0.3)
+        matches.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return matches
+
+
+def _pick_story() -> tuple[str, str]:
+    """Pick a story with user confirmation. Asks Y/n per candidate;
+    re-polls RSS when the candidate pool runs out."""
+    used = _load_used_articles()
+    rejected = set()  # candidates the user said no to this session
+    pool: list[dict] = []
+    pool_idx = 0
+    rounds = 0
+
+    print("\n[RSS] Scraping feeds for a 'beat the system' story...")
+    pool = _collect_candidate_stories(used, rejected)
+    if not pool:
+        print("  [FAIL] No articles found at all")
+        return ("", "")
+    print(f"  [RSS] {len(pool)} candidate stories found\n")
+
+    while True:
+        # Pool exhausted -> re-poll RSS for fresh candidates
+        if pool_idx >= len(pool):
+            rounds += 1
+            if rounds >= 6:
+                print("  [FAIL] Ran out of stories after 6 re-polls. Try again later.")
+                return ("", "")
+            print(f"\n  [RSS] Pool exhausted ({len(pool)} candidates). Re-polling feeds...")
+            time.sleep(2)
+            pool = _collect_candidate_stories(used, rejected)
+            pool_idx = 0
+            if not pool:
+                print("  [FAIL] No fresh articles found on re-poll")
+                return ("", "")
+
+        chosen = pool[pool_idx]
+        pool_idx += 1
+        print(f"  {'='*60}")
+        print(f"  CANDIDATE STORY:")
+        print(f"    {chosen['title']}")
+        print(f"    {chosen['link']}")
+        print(f"  {'='*60}")
+        resp = input("  Use this topic? (Y/n/q): ").strip().lower()
+        if resp in ("q", "quit"):
+            print("  [SKIP] Aborted by user")
+            return ("", "")
+        if resp in ("", "y", "yes"):
+            _save_used_article(chosen["link"])
+            print(f"  [OK] Story selected: {chosen['title'][:70]}")
+            return (chosen["link"], chosen["title"])
+        # User said no - mark rejected so re-polls skip it
+        rejected.add(chosen["link"])
+        print("  [NEXT] Trying another story...")
+
+# -- Article ---------------------------------------------------------
+
+# Boilerplate / site-chrome patterns that are NOT part of the article story
+JUNK_PATTERNS = [
+    r'\b(cookie (policy|notice|consent|banner|preferences)|accept (all )?cookies|we use cookies)\b',
+    r'\bsubscribe\b', r'\bnewsletter\b', r'\bsign\s?up\b', r'\blog\s?in\b', r'\bsign\s?in\b',
+    r'\bcreate (a|an) (free )?account\b', r'\balready (have|a) (an )?account\b',
+    r'\b(privacy policy|terms of (service|use|conditions))\b',
+    r'\bsponsor(ed)?\s*(content|post|story)?\b', r'\badvertisement\b',
+    r'\b(related (articles?|stories?|posts?|content)|you might also like|you may also like|more (from|on|like this))\b',
+    r'\brecommended for you\b', r'\btrending (now|stories)?\b', r'\bmost (read|popular|viewed)\b',
+    r'\bread more\b', r'\bcontinue reading\b', r'\bshare (this|the) (article|story|post)\b',
+    r'\bfollow (us|her|him|them) on\b',
+    r'\b(download (the|our) app|get the app|available on (ios|android|the app store|google play))\b',
+    r'\b(unlimited access|digital access|subscription required|become a (member|subscriber)|already a subscriber|subscribe now)\b',
+    r'\b(paywall|premium (content|article|subscriber))\b',
+    r'\b(all rights reserved)\b', r'\b©\b', r'\bclick here\b',
+    r'\bopens? in a new (tab|window)\b', r'\b(contact us|send us a tip|email us|feedback|corrections?)\b',
+    r'\b(photo credits?|image credits?|credit:)\b', r'\b(editor\s?\'?s? note|disclosure)\b',
+]
+
+def _is_junk_paragraph(text: str) -> bool:
+    """Heuristic junk filter: boilerplate, nav, promo, ads, contact noise, bylines."""
+    low = text.lower()
+    # Legacy hard-blockers (CSS/JS fragments + newsletter/consent noise)
+    if any(skip in low for skip in [
+        'url(', '.css', 'javascript', '{', ';}', 'no-repeat',
+        'margin:', 'padding:', 'border:', 'width:', 'height:'
+    ]):
+        return True
+    for pat in JUNK_PATTERNS:
+        if re.search(pat, low):
+            return True
+    # All-caps promo line (SHOUTING AD)
+    if len(text) > 40 and text == text.upper():
+        return True
+    # Author byline ("By John Smith") or bio ("John Smith is a reporter at X")
+    if re.match(r'^by\s+[A-Z][a-zA-Z\'\-]+(\s+[A-Z][a-zA-Z\'\-]+){0,3}\.?$', text):
+        return True
+    if re.search(r'\bis (a|an|the)?\s*(staff|senior|contributing|freelance|award-winning)?\s*(writer|reporter|journalist|editor|correspondent|columnist)\s+(at|for|with)\b', low):
+        return True
+    # Contact info / email addresses
+    if re.search(r'\b[\w.+-]+@[\w-]+\.[\w.]+\b', text):
+        return True
+    # Too-short fragment (nav labels, breadcrumbs)
+    if len(text) < 20:
+        return True
+    return False
+
+def _llm_score_batch(messages: list[dict], max_tokens: int = 300) -> str:
+    """Minimal LM Studio call for relevance scoring (no stop tokens, low temp)."""
+    data = json.dumps({
+        "model": "gemma-4-e4b-uncensored-hauhaucs-aggressive",
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.2,
+        "stop": [],
+    }).encode()
+    req = urllib.request.Request(LM_STUDIO_URL, data=data,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            result = json.loads(r.read())
+        return result["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"  [FILTER] LLM scoring failed: {e}")
+        return ""
+
+def _rate_paragraph_relevance(topic: str, paragraphs: list[str]) -> list[str]:
+    """
+    LLM rates each paragraph/segment 0-10 against the overall topic.
+    Discards items scoring <= 4 (off-topic junk that slipped past the
+    heuristic filter: ads, site self-promo, unrelated asides).
+    Fail-open: on API/parse failure everything is kept.
+    """
+    if not paragraphs:
+        return []
+    anchor = re.sub(r'\s+', ' ', topic).strip()
+    if anchor.lower().startswith('http'):
+        # Bare URL is a useless anchor; use the lede paragraph instead
+        anchor = re.sub(r'\s+', ' ', paragraphs[0]).strip()[:200] if paragraphs else ''
+    if len(anchor) < 20:
+        print("  [FILTER] Topic anchor too short, skipping LLM relevance rating")
+        return paragraphs
+
+    print(f"  [FILTER] Rating {len(paragraphs)} paragraphs/segments for relevance to topic...")
+    kept = []
+    BATCH = 20
+    for start in range(0, len(paragraphs), BATCH):
+        batch = paragraphs[start:start + BATCH]
+        numbered = "\n".join(
+            f"{i}. {re.sub(chr(10), ' ', p)[:400]}" for i, p in enumerate(batch, start=1)
+        )
+        msg = [
+            {"role": "system", "content": (
+                "You are a strict content relevance filter. Rate how relevant each "
+                "numbered paragraph is to the TOPIC on a scale of 0 to 10.\n"
+                "0-4 = off-topic junk (ads, site promos, navigation, unrelated asides, "
+                "boilerplate). 5-10 = genuinely about the topic.\n"
+                "Reply with EXACTLY one line per paragraph in this format: NUMBER|SCORE\n"
+                "Example:\n1|8\n2|2\n3|7"
+            )},
+            {"role": "user", "content": f"TOPIC: {anchor}\n\n{numbered}"}
+        ]
+        text = _llm_score_batch(msg)
+        scores = {}
+        for line in text.splitlines():
+            m = re.match(r'^\s*(\d{1,3})\s*[|:]\s*(\d{1,2})\s*$', line.strip())
+            if m:
+                idx, score = int(m.group(1)), int(m.group(2))
+                if 1 <= idx <= len(batch) and 0 <= score <= 10:
+                    scores[idx] = score
+        for i, p in enumerate(batch, start=1):
+            score = scores.get(i, 5)  # unparseable -> keep (fail-open)
+            if score <= 4:
+                print(f"  [FILTER] DISCARD ({score}/10): {re.sub(chr(10), ' ', p)[:80]}...")
+            else:
+                kept.append(p)
+    print(f"  [FILTER] Kept {len(kept)}/{len(paragraphs)} paragraphs/segments")
+    return kept
+
+def fetch_article_paragraphs(url: str) -> list[str]:
+    """Download a web article, extract <p> tags for clean paragraphs.
+
+    Hardened injection: strips nav/footer/aside/script containers before
+    extraction, filters boilerplate/promo junk, dedupes repeats, and caps
+    the result so off-topic webpage chrome never reaches the narration LLM.
+    """
+    print(f"  [ARTICLE] Fetching: {url}")
+    try:
+        ssl_ctx = ssl._create_unverified_context()
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as r:
+            html = r.read().decode("utf-8", errors="replace")
+        # Strip non-article containers BEFORE <p> extraction (nav, footer,
+        # sidebar, scripts, forms carry most of the junk that sneaks in)
+        html = re.sub(
+            r'<(script|style|nav|footer|header|aside|form|figure|iframe)[^>]*>.*?</\1>',
+            ' ', html, flags=re.DOTALL | re.IGNORECASE
+        )
+        paragraphs = re.findall(r'<p[^>]*>(.*?)</p>', html, re.DOTALL | re.IGNORECASE)
+        clean = []
+        seen = set()
+        for p in paragraphs:
+            text = re.sub(r'<[^>]+>', '', p)
+            text = text.strip()
+            text = text.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+            text = text.replace('&quot;', '"').replace('&#39;', "'").replace('&#8217;', "'")
+            text = text.replace('&nbsp;', ' ').replace('&#8211;', '-').replace('&#8212;', '--')
+            text = re.sub(r'\s+', ' ', text).strip()
+            if len(text) <= 100:
+                continue
+            if _is_junk_paragraph(text):
+                continue
+            # Dedupe repeated boilerplate (cookie banners, promos between paras)
+            norm = re.sub(r'[^a-z0-9]+', '', text.lower())
+            if norm in seen:
+                continue
+            seen.add(norm)
+            clean.append(text)
+        if clean:
+            print(f"  [OK] {len(clean)} paragraphs (junk-filtered)")
+            return clean[:40]  # cap so LLM relevance rating stays cheap
+        body = re.search(r'<body[^>]*>(.*?)</body>', html, re.DOTALL | re.IGNORECASE)
+        if body:
+            text = re.sub(r'<[^>]+>', ' ', body.group(1))
+            text = re.sub(r'\s+', ' ', text).strip()
+            chunks = [s.strip() for s in text.split('. ') if len(s.strip()) > 100 and not _is_junk_paragraph(s.strip())]
+            print(f"  [OK] Body fallback: {len(chunks)} chunks")
+            return chunks[:20]
+        print("  [WARN] Could not extract article")
+        return []
+    except Exception as e:
+        print(f"  [FAIL] Fetch failed: {e}")
+        return []
+
+# -- LLM (LM Studio) -------------------------------------------------
+
+def _llm_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -> str:
+    data = json.dumps({
+        "model": "gemma-4-e4b-uncensored-hauhaucs-aggressive",
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": temp,
+    }).encode()
+    req = urllib.request.Request(LM_STUDIO_URL, data=data,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=180) as r:
+            result = json.loads(r.read())
+        return result["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print(f"  [LLM error] {e}")
+        return ""
+
+# -- Stage 1: Narration script ---------------------------------------
+
+TARGET_NARRATION_PARAS = 90
+
+NARRATION_SYSTEM_PROMPT = (
+    "You are a documentary scriptwriter for a YouTube channel called SPLIT NODE. "
+    "The channel tells true stories of ordinary people who used their skills, brains, "
+    "or nerve to beat the system - hackers, lottery mathematicians, card counters, "
+    "scam-baiters, people who found legal loopholes and won the game of life. "
+    "\n\n"
+    "I will give you an excerpt of a news article plus story context. Your job: EXPAND "
+    "it into a gripping documentary narration in the style of true-crime documentaries "
+    "(like FERN or Black Files). Write in the present tense, cinematic, dramatic - build "
+    "suspense, then resolve triumphantly near the end. You may add dramatic framing, "
+    "sensory detail, and storytelling flourishes, but NEVER invent facts that contradict "
+    "the article. Every narration paragraph must be 2-4 sentences and cover a DIFFERENT "
+    "beat - do not repeat ideas across paragraphs, and never repeat beats I tell you "
+    "are already covered."
+    "\n\n"
+    "When I ask you to 'generate exactly N narration paragraphs based on this context', "
+    "produce EXACTLY N paragraphs, expanding the source material with cinematic detail "
+    "and drama."
+)
+
+def _build_narration_script(paragraphs: list[str]) -> list[str]:
+    """Stage 1: expand the article into ~TARGET_NARRATION_PARAS narration paragraphs.
+
+    Each article paragraph is expanded into X narration paragraphs where
+    X = round(TARGET / len(article_paragraphs)), so the total lands as close
+    to the target as possible even when the article has fewer paragraphs.
+    """
+    print("\n[LLM] Stage 1: writing documentary narration script...")
+    n_art = max(len(paragraphs), 1)
+    per_para = max(2, round(TARGET_NARRATION_PARAS / n_art))
+    print(f"  [LLM] Target {TARGET_NARRATION_PARAS} narration paragraphs "
+          f"({per_para} per article paragraph x {n_art} article paragraphs)")
+    narration_paras = []
+    covered = []  # rolling summary of already-written beats (dedupe guard)
+    for i, _para in enumerate(paragraphs):
+        lo, hi = max(i - 1, 0), min(i + 2, len(paragraphs))
+        ctx = "\n\n".join(paragraphs[lo:hi])
+        user = (
+            f"STORY CONTEXT (article excerpt {lo+1}-{hi} of {len(paragraphs)}):\n{ctx}\n\n"
+            f"Generate exactly {per_para} narration paragraphs based on this context. "
+            f"Focus on the facts and events in this excerpt - expand them with "
+            f"cinematic detail, sensory description and dramatic tension."
+        )
+        if covered:
+            user += (
+                "\n\nALREADY COVERED in earlier narration - do NOT repeat these beats:\n"
+                + "\n".join(f"- {c}" for c in covered[-2:])
+            )
+        text = _llm_chat([
+            {"role": "system", "content": NARRATION_SYSTEM_PROMPT},
+            {"role": "user", "content": user}
+        ], max_tokens=min(1600, 250 + per_para * 120), temp=0.85)
+        parts = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        if len(parts) < 2 and "\n" in text:
+            parts = [p.strip() for p in text.split("\n") if len(p.strip()) > 40]
+        added = 0
+        for p in parts:
+            p_clean = re.sub(r"^\s*[-*#]+\s*", "", p).strip()
+            if len(p_clean) > 40:
+                narration_paras.append(p_clean)
+                added += 1
+        if added:
+            covered.append(f"({i+1}/{n_art}) {narration_paras[-1][:110]}")
+        time.sleep(0.3)
+
+    if not narration_paras:
+        print("  [LLM] Narration failed, using article paragraphs directly")
+        narration_paras = [re.sub(r"\s+", " ", p).strip()[:500]
+                           for p in paragraphs[:TARGET_NARRATION_PARAS]]
+
+    print(f"  [LLM] Narration script: {len(narration_paras)} paragraphs")
+    for i, p in enumerate(narration_paras):
+        print(f"    {i+1}. {p[:70]}...")
+    return narration_paras
+
+# -- Stage 2: Shot list ----------------------------------------------
+
+SHOT_SYSTEM_PROMPT = (
+    "You are a shot-list director for SPLIT NODE, a 3D documentary channel "
+    "(Unreal Engine 5 / Metahuman style, photorealistic 3D render characters with "
+    "perfect anatomy and realistic detailed faces). "
+    "The visual style: every person in the story is a photorealistic 3D character with "
+    "perfect anatomy, realistic detailed skin, styled hair, and clothing appropriate to the scene. "
+    "Each character must be identified by NAME (use the real name from the story, or "
+    "a clearly consistent invented name if the story doesn't give one - and reuse the "
+    "exact same name every time that person appears). "
+    "The scenes must show the characters actually DOING something - an action that "
+    "moves the story forward. Never static portraits. Full scenes based on the actions "
+    "they take in the narration.\n\n"
+    + CAMERA_LOGIC +
+    "\nI will give you one paragraph of the narration script. Create ONE shot for it. "
+    "Respond with EXACTLY ONE LINE of 7 pipe-separated fields, in this exact order, "
+    "with NO labels, NO extra text, NO line breaks:\n"
+    "<shot type EWS/WS/MS/CU/ECU> | <camera angle: eye-level, low-angle, high-angle, over-the-shoulder, from-behind, side-on> | "
+    "<character NAME or NONE> | <character role, e.g. lottery mathematician> | "
+    "<full scene description: setting, what the character is DOING, props, lighting, camera framing. 2-4 sentences, action-focused> | "
+    "<SFX filename or NONE> | <suspense | neutral | triumphant>\n"
+    "Example line:\n"
+    "MS | low-angle | Stefan Mandel | lottery mathematician | Stefan sits at a candlelit desk in a cramped 1980s Bucharest apartment, hunched over a spreadsheet of every number combination, a worn calculator in hand. | mixkit-cinematic-trailer-riser-790.wav | suspense\n"
+    "SFX choices: mixkit-big-cinematic-impact-788.mp3, mixkit-cinematic-mystery-heartbeat-transition-492.wav, "
+    "mixkit-cinematic-trailer-riser-790.wav, mixkit-cinematic-transition-swoosh-heartbeat-trailer-488.wav, "
+    "mixkit-cinematic-tunnel-reverb-woosh-1486.wav, mixkit-cinematic-whoosh-deep-impact-1143.mp3, "
+    "mixkit-cinematic-whoosh-fast-transition-1492.wav, mixkit-epic-orchestra-transition-2290.wav, "
+    "mixkit-glitchy-cinematic-suspense-hit-679.wav, mixkit-magic-sparkle-whoosh-2350.wav, "
+    "mixkit-reverse-cinematic-impact-trailer-784.wav, mixkit-short-space-stutter-intro-riser-1144.mp3\n"
+    "TONE guidance: suspense during tense/risky parts, triumphant near the end when they win."
+)
+
+def _parse_shot_response(text: str) -> dict:
+    """Parse the 7-field pipe format. Tolerant of old labeled formats too.
+    Format: shot_type | angle | character | role | scene | sfx | tone"""
+    text = text.strip().strip('"\'')
+    # If the model still used labeled format, convert: pull each label's value
+    if re.search(r"(?:SHOT|CHARACTER|SCENE|SFX|TONE)\s*:", text):
+        labels = ["SHOT", "CHARACTER", "SCENE", "SFX", "TONE"]
+        positions = []
+        for lab in labels:
+            for m in re.finditer(rf"{lab}\s*:", text):
+                positions.append((m.start(), lab))
+        positions.sort()
+        vals = {}
+        for i, (pos, lab) in enumerate(positions):
+            end = positions[i + 1][0] if i + 1 < len(positions) else len(text)
+            raw = text[pos:end]
+            val = re.sub(rf"^{lab}\s*:\s*", "", raw, flags=re.IGNORECASE).strip()
+            val = re.sub(r"\s*\|\s*(?:SHOT|CHARACTER|SCENE|SFX|TONE)\s*:.*$", "", val,
+                         flags=re.IGNORECASE).strip()
+            val = val.strip("|").strip()
+            vals[lab] = val
+        shot_line = vals.get("SHOT", "")
+        segs = [s.strip() for s in shot_line.split("|")]
+        segs = [s for s in segs if not re.match(r"(?:SHOT|CHARACTER|SCENE|SFX|TONE)\s*:", s)]
+        char_line = vals.get("CHARACTER", "")
+        if "|" in char_line:
+            cname, crole = [s.strip() for s in char_line.split("|", 1)]
+        else:
+            cname, crole = char_line, ""
+        return {
+            "shot_type": segs[0] if segs else "",
+            "angle": segs[1] if len(segs) > 1 else "",
+            "character": cname,
+            "character_role": crole,
+            "scene": vals.get("SCENE", ""),
+            "sfx": vals.get("SFX", "NONE").lower(),
+            "tone": vals.get("TONE", "neutral").lower(),
+        }
+
+    # Clean pipe format: split on | keeping max 7 parts (scene may contain |)
+    parts = [p.strip() for p in text.split("|")]
+    if len(parts) < 5:
+        # Too few fields - bail with whatever we have
+        return {
+            "shot_type": parts[0] if parts else "",
+            "angle": parts[1] if len(parts) > 1 else "",
+            "character": parts[2] if len(parts) > 2 else "",
+            "character_role": parts[3] if len(parts) > 3 else "",
+            "scene": "",
+            "sfx": "NONE",
+            "tone": "neutral",
+        }
+    # Fields 0-3 are fixed; scene = join of middle fields; sfx/tone = last two
+    shot_type = parts[0]
+    angle = parts[1]
+    character = parts[2]
+    role = parts[3]
+    scene = parts[4] if len(parts) > 4 else ""
+    sfx = parts[-2].lower() if len(parts) >= 6 else "NONE"
+    tone = parts[-1].lower() if len(parts) >= 7 else "neutral"
+    # If the model wrote fewer fields, last two might be scene+sfx etc - keep simple
+    return {
+        "shot_type": shot_type,
+        "angle": angle,
+        "character": character,
+        "character_role": role,
+        "scene": scene,
+        "sfx": sfx,
+        "tone": tone,
+    }
+
+
+def _build_shot_list(narration_paras: list[str]) -> list[dict]:
+    """Stage 2: for each narration paragraph, generate a shot entry."""
+    print("\n[LLM] Stage 2: building shot list from narration...")
+    shots = []
+    for i, para in enumerate(narration_paras):
+        if len(shots) >= 120:
+            break
+        text = _llm_chat([
+            {"role": "system", "content": SHOT_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"NARRATION PARAGRAPH {i+1} of {len(narration_paras)}:\n{para[:1200]}\n\n"
+                f"Create the shot for this paragraph."
+            )}
+        ], max_tokens=400, temp=0.8)
+
+        parsed = _parse_shot_response(text)
+        shot_type = parsed.get("shot_type", "")
+        angle = parsed.get("angle", "")
+        character = parsed.get("character", "")
+        character_role = parsed.get("character_role", "")
+        scene = parsed.get("scene", "")
+        sfx = parsed.get("sfx", "NONE")
+        tone = parsed.get("tone", "neutral")
+
+        # Normalize character name: strip role-y artifacts, keep the name itself
+        character = character.strip().strip(".").strip()
+        if character.upper() in ("NONE", "N/A", "NOBODY", "NO ONE", "-", ""):
+            character = "NONE"
+        # If role field is absurdly long, the model squeezed scene text into it -
+        # salvage: if scene is empty, use the tail of the long role as the scene
+        if len(character_role) > 120:
+            if not scene:
+                scene = character_role
+            character_role = "character in the story"
+        # Validate SFX
+        if sfx not in SFX_LIBRARY:
+            sfx = "NONE"
+        # Don't repeat the same SFX in consecutive shots
+        if shots and shots[-1].get("sfx") == sfx and sfx != "NONE":
+            sfx = "NONE"
+        if tone not in ("suspense", "neutral", "triumphant"):
+            tone = "neutral"
+        if not scene:
+            print(f"  [LLM] Shot {i+1}: parse failed, skipping ({text[:60]!r})")
+            continue
+
+        shots.append({
+            "narration": para,
+            "shot_type": shot_type,
+            "angle": angle,
+            "character": character,
+            "character_role": character_role,
+            "scene": scene,
+            "sfx": sfx,
+            "tone": tone,
+        })
+        print(f"  [LLM] Shot {len(shots)}: [{shot_type}|{angle}] char={character} {scene[:50]}... (sfx={sfx}, tone={tone})")
+        time.sleep(0.3)
+
+    if not shots:
+        print("  [LLM] Shot list failed, building fallback from narration")
+        for i, para in enumerate(narration_paras[:12]):
+            shots.append({
+                "narration": para,
+                "shot_type": ["EWS", "WS", "MS", "CU", "ECU"][i % 5],
+                "angle": ["eye-level", "low-angle", "high-angle", "over-the-shoulder", "from-behind"][i % 5],
+                "character": "NONE" if i % 4 == 0 else f"Character{i}",
+                "character_role": "protagonist",
+                "scene": f"3D animated character in a dark cinematic documentary scene, dramatic lighting, {RENDER_STYLE}",
+                "sfx": "NONE",
+                "tone": "suspense" if i < len(narration_paras) - 2 else "triumphant",
+            })
+    shots = _merge_character_aliases(shots)
+    print(f"  [LLM] Shot list complete: {len(shots)} shots")
+    return shots
+
+def _merge_character_aliases(shots: list[dict]) -> list[dict]:
+    """Collapse character aliases onto their full name.
+
+    Articles often reference someone by surname or first name only
+    ('Irwin' for 'Jessy Irwin'), which makes the pipeline build TWO character
+    sheets for the same person. When one name is a strict token-subset of
+    another, every reference is remapped to the fuller name.
+    """
+    names = []
+    for s in shots:
+        c = (s.get("character") or "NONE").strip()
+        if c.upper() in ("NONE", "N/A", "NOBODY", "NO ONE", "-", ""):
+            continue
+        if c not in names:
+            names.append(c)
+    if len(names) < 2:
+        return shots
+    canonical = {}
+    for name in names:
+        canon = name
+        n_toks = set(re.findall(r"[A-Za-z']+", name.lower()))
+        for other in names:
+            if other == name:
+                continue
+            o_toks = set(re.findall(r"[A-Za-z']+", other.lower()))
+            if n_toks and o_toks and n_toks < o_toks:
+                canon = other  # first fuller name wins
+                break
+        canonical[name] = canon
+    changed = 0
+    for s in shots:
+        c = s.get("character", "NONE")
+        target = canonical.get(c)
+        if target and target != c:
+            s["character"] = target
+            changed += 1
+    if changed:
+        merges = ", ".join(f"{k}->{v}" for k, v in canonical.items() if k != v)
+        print(f"  [LLM] Character alias merge: {changed} shot(s) remapped ({merges})")
+    return shots
+
+# -- Stage 2b: Character sheets --------------------------------------
+
+CHARACTER_SHEET_SYSTEM_PROMPT = (
+    "You are a character designer for SPLIT NODE, a 3D documentary channel "
+    "(Unreal Engine 5 / Metahuman photorealistic 3D render style, perfect anatomy, "
+    "realistic skin). You create PRECISE, REPEATABLE text character "
+    "sheets so an AI image generator renders the exact same character every time. "
+    "I will give you a character's name, their role in the story, and story context. "
+    "\n\n"
+    "Write a PERFECTLY DETAILED, VERY PRECISE character sheet. Every physical detail "
+    "must be locked down so the character looks identical in every shot: face shape, "
+    "skin tone, eye color and shape, nose, mouth, hair (color, style, length, "
+    "texture), body build, height, posture, age, ethnicity, and a complete outfit "
+    "with specific garments, colors, and materials. "
+    "\n\n"
+    "Respond EXACTLY in this format, nothing else:\n"
+    "NAME: <character name>\n"
+    "ROLE: <role in the story>\n"
+    "GENDER: <male/female>\n"
+    "AGE: <age>\n"
+    "BUILD: <height, body type, posture, distinguishing physical traits>\n"
+    "FACE: <face shape, skin tone, eye color+shape, eyebrows, nose, mouth, jaw, any facial hair or marks - highly specific>\n"
+    "HAIR: <color, style, length, texture - highly specific>\n"
+    "OUTFIT: <complete outfit: specific garments, colors, fabrics, fit - highly specific>\n"
+    "FRONT VIEW: <how the character looks from directly in front: full body front, face forward, outfit front - 1-2 sentences>\n"
+    "LEFT VIEW: <how the character looks from the left side/profile: profile silhouette, hair side, outfit side - 1-2 sentences>\n"
+    "RIGHT VIEW: <how the character looks from the right side/profile - 1-2 sentences>\n"
+    "BACK VIEW: <how the character looks from behind: hair back, back of outfit, silhouette - 1-2 sentences>\n"
+    "FULL BODY: <complete canonical description combining everything above into one dense paragraph to prepend to every image prompt>\n"
+)
+
+def _build_character_sheets(shots: list[dict], narration: list[str]) -> dict:
+    """Stage 2b: poll the LLM once per unique character for a precise repeatable sheet."""
+    print("\n[LLM] Stage 2b: building character sheets...")
+    # Collect unique named characters in order of first appearance
+    names = []
+    for s in shots:
+        c = s.get("character", "NONE")
+        if c != "NONE" and c not in names:
+            names.append(c)
+    if not names:
+        print("  [LLM] No named characters found - skipping sheets")
+        return {}
+
+    story_ctx = "\n".join(narration[:30])[:6000]
+    sheets = {}
+    for name in names:
+        role = ""
+        for s in shots:
+            if s.get("character") == name and s.get("character_role"):
+                role = s["character_role"]
+                break
+        text = _llm_chat([
+            {"role": "system", "content": CHARACTER_SHEET_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"CHARACTER: {name}\nROLE: {role or 'character in the story'}\n\n"
+                f"STORY CONTEXT:\n{story_ctx}\n\n"
+                f"Create the precise character sheet for {name}."
+            )}
+        ], max_tokens=900, temp=0.7)
+
+        sheet = {"name": name, "role": role}
+        fields = ["ROLE", "GENDER", "AGE", "BUILD", "FACE", "HAIR", "OUTFIT",
+                  "FRONT VIEW", "LEFT VIEW", "RIGHT VIEW", "BACK VIEW", "FULL BODY"]
+        for f in fields:
+            m = re.search(rf"^{f}:\s*(.+)$", text, re.MULTILINE)
+            if m:
+                sheet[f.lower().replace(" ", "_")] = m.group(1).strip()
+        # FULL BODY fallback: synthesize from parts if missing
+        if not sheet.get("full_body"):
+            parts = [sheet.get("build", ""), sheet.get("face", ""), sheet.get("hair", ""), sheet.get("outfit", "")]
+            sheet["full_body"] = ". ".join(p for p in parts if p)
+        sheets[name] = sheet
+        print(f"  [LLM] Character sheet: {name} (gender={sheet.get('gender','?')}, age={sheet.get('age','?')})")
+        time.sleep(0.3)
+    print(f"  [LLM] Character sheets complete: {len(sheets)} characters")
+    return sheets
+
+def _character_view_block(sheet: dict, angle: str) -> str:
+    """Pick the character description that matches the camera angle.
+    Returns the view-specific paragraph (front/left/right/back) or the full body."""
+    if not sheet:
+        return ""
+    a = (angle or "").lower()
+    if "behind" in a or "back" in a:
+        view = sheet.get("back_view") or sheet.get("full_body", "")
+        label = "seen from behind"
+    elif "side" in a or "profile" in a or "left" in a:
+        view = sheet.get("left_view") or sheet.get("full_body", "")
+        label = "seen from the left side profile"
+    elif "right" in a:
+        view = sheet.get("right_view") or sheet.get("full_body", "")
+        label = "seen from the right side profile"
+    elif "over-the-shoulder" in a or "ots" in a:
+        view = sheet.get("back_view") or sheet.get("full_body", "")
+        label = "seen from over the shoulder (behind)"
+    else:
+        view = sheet.get("front_view") or sheet.get("full_body", "")
+        label = "seen from directly in front"
+    return f"{view} ({label})"
+
+def _character_prompt_block(sheet: dict, angle: str) -> str:
+    """Build the full prepend block for a character in a shot: identity + angle view."""
+    if not sheet:
+        return ""
+    parts = []
+    if sheet.get("gender"):
+        parts.append(f"Gender: {sheet['gender']}")
+    if sheet.get("age"):
+        parts.append(f"Age: {sheet['age']}")
+    if sheet.get("build"):
+        parts.append(f"Build: {sheet['build']}")
+    if sheet.get("face"):
+        parts.append(f"Face: {sheet['face']}")
+    if sheet.get("hair"):
+        parts.append(f"Hair: {sheet['hair']}")
+    if sheet.get("outfit"):
+        parts.append(f"Outfit: {sheet['outfit']}")
+    view = _character_view_block(sheet, angle)
+    if view:
+        parts.append(f"View: {view}")
+    # Full body canonical description last as the anchor
+    if sheet.get("full_body") and len(parts) < 8:
+        parts.append(f"Canonical: {sheet['full_body']}")
+    return " ".join(parts)
+
+# -- RunPod Z-Image-Turbo --------------------------------------------
+
+def _runpod_generate(prompt: str, seed: int, size: str = "1280*720", timeout: int = 240) -> Optional[str]:
+    payload = {
+        "input": {
+            "prompt": prompt,
+            "size": size,
+            "strength": 0.8,
+            "seed": seed,
+            "output_format": "png",
+            "enable_safety_checker": False,
+        }
+    }
+    payload_bytes = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        RUNPOD_ENDPOINT, data=payload_bytes,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {RUNPOD_API_KEY}"},
+        method="POST"
+    )
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                result = json.loads(resp.read().decode())
+            if result.get("status") == "COMPLETED":
+                img_url = result.get("output", {}).get("result", "")
+                if not img_url:
+                    print(f"  [RUNPOD] no result URL (attempt {attempt+1})")
+                    time.sleep(3)
+                    continue
+                out_path = str(SHOTS_DIR / f"shot_{seed}.png")
+                urllib.request.urlretrieve(img_url, out_path)
+                if os.path.getsize(out_path) > 1000:
+                    print(f"  [RUNPOD] OK {os.path.basename(out_path)} ({os.path.getsize(out_path)//1024}KB)")
+                    return out_path
+            elif result.get("status") == "FAILED":
+                print(f"  [RUNPOD] FAILED: {str(result.get('error'))[:120]}")
+                time.sleep(3)
+            else:
+                print(f"  [RUNPOD] status={result.get('status')} (attempt {attempt+1})")
+                time.sleep(3)
+        except Exception as e:
+            print(f"  [RUNPOD] attempt {attempt+1}: {str(e)[:80]}")
+            time.sleep(3)
+    return None
+
+def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = None) -> list[dict]:
+    character_sheets = character_sheets or {}
+    print(f"\n[IMAGES] Generating {len(shots)} 3D shots via RunPod Z-Image-Turbo...")
+    for idx, shot in enumerate(shots):
+        seed = 10000 + idx * 137 + random.randint(0, 999)
+        angle = shot.get("angle", "eye-level")
+        cam_desc = ""
+        if shot.get("shot_type"):
+            cam_desc = f", {shot['shot_type']} framing, {angle} camera angle"
+
+        char_name = shot.get("character", "NONE")
+        sheet = character_sheets.get(char_name) if char_name != "NONE" else None
+        if sheet:
+            char_block = _character_prompt_block(sheet, angle)
+            prompt = (
+                f"{RENDER_STYLE}. {char_block}. {shot['scene']}{cam_desc}, "
+                f"16:9 widescreen cinematic documentary frame"
+            )
+        else:
+            # No character (establishing shot) or sheet missing - plain scene
+            prompt = (
+                f"{RENDER_STYLE}. {shot['scene']}{cam_desc}, "
+                f"16:9 widescreen cinematic documentary frame"
+            )
+        path = _runpod_generate(prompt, seed)
+        shot["seed"] = seed
+        shot["image_path"] = path
+        if path:
+            print(f"  [SHOT {idx+1}/{len(shots)}] image ready (char={char_name})")
+        else:
+            print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED - will use fallback")
+        time.sleep(1)
+    ok = sum(1 for s in shots if s.get("image_path"))
+    print(f"  [IMAGES] {ok}/{len(shots)} images generated")
+    return shots
+
+# -- TTS (PocketTTS built-in male voice, 0dB normalized) -------------
+
+def _pocket_tts_generate(text: str, output_path: str, timeout: int = 180) -> bool:
+    """Generate TTS via PocketTTS HTTP API using built-in male voice (marius)."""
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    import urllib.request as _ur
+    boundary = "----splitnode" + str(int(time.time() * 1000))
+    def _field(name, value):
+        return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
+                f"{value}\r\n").encode()
+    body = (_field("text", text) + _field("voice_url", TTS_VOICE) +
+            f"--{boundary}--\r\n".encode())
+    req = _ur.Request(POCKET_TTS_URL + "/tts", data=body, method="POST", headers={
+        "Content-Type": f"multipart/form-data; boundary={boundary}"
+    })
+    try:
+        with _ur.urlopen(req, timeout=timeout) as r:
+            if r.status != 200:
+                print(f"  [TTS error] HTTP {r.status}")
+                return False
+            data = r.read()
+        if len(data) < 1000:
+            print(f"  [TTS error] output too small: {len(data)}b")
+            return False
+        with open(output_path, "wb") as f:
+            f.write(data)
+        # Verify
+        if not os.path.isfile(output_path) or os.path.getsize(output_path) < 1000:
+            print(f"  [TTS error] output not created: {output_path}")
+            return False
+        return True
+    except Exception as e:
+        print(f"  [TTS error] {e}")
+        return False
+
+def _normalize_voice_0db(wav_path: str) -> str:
+    """Peak-normalize a voice clip to 0 dB. Returns path (in place)."""
+    tmp = wav_path + ".norm.wav"
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-i", wav_path,
+         "-af", "loudnorm=I=-16:TP=0:LRA=11", "-c:a", "pcm_s16le",
+         "-ar", "24000", "-ac", "1", tmp],
+        capture_output=True, text=True, timeout=60)
+    if r.returncode == 0 and os.path.isfile(tmp) and os.path.getsize(tmp) > 1000:
+        os.replace(tmp, wav_path)
+    else:
+        try: os.unlink(tmp)
+        except: pass
+    return wav_path
+
+def _generate_all_tts(shots: list[dict], episode_num: int) -> None:
+    print(f"\n[TTS] Generating {len(shots)} narration clips (built-in male voice: {TTS_VOICE})...")
+    ep_dir = TTS_TEMP / f"ep_{episode_num}"
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    for idx, shot in enumerate(shots):
+        out = str(ep_dir / f"narration_{idx:02d}.wav")
+        ok = _pocket_tts_generate(shot["narration"], out)
+        if ok:
+            _normalize_voice_0db(out)
+            dur = _get_audio_duration(out)
+            print(f"  [TTS {idx+1}/{len(shots)}] {dur:.1f}s (0dB) - {shot['narration'][:50]}...")
+        else:
+            print(f"  [TTS {idx+1}/{len(shots)}] FAILED")
+        shot["tts_path"] = out if ok else None
+        time.sleep(0.5)
+
+# -- Audio mix: voice + music + timecoded SFX ------------------------
+
+def _build_audio_mix(shots: list[dict], episode_num: int) -> Optional[str]:
+    """Build the full audio track: voice (0dB) + music (-18dB) + SFX (-14dB hit-aligned).
+    Returns path to final mixed WAV."""
+    valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
+    if not valid:
+        print("  [AUDIO] No TTS clips")
+        return None
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_audio_{episode_num}_"))
+    try:
+        # -- Voice track: concat with 0.3s pads, loudness already normalized --
+        voice_parts = []
+        clip_starts = []  # absolute start time of each clip in the final timeline
+        cursor = 0.0
+        for shot in valid:
+            clip_starts.append(cursor)
+            d = _get_audio_duration(shot["tts_path"])
+            voice_parts.append((shot["tts_path"], cursor, d))
+            cursor += d + 0.6  # 0.3s pad after each clip
+
+        total_dur = cursor
+        print(f"  [AUDIO] Voice timeline: {total_dur:.1f}s total, {len(valid)} clips")
+
+        # Concat voice with silence pads
+        concat_list = temp_dir / "voice_concat.txt"
+        with open(concat_list, "w") as f:
+            for path, start, d in voice_parts:
+                f.write(f"file '{str(Path(path).resolve())}'\n")
+                # pad 0.3s silence after each clip
+                pad = temp_dir / f"pad_{int(start*1000)}.wav"
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                     f"anullsrc=r=24000:cl=mono", "-t", "0.3",
+                     "-c:a", "pcm_s16le", str(pad)],
+                    capture_output=True, text=True, timeout=30)
+                f.write(f"file '{str(pad.resolve())}'\n")
+        voice_raw = temp_dir / "voice_raw.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+             "-i", str(concat_list), "-c:a", "pcm_s16le", str(voice_raw)],
+            capture_output=True, text=True, timeout=120)
+        voice_path = temp_dir / "voice_0db.wav"
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", str(voice_raw),
+             "-af", f"volume={VOICE_DB}dB", "-c:a", "pcm_s16le", str(voice_path)],
+            capture_output=True, text=True, timeout=60)
+
+        # -- Music bed: suspense first 65% of the timeline, triumphant last 35%. --
+        # Music plays under EVERY shot (never silent). Tracks cycle per section so
+        # the same clip is never used back-to-back. Levels: -18dB.
+        music_segments = []
+        suspense_pool = MUSIC_LIBRARY["suspense"]
+        triumphant_pool = MUSIC_LIBRARY["triumphant"]
+        sus_idx, tri_idx = 0, 0
+        section_cut = total_dur * 0.65
+        for shot, start in zip(valid, clip_starts):
+            d = _get_audio_duration(shot["tts_path"]) + 0.6
+            if start < section_cut:
+                pool, cur = suspense_pool, sus_idx
+                sus_idx += 1
+            else:
+                pool, cur = triumphant_pool, tri_idx
+                tri_idx += 1
+            track = pool[cur % len(pool)]
+            track_path = SFX_DIR / track
+            if not track_path.is_file():
+                continue
+            seg = temp_dir / f"music_seg_{int(start*1000)}.wav"
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-i", str(track_path),
+                 "-t", f"{d:.2f}", "-af",
+                 f"afade=t=in:st=0:d=0.4,afade=t=out:st={max(d-0.5,0):.2f}:d=0.5,volume={MUSIC_DB}dB",
+                 "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(seg)],
+                capture_output=True, text=True, timeout=60)
+            if seg.is_file() and os.path.getsize(seg) > 1000:
+                music_segments.append((seg, start))
+        print(f"  [AUDIO] Music: suspense x{sus_idx} (0-{section_cut:.0f}s) / "
+              f"triumphant x{tri_idx} ({section_cut:.0f}s-end), -{abs(MUSIC_DB):.0f}dB, cycling")
+        music_path = None
+        if music_segments:
+            mlist = temp_dir / "music_list.txt"
+            with open(mlist, "w") as f:
+                for seg, start in music_segments:
+                    f.write(f"file '{str(seg.resolve())}'\n")
+            music_raw = temp_dir / "music_raw.wav"
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+                 "-i", str(mlist), "-c:a", "pcm_s16le", str(music_raw)],
+                capture_output=True, text=True, timeout=120)
+            if music_raw.is_file() and os.path.getsize(music_raw) > 1000:
+                music_path = str(music_raw)
+
+        # -- SFX: hit-aligned placement at -14dB --
+        sfx_inputs = []
+        sfx_delays = []  # adelay ms
+        sfx_trims = []   # (skip_seconds) crop head when hit occurs later than target
+        for shot, start in zip(valid, clip_starts):
+            name = shot.get("sfx", "NONE")
+            if name == "NONE" or name not in SFX_LIBRARY:
+                continue
+            src = SFX_DIR / name
+            if not src.is_file():
+                continue
+            meta = SFX_LIBRARY[name]
+            # Place so the HIT lands at clip start + 0.2s (just as the shot begins)
+            target = start + 0.2
+            if meta["hit"] <= target:
+                # SFX hit occurs early enough: delay so hit lands at target
+                delay_ms = max(int((target - meta["hit"]) * 1000), 0)
+                skip_s = 0.0
+            else:
+                # Hit occurs late in the file: crop the head so the hit lands at target.
+                # Keep (hit - target) seconds of pre-hit build-up for the attack.
+                skip_s = meta["hit"] - target
+                delay_ms = 0
+            sfx_inputs.append(str(src))
+            sfx_delays.append(delay_ms)
+            sfx_trims.append(skip_s)
+            print(f"  [AUDIO] SFX {name}: hit@{target:.1f}s (file hit={meta['hit']}s) -> "
+                  f"{'crop ' + f'{skip_s:.2f}s' if skip_s else f'delay {delay_ms}ms'}")
+
+        # -- Mix everything --
+        inputs = []
+        filter_parts = []
+        idx = 0
+        if voice_path and os.path.isfile(voice_path):
+            inputs.append(str(voice_path))
+            filter_parts.append(f"[{idx}:a]aresample=44100[v{idx}]")
+            idx += 1
+        if music_path:
+            inputs.append(music_path)
+            filter_parts.append(f"[{idx}:a]aresample=44100[m{idx}]")
+            idx += 1
+        sfx_filters = []
+        for i, (s, d, sk) in enumerate(zip(sfx_inputs, sfx_delays, sfx_trims)):
+            inputs.append(s)
+            pre = f"atrim=start={sk:.3f},asetpts=PTS-STARTPTS," if sk > 0 else ""
+            filter_parts.append(
+                f"[{idx}:a]aresample=44100,{pre}adelay={d}|{d},volume={SFX_DB}dB[s{idx}]")
+            sfx_filters.append(f"[s{idx}]")
+            idx += 1
+
+        if not inputs:
+            print("  [AUDIO] No audio inputs")
+            return None
+
+        # Build amix
+        mix_inputs = []
+        for i in range(idx):
+            mix_inputs.append(f"[v{i}]" if i == 0 else f"[m{i}]" if i == 1 and music_path and i < idx else f"[s{i}]")
+        # Simpler: collect all processed labels
+        labels = []
+        li = 0
+        if voice_path and os.path.isfile(voice_path):
+            labels.append(f"[v{li}]")
+            li += 1
+        if music_path:
+            labels.append(f"[m{li}]")
+            li += 1
+        for j in range(len(sfx_inputs)):
+            labels.append(f"[s{li}]")
+            li += 1
+
+        amix_in = "".join(labels)
+        n_inputs = len(labels)
+        filter_complex = ";".join(filter_parts) + (
+            f";{amix_in}amix=inputs={n_inputs}:duration=first:normalize=0,"
+            f"alimiter=limit=0.95,atrim=0:{total_dur:.2f}[out]"
+        )
+
+        final_wav = str(RENDERED_AUDIO / f"ep{episode_num:03d}_mix.wav")
+        cmd = ["ffmpeg", "-y", "-v", "error"]
+        for inp in inputs:
+            cmd += ["-i", inp]
+        cmd += ["-filter_complex", filter_complex, "-map", "[out]",
+                "-c:a", "pcm_s16le", "-ar", "44100", final_wav]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0 or not os.path.isfile(final_wav) or os.path.getsize(final_wav) < 1000:
+            print(f"  [AUDIO] Mix failed: {r.stderr[-300:]}")
+            return None
+        dur = _get_audio_duration(final_wav)
+        print(f"  [OK] Mixed audio: {_fmt_time(dur)}, {os.path.getsize(final_wav)//1024}KB -> {final_wav}")
+        return final_wav
+    finally:
+        shutil.rmtree(str(temp_dir), ignore_errors=True)
+
+# -- Render (FFmpeg 1080p) -------------------------------------------
+
+def _render_clip(image_path: str, audio_path: str, output_path: str,
+                 fallback_img: Optional[str] = None) -> bool:
+    """Render one shot: slow-zoom image + narration audio -> 1080p clip (video only audio kept for sync)."""
+    W_RES, H_RES = 1920, 1080
+    if not os.path.isfile(image_path):
+        image_path = fallback_img or ""
+    if not image_path or not os.path.isfile(image_path):
+        from PIL import Image
+        img = Image.new("RGB", (W_RES, H_RES), (18, 18, 22))
+        image_path = str(SHOTS_DIR / "_fallback_bg.png")
+        img.save(image_path)
+    dur = max(_get_audio_duration(audio_path), 0.5) + 0.6
+    n_frames = max(int(dur * 24), 24)
+    # Smooth zoom: upscale the source 2x with lanczos BEFORE zoompan so the
+    # per-frame zoom steps are sub-pixel (kills the choppy integer stepping),
+    # and zoom from the exact center so the crop never drifts.
+    zoom_expr = f"z='if(eq(on,1),1,min(1+0.06*(on-1)/{max(n_frames-1,1)},1.06))'"
+    filter_graph = (
+        f"[0:v]loop=1:size=1:start=0,"
+        f"scale=3840:2160:flags=lanczos:force_original_aspect_ratio=increase,"
+        f"crop=3840:2160,"
+        f"zoompan={zoom_expr}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        f"d={n_frames}:s={W_RES}x{H_RES}:fps=24,"
+        f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(dur-0.3,0):.2f}:d=0.3[vout]"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", image_path,
+        "-i", audio_path,
+        "-filter_complex", filter_graph,
+        "-map", "[vout]", "-map", "1:a",
+        "-c:v", "hevc_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "28", "-b:v", "0",
+        "-c:a", "aac", "-b:a", "96k",
+        "-pix_fmt", "yuv420p",
+        "-shortest",
+        output_path
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if r.returncode != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) < 1000:
+        fb_cmd = [
+            "ffmpeg", "-y",
+            "-loop", "1", "-t", f"{dur:.2f}", "-i", image_path,
+            "-i", audio_path,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "96k",
+            "-pix_fmt", "yuv420p",
+            "-shortest", output_path
+        ]
+        r2 = subprocess.run(fb_cmd, capture_output=True, text=True, timeout=300)
+        return r2.returncode == 0 and os.path.isfile(output_path) and os.path.getsize(output_path) > 1000
+    return True
+
+def _render_video(shots: list[dict], episode_num: int) -> str:
+    """Render all shots into one 1080p video with full audio mix."""
+    print("\n[VIDEO] Rendering 1080p documentary...")
+    valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
+    if not valid:
+        print("  [FAIL] No TTS clips to render")
+        return ""
+
+    # Build the full audio mix first (voice+music+sfx)
+    mixed_audio = _build_audio_mix(valid, episode_num)
+    if not mixed_audio:
+        print("  [WARN] Audio mix failed, falling back to voice-only concat")
+
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_render_{episode_num}_"))
+    clip_files = []
+    try:
+        fallback_img = str(SHOTS_DIR / "_fallback_bg.png")
+        for idx, shot in enumerate(valid):
+            clip_out = str(temp_dir / f"clip_{idx:02d}.mp4")
+            ok = _render_clip(shot.get("image_path", ""), shot["tts_path"], clip_out, fallback_img)
+            if ok:
+                clip_files.append(clip_out)
+                print(f"  [CLIP {idx+1}/{len(valid)}] rendered")
+            else:
+                print(f"  [CLIP {idx+1}/{len(valid)}] FAILED")
+
+        if not clip_files:
+            print("  [FAIL] No clips rendered")
+            return ""
+
+        concat_list = temp_dir / "concat.txt"
+        with open(concat_list, "w") as f:
+            for c in clip_files:
+                f.write(f"file '{c}'\n")
+        output_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}.mp4")
+        concat_cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+            "-i", str(concat_list),
+            "-c:v", "hevc_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "28", "-b:v", "0",
+            "-c:a", "aac", "-b:a", "128k",
+            output_path
+        ]
+        r = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=600)
+        if r.returncode != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) < 1000:
+            print(f"  [RENDER] Concat failed: {r.stderr[-200:]}")
+            return ""
+
+        # Mux the full mixed audio (voice + music + sfx) over the video
+        if mixed_audio and os.path.isfile(mixed_audio):
+            final_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_final.mp4")
+            mux_cmd = [
+                "ffmpeg", "-y", "-v", "error",
+                "-i", output_path, "-i", mixed_audio,
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                "-shortest", final_path
+            ]
+            r2 = subprocess.run(mux_cmd, capture_output=True, text=True, timeout=300)
+            if r2.returncode == 0 and os.path.isfile(final_path) and os.path.getsize(final_path) > 1000:
+                os.replace(final_path, output_path)
+
+        dur = _get_audio_duration(output_path)
+        size_mb = os.path.getsize(output_path) / 1024 / 1024
+        print(f"  [OK] 1080p video: {_fmt_time(dur)}, {size_mb:.1f}MB -> {output_path}")
+        return output_path
+    finally:
+        shutil.rmtree(str(temp_dir), ignore_errors=True)
+
+# -- Thumbnail (FAL GPT Image 2) -------------------------------------
+
+def _thumbnail_headline(topic: str) -> str:
+    """Short all-caps clickbait headline for the thumbnail (2-4 words)."""
+    msg = [
+        {"role": "system", "content": (
+            "Write a short clickbait YouTube thumbnail headline for a documentary "
+            "about a true story where ordinary people beat the system. Rules: exactly "
+            "2-4 words, ALL CAPS, curiosity gap, dramatic, no punctuation except maybe "
+            "one exclamation mark. Return ONLY the headline."
+        )},
+        {"role": "user", "content": f"Topic: {topic}\n\nWrite the headline."}
+    ]
+    text = _llm_chat(msg, max_tokens=30, temp=0.9).strip().strip('"\'')
+    if text and 1 < len(text.split()) <= 5:
+        return text.upper()
+    # Fallback: keyword extraction from the topic
+    stop = {"comcast", "security", "flaw", "exposed", "customers", "personal",
+            "information", "that", "with", "from", "your", "this", "what", "the",
+            "and", "for", "are", "was", "how", "why", "who"}
+    words = [w for w in re.findall(r"[A-Za-z0-9']+", topic)
+             if w.lower() not in stop and len(w) > 3]
+    if not words:
+        return "THEY BEAT THE SYSTEM"
+    return " ".join(words[:3]).upper()
+
+def _generate_thumbnail(topic: str, output_path: str) -> bool:
+    print(f"  [THUMB] GPT Image 2 thumbnail for: {topic[:60]}...")
+    headline = _thumbnail_headline(topic)
+    prompt = (
+        "YouTube documentary thumbnail, realistic 3D render style (Unreal Engine 5 / "
+        "Metahuman quality, photorealistic character with perfect anatomy), dramatic "
+        f"cinematic scene related to: {topic[:120]}. Moody lighting, dark color grade, "
+        "high contrast, bold and clickable composition, 16:9 landscape. "
+        "Large bold uppercase text 'SPLIT NODE' in the top-left corner. "
+        f"Large bold uppercase clickbait headline text '{headline}' centered in the "
+        "lower third. Crisp legible text, high-impact YouTube thumbnail, FERN "
+        "documentary channel style."
+    )
+    data = json.dumps({
+        "prompt": prompt,
+        "image_size": "landscape_16_9",
+        "num_images": 1,
+    }).encode()
+    headers = {"Authorization": f"Key {FAL_API_KEY}", "Content-Type": "application/json"}
+    try:
+        req = urllib.request.Request("https://fal.run/openai/gpt-image-2", data=data, headers=headers)
+        with urllib.request.urlopen(req, timeout=300) as r:
+            result = json.loads(r.read())
+        image_url = result.get("images", [{}])[0].get("url", "")
+        if image_url:
+            urllib.request.urlretrieve(image_url, output_path)
+            if os.path.isfile(output_path) and os.path.getsize(output_path) > 1000:
+                print(f"  [OK] Thumbnail: {os.path.getsize(output_path)//1024}KB -> {output_path}")
+                return True
+        print("  [FAIL] GPT Image 2 returned no image")
+    except Exception as e:
+        print(f"  [FAIL] GPT Image 2 error: {e}")
+    return False
+
+# -- Titles / description --------------------------------------------
+
+def _generate_titles(topic: str, episode_num: int) -> list[str]:
+    msg = [
+        {"role": "system", "content": (
+            "You are a viral YouTube title generator for 'Split Node' - a channel about "
+            "ordinary people who beat the system. Write 3 clickbaity titles. "
+            "Each starts with '#XXX - ' where XXX is the episode number. "
+            "Use curiosity gaps, under 70 chars, reference the story topic directly. "
+            "Return ONLY 3 lines, one title per line, no numbering."
+        )},
+        {"role": "user", "content": f"Episode #{episode_num:03d}\nTopic: {topic}\n\nWrite 3 titles."}
+    ]
+    text = _llm_chat(msg, max_tokens=250, temp=0.85)
+    titles = [t.strip() for t in text.split("\n") if t.strip()]
+    prefix = f"#{episode_num:03d} -"
+    result = []
+    for t in titles:
+        if not t.startswith("#"):
+            t = f"{prefix} {t}"
+        elif prefix not in t:
+            t = f"{prefix} {t.lstrip('#0123456789').lstrip('- ')}"
+        result.append(t)
+    while len(result) < 3:
+        result.append(f"{prefix} The {topic[:40]} story that broke the system")
+    return result[:3]
+
+DESCRIPTION_SYSTEM_PROMPT = (
+    "You write YouTube video descriptions for SPLIT NODE, a 3D animated documentary "
+    "channel (Unreal Engine / Metahuman style) telling true stories of ordinary people "
+    "who beat the system - hackers, lottery mathematicians, card counters, loophole "
+    "finders, scam-baiters. "
+    "\n\n"
+    "Write a COMPREHENSIVE description for this episode. Structure:\n"
+    "1. OPEN WITH THE TOPIC: 2-3 sentences hooking THIS episode's story - the person, "
+    "the scheme, the stakes. Make it cinematic and specific to the topic. This is the "
+    "main content, so make it rich: what happened, how they did it, what they won.\n"
+    "2. THEN INTRODUCE THE CHANNEL: 1-2 sentences about Split Node - 3D animated "
+    "documentaries about ordinary people who used their skills to beat the system.\n"
+    "3. END WITH THE DISCORD PITCH: mention the Discord community where members get "
+    "EARLY ACCESS to watch new videos before they go public, plus vote on future "
+    "topics. Include the invite link: https://discord.gg/YSdqKR4wVB\n"
+    "\n"
+    "Rules:\n"
+    "- Plain text with paragraph breaks (blank lines between the 3 sections)\n"
+    "- No em dashes, no asterisks, no markdown headers\n"
+    "- 120-250 words total\n"
+    "- End with 3-5 topic hashtags on their own line\n"
+    "- Mention the episode number\n"
+)
+
+def _generate_description(topic: str, episode_num: int, article_url: str) -> str:
+    msg = [
+        {"role": "system", "content": DESCRIPTION_SYSTEM_PROMPT},
+        {"role": "user", "content": (
+            f"Episode #{episode_num:03d}\n"
+            f"Topic: {topic}\n"
+            f"Source article: {article_url}\n\n"
+            f"Write the comprehensive YouTube description."
+        )}
+    ]
+    text = _llm_chat(msg, max_tokens=600, temp=0.75)
+    text = text.strip().strip('"\'')
+    if text and DISCORD_INVITE not in text:
+        text = f"{text}\n\n{DISCORD_INVITE}"
+    return text if text else (
+        f"{topic}\n\n"
+        f"An ordinary person. An extraordinary scheme. They beat the system.\n\n"
+        f"Split Node tells true stories of hackers, mathematicians and loophole "
+        f"finders who outsmarted the game, recreated in cinematic 3D animation. "
+        f"Episode #{episode_num:03d}.\n\n"
+        f"Join the Discord for EARLY ACCESS to new episodes before they go public, "
+        f"and vote on future topics: {DISCORD_INVITE}\n\n"
+        f"#{''.join(w for w in topic.split()[:3])} #Documentary #TrueStories"
+    )
+
+def _generate_tags(topic: str, episode_num: int) -> list[str]:
+    msg = [
+        {"role": "system", "content": (
+            "Generate exactly 12 comma-separated YouTube tags for a video on a "
+            "3D animated documentary channel. "
+            "Return ONLY the tags separated by commas. Mix: 3 viral, 3 curiosity, "
+            "3 specific topic, 3 broad category. All tags must be relevant to THIS "
+            "video's topic and the documentary niche."
+        )},
+        {"role": "user", "content": f"Topic: {topic}\nEpisode #{episode_num:03d} of Split Node"}
+    ]
+    text = _llm_chat(msg, max_tokens=200, temp=0.6)
+    tags = [t.strip().lower() for t in text.split(",") if t.strip()]
+    tags = [t for t in tags if len(t) > 2 and len(t) < 50]
+    return tags[:12]
+
+# -- YouTube upload --------------------------------------------------
+
+def _get_youtube_creds():
+    if not YOUTUBE_CREDENTIALS.is_file():
+        return None
+    try:
+        data = json.loads(YOUTUBE_CREDENTIALS.read_text())
+        # Parse the stored expiry so google.auth can detect an expired token.
+        # Without it, refresh never fires and the stale token gets 401s.
+        expiry_raw = data.get("token_expiry") or data.get("expiry")
+        expiry = None
+        if expiry_raw:
+            try:
+                if isinstance(expiry_raw, str):
+                    expiry_raw = expiry_raw.replace("Z", "+00:00")
+                expiry = datetime.fromisoformat(expiry_raw)
+                if expiry.tzinfo is not None:
+                    # google.auth compares against naive UTC - strip the tz
+                    expiry = expiry.astimezone(timezone.utc).replace(tzinfo=None)
+            except Exception:
+                expiry = None
+        creds = GoogleCreds(
+            token=data.get("access_token", data.get("token", "")),
+            refresh_token=data.get("refresh_token"),
+            client_id=data.get("client_id"),
+            client_secret=data.get("client_secret"),
+            token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
+            scopes=data.get("scopes", ["https://www.googleapis.com/auth/youtube.upload"]),
+            expiry=expiry,
+        )
+        if not creds.valid:
+            creds.refresh(AuthRefresh())
+            data["access_token"] = creds.token
+            data["token"] = creds.token
+            data["token_expiry"] = creds.expiry.isoformat() if creds.expiry else None
+            data["expiry"] = data["token_expiry"]
+            YOUTUBE_CREDENTIALS.write_text(json.dumps(data, indent=2))
+            print("  [OK] YouTube token refreshed")
+        return creds
+    except Exception as e:
+        print(f"  [WARN] Credential load failed: {e}")
+        print("  [WARN] Re-authorize Split Node: python oauth_split_node.py")
+        return None
+
+def _upload_video_with_progress(video_path: str, title: str, description: str,
+                                tags_str: str, privacy: str = "public") -> Optional[str]:
+    creds = _get_youtube_creds()
+    if not creds:
+        return None
+    file_size = os.path.getsize(video_path)
+    body = {
+        "snippet": {
+            "title": title,
+            "description": description,
+            "tags": tags_str.split(","),
+            "categoryId": "24",
+        },
+        "status": {
+            "privacyStatus": privacy,
+            "embeddable": True,
+            "selfDeclaredMadeForKids": False,
+        },
+    }
+    try:
+        headers_init = {
+            "Authorization": f"Bearer {creds.token}",
+            "Content-Type": "application/json",
+            "X-Upload-Content-Length": str(file_size),
+            "X-Upload-Content-Type": "video/mp4",
+        }
+        r = requests_post(
+            "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+            headers=headers_init, json=body, timeout=30
+        )
+        if r.status_code != 200:
+            print(f"  [WARN] Upload init failed (HTTP {r.status_code})")
+            if r.status_code in (401, 403):
+                print("  [WARN] Token invalid - re-run: python oauth_split_node.py")
+            return None
+        upload_url = r.headers.get("Location")
+        if not upload_url:
+            return None
+        chunk_size = 256 * 1024
+        if _HAS_PROGRESS:
+            pbar = tqdm(total=file_size, unit="B", unit_scale=True, desc="  [YT] Video")
+        else:
+            pbar = None
+        bytes_sent = 0
+        with open(video_path, "rb") as f:
+            while bytes_sent < file_size:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                start = bytes_sent
+                end = bytes_sent + len(chunk) - 1
+                content_range = f"bytes {start}-{end}/{file_size}"
+                for attempt in range(3):
+                    try:
+                        r = requests_put(upload_url, headers={
+                            "Content-Length": str(len(chunk)),
+                            "Content-Range": content_range,
+                        }, data=chunk, timeout=120)
+                        if r.status_code not in (308, 200, 201):
+                            if attempt < 2:
+                                time.sleep(2)
+                                continue
+                        break
+                    except Exception:
+                        if attempt < 2:
+                            time.sleep(2)
+                            continue
+                        raise
+                bytes_sent += len(chunk)
+                if pbar:
+                    pbar.update(len(chunk))
+        if pbar:
+            pbar.close()
+        if r.status_code in (200, 201):
+            vid = r.json().get("id")
+            if vid:
+                print(f"\n  [OK] Uploaded: https://youtu.be/{vid}")
+                return vid
+        return None
+    except Exception as e:
+        print(f"  [WARN] Upload error: {e}")
+        return None
+
+def _upload_thumbnail(video_id: str, thumbnail_path: str):
+    if not os.path.isfile(thumbnail_path):
+        return
+    try:
+        creds = _get_youtube_creds()
+        if not creds:
+            return
+        r = requests_post(
+            f"https://www.googleapis.com/upload/youtube/v3/thumbnails/set?videoId={video_id}",
+            headers={"Authorization": f"Bearer {creds.token}"},
+            files={"thumbnail": open(thumbnail_path, "rb")},
+            timeout=30
+        )
+        if r.status_code == 200:
+            print(f"  [OK] Thumbnail uploaded")
+        else:
+            print(f"  [WARN] Thumbnail upload failed: {r.status_code}")
+    except Exception as e:
+        print(f"  [WARN] Thumbnail upload error: {e}")
+
+def _add_video_to_playlist(video_id: str) -> bool:
+    creds = _get_youtube_creds()
+    if not creds:
+        return False
+    try:
+        r = requests_get(
+            "https://www.googleapis.com/youtube/v3/playlists?part=snippet&mine=true&maxResults=50",
+            headers={"Authorization": f"Bearer {creds.token}"}, timeout=15
+        )
+        playlist_id = None
+        if r.status_code == 200:
+            for pl in r.json().get("items", []):
+                if pl["snippet"]["title"].lower() == YOUTUBE_PLAYLIST.lower():
+                    playlist_id = pl["id"]
+                    break
+        if not playlist_id:
+            r = requests_post(
+                "https://www.googleapis.com/youtube/v3/playlists?part=snippet,status",
+                headers={"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"},
+                json={
+                    "snippet": {
+                        "title": YOUTUBE_PLAYLIST,
+                        "description": f"{CHANNEL_NAME} - true stories of people who beat the system",
+                    },
+                    "status": {"privacyStatus": "public"}
+                }, timeout=15
+            )
+            if r.status_code == 200:
+                playlist_id = r.json().get("id")
+        if playlist_id:
+            r = requests_post(
+                "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet",
+                headers={"Authorization": f"Bearer {creds.token}", "Content-Type": "application/json"},
+                json={
+                    "snippet": {
+                        "playlistId": playlist_id,
+                        "resourceId": {"kind": "youtube#video", "videoId": video_id}
+                    }
+                }, timeout=15
+            )
+            return r.status_code == 200
+    except Exception as e:
+        print(f"  [PLAYLIST] {e}")
+    return False
+
+try:
+    import requests as _req
+    def requests_get(*a, **kw): return _req.get(*a, **kw)
+    def requests_post(*a, **kw): return _req.post(*a, **kw)
+    def requests_put(*a, **kw): return _req.put(*a, **kw)
+except ImportError:
+    def _urllib_req(method, url, headers=None, json=None, data=None, files=None, timeout=30):
+        body = data
+        if json is not None:
+            body = json.dumps(json).encode()
+        hdrs = dict(headers or {})
+        if json is not None:
+            hdrs["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r
+    def requests_get(url, headers=None, timeout=30):
+        return _urllib_req("GET", url, headers=headers, timeout=timeout)
+    def requests_post(url, headers=None, json=None, files=None, timeout=30):
+        return _urllib_req("POST", url, headers=headers, json=json, timeout=timeout)
+    def requests_put(url, headers=None, data=None, timeout=120):
+        return _urllib_req("PUT", url, headers=headers, data=data, timeout=timeout)
+
+# -- Discord announcement --------------------------------------------
+
+ANNOUNCE_SYSTEM_PROMPT = (
+    "You are the community manager for SPLIT NODE, a YouTube channel that tells true "
+    "stories of ordinary people who beat the system (hackers, lottery mathematicians, "
+    "card counters, loophole finders). A new episode has just been uploaded. "
+    "Write a punchy Discord announcement message for the community. Rules:\n"
+    "- 3-5 sentences, hype but not cringe\n"
+    "- Lead with the hook of THIS episode's story\n"
+    "- Mention it's live on YouTube\n"
+    "- Include the YouTube link\n"
+    "- No em dashes, no asterisks, no markdown formatting beyond the link\n"
+    "- Plain text, conversational, energetic\n"
+    "- No hashtags\n"
+    "- Start with 'NEW EPISODE' in caps"
+)
+
+def _generate_announcement(topic: str, video_id: str, episode_num: int) -> str:
+    """Write the Discord announcement with the local LLM."""
+    try:
+        url = f"https://youtu.be/{video_id}"
+        text = _llm_chat([
+            {"role": "system", "content": ANNOUNCE_SYSTEM_PROMPT},
+            {"role": "user", "content": (
+                f"Episode #{episode_num:03d} of Split Node\n"
+                f"Topic: {topic}\n"
+                f"YouTube link: {url}\n\n"
+                f"Write the Discord announcement."
+            )}
+        ], max_tokens=300, temp=0.85)
+        text = text.strip().strip('"\'')
+        # Ensure the link is in the message
+        if url not in text:
+            text = f"{text}\n\n{url}"
+        return text
+    except Exception as e:
+        print(f"  [DISCORD] Announcement LLM failed: {e}")
+        return (f"NEW EPISODE - {topic}\n\n"
+                f"Split Node episode #{episode_num:03d} is live on YouTube!\n\n"
+                f"https://youtu.be/{video_id}")
+
+
+def _post_discord_announcement(topic: str, video_id: str, episode_num: int,
+                               wait_seconds: int = 60) -> None:
+    """Wait, then write + post the announcement to all Discord channels."""
+    if not video_id:
+        print("  [DISCORD] No video ID - skipping announcement")
+        return
+    print(f"\n  [DISCORD] Waiting {wait_seconds}s before announcing...")
+    time.sleep(wait_seconds)
+    message = _generate_announcement(topic, video_id, episode_num)
+    print(f"  [DISCORD] Announcement:\n    {message[:120]}...")
+    for ch_id in DISCORD_ANNOUNCE_CHANNELS:
+        try:
+            data = json.dumps({"content": message}).encode()
+            req = urllib.request.Request(
+                f"https://discord.com/api/v10/channels/{ch_id}/messages",
+                data=data,
+                headers={
+                    "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                print(f"  [DISCORD] Posted to channel {ch_id} (HTTP {r.status})")
+        except Exception as e:
+            print(f"  [DISCORD] Failed channel {ch_id}: {e}")
+    print("  [DISCORD] Announcement done")
+
+
+# -- Main ------------------------------------------------------------
+
+def print_banner():
+    print("""
+  ==============================================
+        SPLIT NODE
+  True stories of ordinary people who
+        beat the system.
+  3D animated documentary, AI generated.
+  ==============================================
+""")
+
+def _preflight() -> bool:
+    print("\n  [PREFLIGHT] Checking environment...")
+    ok = True
+    try:
+        req = urllib.request.Request(POCKET_TTS_URL + "/health", method="GET")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            if r.status == 200:
+                print(f"  [OK] PocketTTS server ({TTS_VOICE} voice)")
+            else:
+                print(f"  [WARN] PocketTTS returned {r.status}")
+    except Exception as e:
+        print(f"  [WARN] PocketTTS not reachable: {e}")
+    try:
+        req = urllib.request.Request(LM_STUDIO_URL, data=json.dumps({
+            "model": "gemma-4-e4b-uncensored-hauhaucs-aggressive",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }).encode(), headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            print(f"  [OK] LM Studio reachable")
+    except Exception as e:
+        print(f"  [WARN] LM Studio not reachable: {e}")
+    sfx_count = sum(1 for f in SFX_DIR.iterdir() if f.is_file()) if SFX_DIR.is_dir() else 0
+    print(f"  [OK] Cinematic sounds: {sfx_count} files")
+    if not CLIENT_SECRETS.is_file():
+        print(f"  [FAIL] Split Node client secrets missing: {CLIENT_SECRETS.name}")
+        ok = False
+    if not YOUTUBE_CREDENTIALS.is_file():
+        print(f"  [WARN] YouTube credentials missing - upload will fail (run OAuth first)")
+    print()
+    return ok
+
+def main():
+    print_banner()
+    _preflight()
+
+    # Ask for the episode number every run (default = last + 1)
+    last_ep = _load_episode_num()
+    default_ep = last_ep + 1
+    resp = input(f"  Episode number? (enter for {default_ep}): ").strip()
+    try:
+        episode_num = int(resp) if resp else default_ep
+    except ValueError:
+        print(f"  [WARN] '{resp}' not a number, using {default_ep}")
+        episode_num = default_ep
+    print(f"\n  Episode #{episode_num:03d}")
+
+    # 1. Find a story
+    article_url, article_title = _pick_story()
+    if not article_url:
+        print("  [HALT] No story found. Check RSS feeds.")
+        input("  Press Enter to exit...")
+        return
+    topic = article_title
+
+    # 2. Fetch article
+    paragraphs = fetch_article_paragraphs(article_url)
+    if paragraphs:
+        # LLM relevance rating: discard paragraphs scoring <= 4/10 so
+        # off-topic webpage content (ads, self-promo) never reaches the narration
+        paragraphs = _rate_paragraph_relevance(article_title, paragraphs)
+    if not paragraphs:
+        print("  [HALT] Could not extract article content.")
+        input("  Press Enter to exit...")
+        return
+
+    # 3. Stage 1: narration script
+    narration = _build_narration_script(paragraphs)
+
+    # 3b. Rate each narration segment against the topic, discard <= 4/10
+    if narration:
+        narration = _rate_paragraph_relevance(article_title, narration)
+        if not narration:
+            print("  [FILTER] All narration segments off-topic, rebuilding from filtered article...")
+            narration = _build_narration_script(paragraphs)
+
+    # 4. Stage 2: shot list from narration
+    shots = _build_shot_list(narration)
+
+    # 4b. Stage 2b: character sheets for every named character
+    character_sheets = _build_character_sheets(shots, narration)
+
+    # 5. Generate images (character sheet prepended, angle-matched view)
+    shots = _generate_all_shots(shots, character_sheets)
+
+    # 6. TTS narration (built-in male voice, 0dB)
+    _generate_all_tts(shots, episode_num)
+
+    # 7. Render 1080p with full audio mix (voice+music+SFX)
+    video_path = _render_video(shots, episode_num)
+    if not video_path:
+        print("  [HALT] Video render failed.")
+        input("  Press Enter to exit...")
+        return
+
+    # 8. Titles + description
+    titles = _generate_titles(topic, episode_num)
+    for i, t in enumerate(titles):
+        print(f"  Title {i+1}: {t}")
+    description = _generate_description(topic, episode_num, article_url)
+    llm_tags = _generate_tags(topic, episode_num)
+    all_tags = YOUTUBE_BASE_TAGS + [t for t in llm_tags if t not in YOUTUBE_BASE_TAGS]
+    tags_str = ",".join(all_tags)
+
+    # 9. Thumbnail
+    thumb_path = str(THUMBNAILS_DIR / f"ep{episode_num:03d}_thumb.png")
+    thumb_ok = _generate_thumbnail(topic, thumb_path)
+
+    # 10. Upload to Split Node channel
+    if YOUTUBE_UPLOAD_ENABLED:
+        print(f"\n  {'='*50}\n  YOUTUBE UPLOAD ({CHANNEL_NAME})\n  {'='*50}")
+        print(f"  Video: {video_path}")
+        title = titles[0] if titles else f"#{episode_num:03d} - {topic[:60]}"
+        print(f"  Title: {title}")
+        video_id = _upload_video_with_progress(video_path, title, description, tags_str)
+        if video_id and thumb_ok:
+            _upload_thumbnail(video_id, thumb_path)
+        if video_id:
+            _add_video_to_playlist(video_id)
+            EPISODE_COUNTER_FILE.write_text(str(episode_num))
+            print(f"  [OK] Episode #{episode_num:03d} uploaded! https://youtu.be/{video_id}")
+            # Announce to Discord: wait 60s, then LLM-written announcement
+            _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60)
+        else:
+            print(f"  [WARN] Upload failed - video saved locally")
+            EPISODE_COUNTER_FILE.write_text(str(episode_num))
+    else:
+        print(f"\n  [SKIP] YouTube upload disabled")
+        print(f"  [SKIP] Video saved locally: {video_path}")
+        EPISODE_COUNTER_FILE.write_text(str(episode_num))
+
+    print(f"\n  {'='*50}")
+    print(f"  EPISODE #{episode_num:03d} COMPLETE")
+    print(f"  {'='*50}")
+    print(f"  Shots:   {len(shots)}")
+    print(f"  Video:   {video_path}")
+    if YOUTUBE_UPLOAD_ENABLED:
+        print(f"  YouTube: {f'https://youtu.be/{video_id}' if video_id else 'NOT UPLOADED'}")
+    print(f"\n  Done! Press Enter to exit.")
+    input()
+
+if __name__ == "__main__":
+    main()

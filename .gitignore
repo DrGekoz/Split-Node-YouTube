@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Secrets - NEVER commit
+.env
+client_secret_*.json
+*.credentials.json
+
+# Generated output (episodes)
+shots/
+tts_temp/
+rendered_audio/
+rendered_video/
+thumbnails/
+
+# State tracking
+.episode_counter
+.used_articles.json
+
+# Test / debug artifacts
+zoom_frames_*/
+marker_frames_*/
+m2_*/
+cd_frames_*/
