@@ -1,0 +1,299 @@
+"""Split Node — animated title overlay engine (ASS + ffmpeg burn).
+
+Generates an .ass subtitle file with three kinds of animated titles:
+
+1. CHAPTER CARDS   — centered, big glowing title with a scale-pop + glow pulse.
+                     Shown over the black placeholder clips while the narrator
+                     reads "Chapter N - ...".
+2. LOCATION TITLES — bottom-left, RED glow, per-character typewriter reveal
+                     (1.5s), 4s hold, then a 0.5s glitch-off (staggered char
+                     exits + RGB-split ghost copies + flicker).
+3. TIMELINE TITLES — bottom-left, GREEN glow, identical typewriter/glitch
+                     behaviour. Only shown at the exact moment the date is
+                     read (whisper-matched times).
+4. PERSON TITLES    — bottom-left, GOLD glow, identical typewriter/glitch
+                     behaviour. Fires the first time a character's name is
+                     spoken, scoped to their first on-screen shot.
+
+Timing contract (per event, absolute seconds in the final video):
+    chapter : start = when "chapter N" is spoken, end = black clip end
+    loc/time: start = when the anchor phrase is spoken
+              typewriter  start .. start+1.5
+              hold        start+1.5 .. start+5.5
+              glitch-off  start+5.5 .. start+6.0
+
+The typewriter uses a monospace font (Consolas) with per-character \pos
+events; char advance is measured with PIL so characters never overlap.
+"""
+
+import math
+import os
+import random
+import subprocess
+from pathlib import Path
+
+try:
+    from PIL import ImageFont
+    _HAS_PIL = True
+except Exception:
+    _HAS_PIL = False
+
+# ---------------------------------------------------------------------------
+# ASS base template
+# ---------------------------------------------------------------------------
+
+HEADER = """[Script Info]
+ScriptType: v4.00+
+PlayResX: {W}
+PlayResY: {H}
+WrapStyle: 2
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: ChapCore,Arial Black,{chap_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,2,0,1,3,0,5,60,60,60,1
+Style: ChapGlow,Arial Black,{chap_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,2,0,1,0,0,5,60,60,60,1
+Style: ChapKicker,Arial Black,{kicker_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,8,0,1,2,0,5,60,60,60,1
+Style: TypeLoc,Consolas,{type_size},&H000000FF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+Style: TypeTime,Consolas,{type_size},&H0000FF00,&H0000FF00,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+Style: TypePerson,Consolas,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+Style: TypeGhost,Consolas,{type_size},&H0000FF00,&H0000FF00,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+Style: TypePersonGhost,Consolas,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+
+def _ts(seconds: float) -> str:
+    """ASS timestamp h:mm:ss.cc"""
+    if seconds < 0:
+        seconds = 0.0
+    cs = int(round(seconds * 100))
+    h, rem = divmod(cs, 360000)
+    m, rem = divmod(rem, 6000)
+    s, c = divmod(rem, 100)
+    return f"{h}:{m:02d}:{s:02d}.{c:02d}"
+
+
+def _dialog(start: float, end: float, style: str, text: str, layer: int = 0) -> str:
+    return f"Dialogue: {layer},{_ts(start)},{_ts(end)},{style},,0,0,0,,{text}"
+
+
+def _font_path(name: str) -> str:
+    """Windows font file for measurement (PIL needs a real path)."""
+    base = r"C:\Windows\Fonts"
+    table = {
+        "Consolas": "consola.ttf",
+        "Arial Black": "ariblk.ttf",
+        "Impact": "impact.ttf",
+        "Arial": "arial.ttf",
+    }
+    p = Path(base) / table.get(name, "arial.ttf")
+    return str(p) if p.exists() else ""
+
+
+def _char_width(fontname: str, size: int) -> float:
+    """Advance width of a monospace char in px (PIL measure of the TTF)."""
+    if _HAS_PIL:
+        try:
+            f = ImageFont.truetype(_font_path(fontname), size)
+            return f.getlength("M")
+        except Exception:
+            pass
+    return size * 0.55
+
+
+def _text_width(fontname: str, size: int, text: str) -> float:
+    if _HAS_PIL:
+        try:
+            f = ImageFont.truetype(_font_path(fontname), size)
+            return f.getlength(text)
+        except Exception:
+            pass
+    return len(text) * size * 0.55
+
+
+# ---------------------------------------------------------------------------
+# Chapter cards
+# ---------------------------------------------------------------------------
+
+def _chapter_events(ev, W, H, fps) -> list[str]:
+    """ev: {kind:'chapter', chapter_num, title, start, end, text}"""
+    cx, cy = W // 2, int(H * 0.46)
+    dur = max(ev["end"] - ev["start"], 0.5)
+    pop = min(0.5, dur * 0.5)
+    lines = []
+
+    kicker = f"CHAPTER {ev['chapter_num']:02d}"
+    title = ev["title"]
+
+    # Kicker line (small, spaced, fades in above)
+    k_y = cy - 90
+    lines.append(_dialog(
+        ev["start"], ev["end"], "ChapKicker",
+        f"{{\\an5\\pos({cx},{k_y})\\alpha&HFF&\\t(0,{int(pop*1000)},\\alpha&H00&)}}{kicker}",
+        layer=2))
+
+    # Glow layer (soft bloom, pulses)
+    glow = (f"{{\\an5\\pos({cx},{cy})\\blur(16)\\bord(2)\\1c&H0000D7FF&\\alpha&H70&"
+            f"\\fscx(60)\\fscy(60)\\t(0,{int(pop*1000)},\\fscx(100)\\fscy(100)\\alpha&H55&)"
+            f"\\t({int(pop*1000)},{int(pop*1000)+700},\\bord(14)\\alpha&H40&)"
+            f"\\t({int(pop*1000)+700},{int(pop*1000)+1500},\\bord(3)\\alpha&H60&)}}{title}")
+    lines.append(_dialog(ev["start"], ev["end"], "ChapGlow", glow, layer=1))
+
+    # Core layer (sharp white, scale-pop in)
+    core = (f"{{\\an5\\pos({cx},{cy})\\1c&HFFFFFF&\\bord(3)\\3c&H000000&\\shad(0)"
+            f"\\fscx(50)\\fscy(50)\\alpha&HFF&"
+            f"\\t(0,{int(pop*1000)},\\fscx(110)\\fscy(110)\\alpha&H00&)"
+            f"\\t({int(pop*1000)},{int(pop*1000)+350},\\fscx(100)\\fscy(100))}}{title}")
+    lines.append(_dialog(ev["start"], ev["end"], "ChapCore", core, layer=3))
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Typewriter location / timeline titles
+# ---------------------------------------------------------------------------
+
+def _typewriter_events(ev, W, H, fps) -> list[str]:
+    """ev: {kind:'location'|'timeline'|'person', text, start, end, display_text}"""
+    style = {"location": "TypeLoc", "timeline": "TypeTime",
+             "person": "TypePerson"}.get(ev["kind"], "TypeTime")
+    ghost_style = "TypePersonGhost" if ev["kind"] == "person" else "TypeGhost"
+    fontsize = 56
+    char_w = _char_width("Consolas", fontsize)
+    margin = 48
+    # Row layout (bottom-left): timeline/person sit on the baseline; a location
+    # (red) fires stacked ABOVE it. A person title that collides with a
+    # timeline moves up one row (then up two if a location is also there).
+    base_y = H - 110
+    if ev["kind"] == "location":
+        base_y -= 74
+    elif ev.get("_stack_up"):
+        base_y -= 74 * min(ev.get("_stack_up", 0), 2)
+
+    text = ev["text"]
+    # Escape ASS characters
+    text = text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
+    n = max(len(text), 1)
+    step = 1.5 / n                 # per-char typewriter delay
+    hold_end = ev["start"] + 5.5   # glitch starts here
+    glitch_end = ev["start"] + 6.0
+
+    lines = []
+    x = margin
+    rng = random.Random(137 + sum(ord(c) for c in text))
+
+    for i, ch in enumerate(text):
+        if ch == " ":
+            x += char_w
+            continue
+        t_show = ev["start"] + i * step
+        # random staggered exit inside the 0.5s glitch window
+        t_exit = hold_end + rng.uniform(0.0, 0.5)
+        # glitch flicker in the final ~0.35s of this char's life
+        fl = max(t_exit - 0.32, hold_end)
+        fl_ms = int((t_exit - fl) * 1000)
+        jitter = rng.uniform(-6, 6)
+        tags = (f"{{\\an7\\pos({x:.1f},{base_y})\\bord(2)\\3c&H000000&"
+                f"\\blur(0.6)\\alpha&HFF&\\t({int((t_show-ev['start'])*1000)},"
+                f"{int((t_show-ev['start'])*1000+120)},\\alpha&H00&)"
+                f"\\t({int((fl-ev['start'])*1000)},{int((fl-ev['start'])*1000)+80},\\alpha&H55&\\fscx(115)\\fscy(115))"
+                f"\\t({int((fl-ev['start'])*1000)+80},{int((fl-ev['start'])*1000)+160},\\alpha&H00&\\fscx(100)\\fscy(100))"
+                f"\\t({int((fl-ev['start'])*1000)+160},{int((t_exit-ev['start'])*1000)},\\alpha&HFF&\\fscx(120)\\fscy(120))"
+                f"\\move({x + jitter:.1f},{base_y},{x:.1f},{base_y})}}")
+        lines.append(_dialog(t_show, t_exit, style, tags + ch, layer=4))
+        x += char_w
+
+    # Blinking block cursor after the typed text during the hold
+    cx = x + 4
+    blink = "".join(
+        f"\\t({k*400},{k*400+200},\\alpha&H00&)\\t({k*400+200},{k*400+400},\\alpha&HFF&)"
+        for k in range(10))
+    cursor = (f"{{\\an7\\pos({cx:.1f},{base_y})\\1c&HFFFFFF&\\bord(1)\\blur(0.4)\\alpha&HFF&{blink}}}"
+              f"{{\\alpha&H00&}}_")
+    # NOTE: alpha&H00& after the brace means cursor starts visible; blink chain then runs
+    lines.append(_dialog(ev["start"] + 1.5, hold_end, style, cursor, layer=4))
+
+    # RGB-split ghost copies during the glitch window (chromatic aberration)
+    full_w = _text_width("Consolas", fontsize, text)
+    for off, ghost_alpha in ((-7, "&HAA&"), (7, "&H88&")):
+        ghost = (f"{{\\an7\\pos({margin + off},{base_y})\\blur(1)\\1c&H00FFFF&\\alpha{ghost_alpha}"
+                 f"\\t(0,{int(0.3*1000)},\\alpha&HFF&)}}{text}")
+        lines.append(_dialog(hold_end - 0.1, hold_end + 0.45, ghost_style, ghost, layer=6))
+
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def build_title_ass(events: list[dict], out_path: str,
+                    video_w: int = 1920, video_h: int = 1080, fps: int = 24) -> str:
+    """Write the .ass file for a list of resolved title events.
+
+    events: [{kind, start, end?, text, title?, chapter_num?}]
+    - chapter: text = full "Chapter N - Title" read by TTS; title + chapter_num
+      used for the card.
+    - location/timeline/person: text = display string (already shortened).
+      location = red, timeline = green, person = gold; all bottom-left.
+    """
+    chap_size = int(video_h * 0.075)      # ~81px @1080
+    kicker_size = int(video_h * 0.037)    # ~40px
+    type_size = int(video_h * 0.052)      # ~56px
+
+    body = HEADER.format(W=video_w, H=video_h, chap_size=chap_size,
+                         kicker_size=kicker_size, type_size=type_size)
+    # Compute row stacking for person titles: how many OTHER typewriter events
+    # (location/timeline/person) fire within 2s - the person card moves up a
+    # row per collision so cards never overlap on the bottom-left.
+    tw_evs = [ev for ev in events
+              if ev.get("kind") in ("location", "timeline", "person")]
+    for ev in tw_evs:
+        if ev.get("kind") == "person":
+            ev["_stack_up"] = sum(
+                1 for o in tw_evs
+                if o is not ev and o.get("kind") in ("location", "timeline")
+                and abs(o.get("start", 0) - ev.get("start", 0)) < 2.0)
+    parts = []
+    for ev in events:
+        kind = ev.get("kind")
+        try:
+            if kind == "chapter":
+                parts.extend(_chapter_events(ev, video_w, video_h, fps))
+            elif kind in ("location", "timeline", "person"):
+                parts.extend(_typewriter_events(ev, video_w, video_h, fps))
+        except Exception as e:
+            print(f"  [TITLES] skip event {kind}: {e}")
+    body += "\n".join(parts) + "\n"
+    Path(out_path).write_text(body, encoding="utf-8")
+    return out_path
+
+
+def burn_titles(video_path: str, ass_path: str, out_path: str,
+                timeout: int = 2400) -> bool:
+    """Re-encode video with the title .ass burned in (NVENC, faststart)."""
+    # Windows: drive-letter colon in absolute paths breaks the subtitles filter.
+    # Use relative paths with cwd set to the video's directory instead.
+    vdir = Path(video_path).resolve().parent
+    vname = Path(video_path).name
+    aname = Path(ass_path).name
+    oname = Path(out_path).name
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-i", vname,
+        "-vf", f"subtitles={aname}",
+        "-c:v", "hevc_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "28", "-b:v", "0",
+        "-c:a", "copy",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        oname,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                       cwd=str(vdir))
+    if r.returncode != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) < 1000:
+        print(f"  [TITLES] Burn failed: {r.stderr[-400:]}")
+        return False
+    return True

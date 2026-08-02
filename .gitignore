@@ -25,3 +25,7 @@ marker_frames_*/
 m2_*/
 cd_frames_*/
 batch_temp/
+test_output/
+
+# Trend toolkit cache
+trend_scan_cache.json

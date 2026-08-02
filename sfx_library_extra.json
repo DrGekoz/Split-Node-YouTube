@@ -1,0 +1,1050 @@
+{
+ "sfx-camera-shutter": {
+  "file": "camera shutter.mp3",
+  "dur": 2.12,
+  "build": 0.15,
+  "hit": 0.2,
+  "decay": 0.4,
+  "desc": "sfx camera shutter"
+ },
+ "sfx-camera-shutter-short": {
+  "file": "camera-shutter-short.wav",
+  "dur": 1.0,
+  "build": 0.15,
+  "hit": 0.2,
+  "decay": 0.4,
+  "desc": "sfx camera shutter short"
+ },
+ "sfx-glitch-off": {
+  "file": "glitch-off.wav",
+  "dur": 0.7,
+  "build": 0.0,
+  "hit": 0.5,
+  "decay": 0.7,
+  "desc": "sfx glitch off"
+ },
+ "sfx-mixkit-big-cinematic-impact-788": {
+  "file": "mixkit-big-cinematic-impact-788.mp3",
+  "dur": 7.94,
+  "build": 1.9,
+  "hit": 2.15,
+  "decay": 3.2,
+  "desc": "sfx mixkit big cinematic impact 788"
+ },
+ "sfx-mixkit-cinematic-mystery-heartbeat-transition-492": {
+  "file": "mixkit-cinematic-mystery-heartbeat-transition-492.wav",
+  "dur": 67.27,
+  "build": 0.0,
+  "hit": 37.7,
+  "decay": 56.65,
+  "desc": "sfx mixkit cinematic mystery heartbeat transition 492"
+ },
+ "sfx-mixkit-cinematic-trailer-riser-790": {
+  "file": "mixkit-cinematic-trailer-riser-790.wav",
+  "dur": 2.57,
+  "build": 1.95,
+  "hit": 2.5,
+  "decay": 2.55,
+  "desc": "sfx mixkit cinematic trailer riser 790"
+ },
+ "sfx-mixkit-cinematic-transition-swoosh-heartbeat-trailer-488": {
+  "file": "mixkit-cinematic-transition-swoosh-heartbeat-trailer-488.wav",
+  "dur": 8.11,
+  "build": 0.65,
+  "hit": 3.45,
+  "decay": 3.6,
+  "desc": "sfx mixkit cinematic transition swoosh heartbeat trailer 488"
+ },
+ "sfx-mixkit-cinematic-tunnel-reverb-woosh-1486": {
+  "file": "mixkit-cinematic-tunnel-reverb-woosh-1486.wav",
+  "dur": 6.75,
+  "build": 0.4,
+  "hit": 0.6,
+  "decay": 3.0,
+  "desc": "sfx mixkit cinematic tunnel reverb woosh 1486"
+ },
+ "sfx-mixkit-cinematic-whoosh-deep-impact-1143": {
+  "file": "mixkit-cinematic-whoosh-deep-impact-1143.mp3",
+  "dur": 4.08,
+  "build": 0.35,
+  "hit": 0.55,
+  "decay": 1.1,
+  "desc": "sfx mixkit cinematic whoosh deep impact 1143"
+ },
+ "sfx-mixkit-cinematic-whoosh-fast-transition-1492": {
+  "file": "mixkit-cinematic-whoosh-fast-transition-1492.wav",
+  "dur": 1.33,
+  "build": 0.9,
+  "hit": 1.05,
+  "decay": 1.25,
+  "desc": "sfx mixkit cinematic whoosh fast transition 1492"
+ },
+ "sfx-mixkit-epic-orchestra-transition-2290": {
+  "file": "mixkit-epic-orchestra-transition-2290.wav",
+  "dur": 7.12,
+  "build": 0.0,
+  "hit": 1.1,
+  "decay": 3.15,
+  "desc": "sfx mixkit epic orchestra transition 2290"
+ },
+ "sfx-mixkit-glitchy-cinematic-suspense-hit-679": {
+  "file": "mixkit-glitchy-cinematic-suspense-hit-679.wav",
+  "dur": 13.33,
+  "build": 0.1,
+  "hit": 0.1,
+  "decay": 6.05,
+  "desc": "sfx mixkit glitchy cinematic suspense hit 679"
+ },
+ "sfx-mixkit-magic-sparkle-whoosh-2350": {
+  "file": "mixkit-magic-sparkle-whoosh-2350.wav",
+  "dur": 3.5,
+  "build": 0.25,
+  "hit": 0.45,
+  "decay": 1.2,
+  "desc": "sfx mixkit magic sparkle whoosh 2350"
+ },
+ "sfx-mixkit-reverse-cinematic-impact-trailer-784": {
+  "file": "mixkit-reverse-cinematic-impact-trailer-784.wav",
+  "dur": 10.08,
+  "build": 0.1,
+  "hit": 0.1,
+  "decay": 2.65,
+  "desc": "sfx mixkit reverse cinematic impact trailer 784"
+ },
+ "sfx-mixkit-short-space-stutter-intro-riser-1144": {
+  "file": "mixkit-short-space-stutter-intro-riser-1144.mp3",
+  "dur": 6.56,
+  "build": 2.6,
+  "hit": 6.25,
+  "decay": 6.5,
+  "desc": "sfx mixkit short space stutter intro riser 1144"
+ },
+ "sfx-music-hot-dope-winning-elevation-111355": {
+  "file": "music-hot_dope-winning-elevation-111355.mp3",
+  "dur": 121.97,
+  "build": 0.9,
+  "hit": 66.25,
+  "decay": 104.05,
+  "desc": "sfx music hot dope winning elevation 111355"
+ },
+ "sfx-music-kulakovka-triumphant-276654": {
+  "file": "music-kulakovka-triumphant-276654.mp3",
+  "dur": 115.67,
+  "build": 3.6,
+  "hit": 26.55,
+  "decay": 105.8,
+  "desc": "sfx music kulakovka triumphant 276654"
+ },
+ "sfx-music-leberch-suspense-511168": {
+  "file": "music-leberch-suspense-511168.mp3",
+  "dur": 124.03,
+  "build": 2.65,
+  "hit": 111.65,
+  "decay": 112.4,
+  "desc": "sfx music leberch suspense 511168"
+ },
+ "sfx-music-leberch-suspense-516354": {
+  "file": "music-leberch-suspense-516354.mp3",
+  "dur": 90.04,
+  "build": 0.3,
+  "hit": 14.7,
+  "decay": 20.4,
+  "desc": "sfx music leberch suspense 516354"
+ },
+ "sfx-music-paulyudin-cinematic-hero-162489": {
+  "file": "music-paulyudin-cinematic-hero-162489.mp3",
+  "dur": 123.77,
+  "build": 0.8,
+  "hit": 33.95,
+  "decay": 119.05,
+  "desc": "sfx music paulyudin cinematic hero 162489"
+ },
+ "sfx-typewriter-clicks": {
+  "file": "typewriter-clicks.wav",
+  "dur": 1.6,
+  "build": 0.0,
+  "hit": 1.05,
+  "decay": 1.15,
+  "desc": "sfx typewriter clicks"
+ },
+ "hit-cinematic": {
+  "file": "Cinematic Hits/Cinematic - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.07,
+  "build": 0.05,
+  "hit": 0.05,
+  "decay": 2.0,
+  "desc": "hit cinematic"
+ },
+ "hit-drum": {
+  "file": "Cinematic Hits/Drum - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.0,
+  "build": 0.0,
+  "hit": 0.0,
+  "decay": 2.6,
+  "desc": "hit drum"
+ },
+ "hit-eerie": {
+  "file": "Cinematic Hits/Eerie - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 10.0,
+  "build": 1.9,
+  "hit": 2.0,
+  "decay": 4.4,
+  "desc": "hit eerie"
+ },
+ "hit-gaming": {
+  "file": "Cinematic Hits/Gaming - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 5.5,
+  "build": 0.05,
+  "hit": 0.55,
+  "decay": 2.45,
+  "desc": "hit gaming"
+ },
+ "hit-kick": {
+  "file": "Cinematic Hits/Kick - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.29,
+  "build": 0.0,
+  "hit": 0.0,
+  "decay": 0.7,
+  "desc": "hit kick"
+ },
+ "hit-lowpass-tremelo": {
+  "file": "Cinematic Hits/Lowpass Tremelo - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 5.86,
+  "build": 0.0,
+  "hit": 0.6,
+  "decay": 3.35,
+  "desc": "hit lowpass tremelo"
+ },
+ "hit-metallic": {
+  "file": "Cinematic Hits/Metallic - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.61,
+  "build": 0.0,
+  "hit": 0.0,
+  "decay": 1.65,
+  "desc": "hit metallic"
+ },
+ "hit-rumble-and-smash": {
+  "file": "Cinematic Hits/Rumble and Smash - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 10.5,
+  "build": 2.1,
+  "hit": 2.25,
+  "decay": 6.9,
+  "desc": "hit rumble and smash"
+ },
+ "hit-shell-shock-high-ring-not-nice-for-ears": {
+  "file": "Cinematic Hits/Shell Shock High Ring (NOT NICE FOR EARS) - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 9.5,
+  "build": 0.0,
+  "hit": 1.0,
+  "decay": 8.85,
+  "desc": "hit shell shock high ring not nice for ears"
+ },
+ "hit-sub-1": {
+  "file": "Cinematic Hits/Sub 1 - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 8.74,
+  "build": 0.0,
+  "hit": 0.05,
+  "decay": 1.4,
+  "desc": "hit sub 1"
+ },
+ "hit-sub-2": {
+  "file": "Cinematic Hits/Sub 2 - Hit - (Nikko Hunt's S.D.Essentials) .wav",
+  "dur": 8.0,
+  "build": 0.0,
+  "hit": 0.0,
+  "decay": 2.2,
+  "desc": "hit sub 2"
+ },
+ "hit-white-noise": {
+  "file": "Cinematic Hits/White Noise - Hit - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 4.0,
+  "build": 0.0,
+  "hit": 0.05,
+  "decay": 1.55,
+  "desc": "hit white noise"
+ },
+ "foley-2-motorbikes-driving-past": {
+  "file": "Foley_Humans/2 Motorbikes Driving Past - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 7.01,
+  "build": 2.4,
+  "hit": 3.4,
+  "decay": 4.55,
+  "desc": "foley 2 motorbikes driving past"
+ },
+ "foley-barcelona-street-performers": {
+  "file": "Foley_Humans/Barcelona Street Performers  - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 13.92,
+  "build": 0.1,
+  "hit": 5.25,
+  "decay": 13.85,
+  "desc": "foley barcelona street performers"
+ },
+ "foley-bell-with-delay": {
+  "file": "Foley_Humans/Bell With Delay - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 8.0,
+  "build": 0.3,
+  "hit": 0.4,
+  "decay": 2.35,
+  "desc": "foley bell with delay"
+ },
+ "foley-busy-city-with-construction": {
+  "file": "Foley_Humans/Busy City With Construction  - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.88,
+  "build": 0.05,
+  "hit": 5.05,
+  "decay": 6.85,
+  "desc": "foley busy city with construction"
+ },
+ "foley-crackle": {
+  "file": "Foley_Humans/Crackle  - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 10.0,
+  "build": 0.4,
+  "hit": 3.4,
+  "decay": 7.45,
+  "desc": "foley crackle"
+ },
+ "foley-door-closing": {
+  "file": "Foley_Humans/Door Closing - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 0.75,
+  "build": 0.3,
+  "hit": 0.35,
+  "decay": 0.55,
+  "desc": "foley door closing"
+ },
+ "foley-flickering-water-sprinkler": {
+  "file": "Foley_Humans/Flickering Water Sprinkler - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 28.0,
+  "build": 0.4,
+  "hit": 19.55,
+  "decay": 25.15,
+  "desc": "foley flickering water sprinkler"
+ },
+ "foley-footsteps-in-fake-versace-sliders": {
+  "file": "Foley_Humans/Footsteps In Fake Versace Sliders - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 8.0,
+  "build": 0.6,
+  "hit": 5.3,
+  "decay": 5.55,
+  "desc": "foley footsteps in fake versace sliders"
+ },
+ "foley-gas-cooker-gas": {
+  "file": "Foley_Humans/Gas Cooker Gas - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 8.0,
+  "build": 1.75,
+  "hit": 2.55,
+  "decay": 7.7,
+  "desc": "foley gas cooker gas"
+ },
+ "foley-multiple-prayer-calls": {
+  "file": "Foley_Humans/Multiple Prayer Calls - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 14.0,
+  "build": 0.35,
+  "hit": 7.1,
+  "decay": 9.6,
+  "desc": "foley multiple prayer calls"
+ },
+ "foley-multiple-prayer-calls-2": {
+  "file": "Foley_Humans/Multiple Prayer Calls 2 - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 46.0,
+  "build": 1.6,
+  "hit": 20.6,
+  "decay": 45.45,
+  "desc": "foley multiple prayer calls 2"
+ },
+ "foley-old-boat-engine": {
+  "file": "Foley_Humans/Old Boat Engine  - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 8.64,
+  "build": 0.05,
+  "hit": 6.7,
+  "decay": 8.6,
+  "desc": "foley old boat engine"
+ },
+ "foley-rustling-long-grass": {
+  "file": "Foley_Humans/Rustling Long Grass  - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.01,
+  "build": 0.8,
+  "hit": 3.6,
+  "decay": 5.95,
+  "desc": "foley rustling long grass"
+ },
+ "foley-speed-boat-in-the-jungle": {
+  "file": "Foley_Humans/Speed Boat In The Jungle - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 11.0,
+  "build": 0.1,
+  "hit": 3.25,
+  "decay": 10.75,
+  "desc": "foley speed boat in the jungle"
+ },
+ "foley-typewriter-style-sound": {
+  "file": "Foley_Humans/Typewriter Style Sound  - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 12.0,
+  "build": 0.0,
+  "hit": 6.25,
+  "decay": 6.35,
+  "desc": "foley typewriter style sound"
+ },
+ "foley-walking-through-water-in-a-jungle": {
+  "file": "Foley_Humans/Walking Through Water In A Jungle  - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.51,
+  "build": 1.4,
+  "hit": 6.3,
+  "decay": 6.4,
+  "desc": "foley walking through water in a jungle"
+ },
+ "foley-yangon-traffic": {
+  "file": "Foley_Humans/Yangon Traffic - Foley_Humans - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 3.0,
+  "build": 0.0,
+  "hit": 1.15,
+  "decay": 2.95,
+  "desc": "foley yangon traffic"
+ },
+ "glitch-alien-v-s-nikko": {
+  "file": "Glitches/Alien V.S Nikko - Glitch - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 2.0,
+  "build": 0.35,
+  "hit": 0.8,
+  "decay": 1.8,
+  "desc": "glitch alien v s nikko"
+ },
+ "glitch-data-processing": {
+  "file": "Glitches/Data Processing - Glitch - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.0,
+  "build": 0.2,
+  "hit": 2.25,
+  "decay": 2.3,
+  "desc": "glitch data processing"
+ },
+ "glitch-el-sweep": {
+  "file": "Glitches/El Sweep - Glitch - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 3.12,
+  "build": 0.95,
+  "hit": 1.25,
+  "decay": 1.35,
+  "desc": "glitch el sweep"
+ },
+ "glitch-melodic-glitch-nikko-hunt-s-s-d-essentials-wav": {
+  "file": "Glitches/Melodic - Glitch - (Nikko Hunt's S.D.Essentials)wav.wav",
+  "dur": 5.0,
+  "build": 0.6,
+  "hit": 2.8,
+  "decay": 3.35,
+  "desc": "glitch melodic glitch nikko hunt s s d essentials wav"
+ },
+ "glitch-white-noise-flicker": {
+  "file": "Glitches/White Noise Flicker - Glitch - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 2.0,
+  "build": 0.05,
+  "hit": 1.4,
+  "decay": 2.0,
+  "desc": "glitch white noise flicker"
+ },
+ "nature-bats-in-a-cave": {
+  "file": "Nature/Bats In A Cave - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 7.01,
+  "build": 1.3,
+  "hit": 3.5,
+  "decay": 6.9,
+  "desc": "nature bats in a cave"
+ },
+ "nature-beach-with-distant-chatter": {
+  "file": "Nature/Beach With Distant Chatter - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 17.0,
+  "build": 0.95,
+  "hit": 1.55,
+  "decay": 5.15,
+  "desc": "nature beach with distant chatter"
+ },
+ "nature-close-thunder": {
+  "file": "Nature/Close Thunder - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 13.0,
+  "build": 1.3,
+  "hit": 1.4,
+  "decay": 3.2,
+  "desc": "nature close thunder"
+ },
+ "nature-crickets-v-s-cockerel": {
+  "file": "Nature/Crickets V.S Cockerel - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 10.0,
+  "build": 0.4,
+  "hit": 4.95,
+  "decay": 9.85,
+  "desc": "nature crickets v s cockerel"
+ },
+ "nature-distant-ocean-with-a-few-birds": {
+  "file": "Nature/Distant Ocean With A Few Birds - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 24.0,
+  "build": 0.4,
+  "hit": 1.95,
+  "decay": 23.65,
+  "desc": "nature distant ocean with a few birds"
+ },
+ "nature-distant-thunder": {
+  "file": "Nature/Distant Thunder - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 25.96,
+  "build": 1.95,
+  "hit": 5.15,
+  "decay": 16.15,
+  "desc": "nature distant thunder"
+ },
+ "nature-fast-flowing-river": {
+  "file": "Nature/Fast Flowing River - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 15.01,
+  "build": 0.15,
+  "hit": 0.55,
+  "decay": 14.95,
+  "desc": "nature fast flowing river"
+ },
+ "nature-heavy-waterfall-close": {
+  "file": "Nature/Heavy Waterfall Close - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 13.5,
+  "build": 0.55,
+  "hit": 1.1,
+  "decay": 13.4,
+  "desc": "nature heavy waterfall close"
+ },
+ "nature-jungles-of-sarawak": {
+  "file": "Nature/Jungles of Sarawak - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 33.92,
+  "build": 0.65,
+  "hit": 26.65,
+  "decay": 33.05,
+  "desc": "nature jungles of sarawak"
+ },
+ "nature-paddy-fields": {
+  "file": "Nature/Paddy Fields - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 5.51,
+  "build": 0.1,
+  "hit": 4.05,
+  "decay": 5.45,
+  "desc": "nature paddy fields"
+ },
+ "nature-paddy-fields-early-morning": {
+  "file": "Nature/Paddy Fields Early Morning - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 10.01,
+  "build": 0.25,
+  "hit": 1.55,
+  "decay": 9.9,
+  "desc": "nature paddy fields early morning"
+ },
+ "nature-rain-on-the-road": {
+  "file": "Nature/Rain On The Road - Nature - (Nikko Hunt's S.D.Essentials) .wav",
+  "dur": 32.0,
+  "build": 2.1,
+  "hit": 29.75,
+  "decay": 31.45,
+  "desc": "nature rain on the road"
+ },
+ "nature-rain-pattering": {
+  "file": "Nature/Rain Pattering - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 45.73,
+  "build": 3.7,
+  "hit": 20.4,
+  "decay": 39.5,
+  "desc": "nature rain pattering"
+ },
+ "nature-soft-river-flowing-in-borneo": {
+  "file": "Nature/Soft River Flowing In Borneo - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 27.03,
+  "build": 0.35,
+  "hit": 14.95,
+  "decay": 26.85,
+  "desc": "nature soft river flowing in borneo"
+ },
+ "nature-trickling-water": {
+  "file": "Nature/Trickling Water - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.38,
+  "build": 0.0,
+  "hit": 2.55,
+  "decay": 6.3,
+  "desc": "nature trickling water"
+ },
+ "nature-waves-breaking": {
+  "file": "Nature/Waves Breaking - Nature - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 36.8,
+  "build": 3.6,
+  "hit": 17.2,
+  "decay": 29.5,
+  "desc": "nature waves breaking"
+ },
+ "riser-dirty": {
+  "file": "Riser/Dirty - Riser - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 9.5,
+  "build": 3.75,
+  "hit": 5.15,
+  "decay": 5.3,
+  "desc": "riser dirty"
+ },
+ "riser-eerie-with-sub-hit": {
+  "file": "Riser/Eerie With Sub Hit - Riser - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 16.0,
+  "build": 2.0,
+  "hit": 2.0,
+  "decay": 3.25,
+  "desc": "riser eerie with sub hit"
+ },
+ "riser-sci-fi": {
+  "file": "Riser/Sci Fi - Riser - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 9.5,
+  "build": 3.4,
+  "hit": 4.95,
+  "decay": 5.05,
+  "desc": "riser sci fi"
+ },
+ "riser-tremelo-horror": {
+  "file": "Riser/Tremelo Horror - Riser - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 5.41,
+  "build": 1.2,
+  "hit": 1.9,
+  "decay": 1.95,
+  "desc": "riser tremelo horror"
+ },
+ "riser-white-noise": {
+  "file": "Riser/White Noise - Riser - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 5.03,
+  "build": 4.0,
+  "hit": 4.9,
+  "decay": 5.0,
+  "desc": "riser white noise"
+ },
+ "soundscape-dark-waves": {
+  "file": "Soundscapes/Dark Waves - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 16.0,
+  "build": 0.9,
+  "hit": 9.9,
+  "decay": 11.8,
+  "desc": "soundscape dark waves"
+ },
+ "soundscape-deep-fluctuating-rumbles": {
+  "file": "Soundscapes/Deep Fluctuating Rumbles - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 33.27,
+  "build": 3.95,
+  "hit": 26.05,
+  "decay": 31.05,
+  "desc": "soundscape deep fluctuating rumbles"
+ },
+ "soundscape-deep-rumble": {
+  "file": "Soundscapes/Deep Rumble - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 23.91,
+  "build": 0.55,
+  "hit": 14.55,
+  "decay": 22.55,
+  "desc": "soundscape deep rumble"
+ },
+ "soundscape-ghost-talk": {
+  "file": "Soundscapes/Ghost Talk - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 5.08,
+  "build": 0.3,
+  "hit": 0.85,
+  "decay": 2.05,
+  "desc": "soundscape ghost talk"
+ },
+ "soundscape-heavy-tension": {
+  "file": "Soundscapes/Heavy Tension - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 28.0,
+  "build": 0.35,
+  "hit": 5.6,
+  "decay": 21.85,
+  "desc": "soundscape heavy tension"
+ },
+ "soundscape-restructured-psyche": {
+  "file": "Soundscapes/ReStructured Psyche - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 28.0,
+  "build": 0.15,
+  "hit": 4.0,
+  "decay": 24.15,
+  "desc": "soundscape restructured psyche"
+ },
+ "soundscape-ripple-bass": {
+  "file": "Soundscapes/Ripple Bass - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 27.3,
+  "build": 0.4,
+  "hit": 10.85,
+  "decay": 17.5,
+  "desc": "soundscape ripple bass"
+ },
+ "soundscape-spiritual-awakening": {
+  "file": "Soundscapes/Spiritual Awakening - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 26.0,
+  "build": 9.75,
+  "hit": 15.15,
+  "decay": 21.55,
+  "desc": "soundscape spiritual awakening"
+ },
+ "soundscape-tension-loop": {
+  "file": "Soundscapes/Tension Loop - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 21.0,
+  "build": 0.2,
+  "hit": 1.3,
+  "decay": 18.15,
+  "desc": "soundscape tension loop"
+ },
+ "soundscape-the-abyss": {
+  "file": "Soundscapes/The Abyss - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 24.0,
+  "build": 0.3,
+  "hit": 15.7,
+  "decay": 18.55,
+  "desc": "soundscape the abyss"
+ },
+ "soundscape-the-sound-of-space-even-tho-there-be-no-sound-in-space": {
+  "file": "Soundscapes/The Sound Of Space Even Tho There Be No Sound In Space - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 26.0,
+  "build": 0.4,
+  "hit": 23.45,
+  "decay": 25.25,
+  "desc": "soundscape the sound of space even tho there be no sound in space"
+ },
+ "soundscape-transcendental-alien-evolution-sh-t": {
+  "file": "Soundscapes/Transcendental Alien Evolution Sh_t - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 16.0,
+  "build": 1.0,
+  "hit": 6.45,
+  "decay": 15.3,
+  "desc": "soundscape transcendental alien evolution sh t"
+ },
+ "soundscape-voices-in-your-head-not-mine": {
+  "file": "Soundscapes/Voices In Your Head Not Mine - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 17.0,
+  "build": 1.35,
+  "hit": 10.7,
+  "decay": 16.65,
+  "desc": "soundscape voices in your head not mine"
+ },
+ "soundscape-volcanic-eruption": {
+  "file": "Soundscapes/Volcanic Eruption - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 18.0,
+  "build": 0.0,
+  "hit": 2.25,
+  "decay": 16.9,
+  "desc": "soundscape volcanic eruption"
+ },
+ "soundscape-water-rumble-vader": {
+  "file": "Soundscapes/Water Rumble + Vader - Soundscapes - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 17.59,
+  "build": 1.6,
+  "hit": 8.2,
+  "decay": 13.0,
+  "desc": "soundscape water rumble vader"
+ },
+ "sweep-airy": {
+  "file": "Sweeps/Airy - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.75,
+  "build": 0.3,
+  "hit": 0.6,
+  "decay": 1.35,
+  "desc": "sweep airy"
+ },
+ "sweep-bass-hit": {
+  "file": "Sweeps/Bass Hit - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.0,
+  "build": 0.3,
+  "hit": 0.45,
+  "decay": 1.85,
+  "desc": "sweep bass hit"
+ },
+ "sweep-bowed": {
+  "file": "Sweeps/Bowed - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 11.5,
+  "build": 1.1,
+  "hit": 1.65,
+  "decay": 1.8,
+  "desc": "sweep bowed"
+ },
+ "sweep-cymbal": {
+  "file": "Sweeps/Cymbal - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.5,
+  "build": 0.4,
+  "hit": 0.45,
+  "decay": 1.3,
+  "desc": "sweep cymbal"
+ },
+ "sweep-dry": {
+  "file": "Sweeps/Dry - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.0,
+  "build": 1.45,
+  "hit": 1.6,
+  "decay": 3.45,
+  "desc": "sweep dry"
+ },
+ "sweep-engine-start-up": {
+  "file": "Sweeps/Engine Start Up - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 12.0,
+  "build": 3.75,
+  "hit": 4.75,
+  "decay": 4.8,
+  "desc": "sweep engine start up"
+ },
+ "sweep-gentle": {
+  "file": "Sweeps/Gentle - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 3.3,
+  "build": 0.3,
+  "hit": 0.5,
+  "decay": 0.65,
+  "desc": "sweep gentle"
+ },
+ "sweep-grater": {
+  "file": "Sweeps/Grater - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.0,
+  "build": 0.75,
+  "hit": 1.25,
+  "decay": 3.05,
+  "desc": "sweep grater"
+ },
+ "sweep-killa": {
+  "file": "Sweeps/KILLA - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 10.87,
+  "build": 1.05,
+  "hit": 2.1,
+  "decay": 4.2,
+  "desc": "sweep killa"
+ },
+ "sweep-long-sub": {
+  "file": "Sweeps/Long Sub - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 7.82,
+  "build": 1.1,
+  "hit": 1.5,
+  "decay": 4.1,
+  "desc": "sweep long sub"
+ },
+ "sweep-low-sweep": {
+  "file": "Sweeps/Low Sweep - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 7.58,
+  "build": 1.15,
+  "hit": 2.05,
+  "decay": 3.9,
+  "desc": "sweep low sweep"
+ },
+ "sweep-mega-death-with-hit": {
+  "file": "Sweeps/Mega Death With Hit - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 12.0,
+  "build": 1.35,
+  "hit": 2.0,
+  "decay": 4.4,
+  "desc": "sweep mega death with hit"
+ },
+ "sweep-mellow": {
+  "file": "Sweeps/Mellow - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 8.0,
+  "build": 0.35,
+  "hit": 1.35,
+  "decay": 3.05,
+  "desc": "sweep mellow"
+ },
+ "sweep-phaser": {
+  "file": "Sweeps/Phaser - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 8.0,
+  "build": 2.25,
+  "hit": 3.35,
+  "decay": 3.45,
+  "desc": "sweep phaser"
+ },
+ "sweep-reverse-cymbal": {
+  "file": "Sweeps/Reverse Cymbal - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.0,
+  "build": 1.8,
+  "hit": 1.9,
+  "decay": 2.0,
+  "desc": "sweep reverse cymbal"
+ },
+ "sweep-scary-string": {
+  "file": "Sweeps/Scary String - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 19.38,
+  "build": 3.85,
+  "hit": 5.85,
+  "decay": 12.1,
+  "desc": "sweep scary string"
+ },
+ "sweep-sci-fi": {
+  "file": "Sweeps/Sci Fi - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 8.0,
+  "build": 4.55,
+  "hit": 5.2,
+  "decay": 5.9,
+  "desc": "sweep sci fi"
+ },
+ "sweep-sci-fi-2": {
+  "file": "Sweeps/Sci Fi 2 - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 3.5,
+  "build": 0.6,
+  "hit": 0.8,
+  "decay": 1.25,
+  "desc": "sweep sci fi 2"
+ },
+ "sweep-scream": {
+  "file": "Sweeps/Scream - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 10.5,
+  "build": 1.25,
+  "hit": 1.55,
+  "decay": 1.6,
+  "desc": "sweep scream"
+ },
+ "sweep-siren": {
+  "file": "Sweeps/Siren - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 11.5,
+  "build": 1.0,
+  "hit": 1.55,
+  "decay": 1.7,
+  "desc": "sweep siren"
+ },
+ "sweep-sub": {
+  "file": "Sweeps/Sub - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 7.94,
+  "build": 2.95,
+  "hit": 4.05,
+  "decay": 5.5,
+  "desc": "sweep sub"
+ },
+ "sweep-sub-2": {
+  "file": "Sweeps/Sub 2 - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 9.0,
+  "build": 3.15,
+  "hit": 4.0,
+  "decay": 5.5,
+  "desc": "sweep sub 2"
+ },
+ "sweep-suuuub": {
+  "file": "Sweeps/Suuuub - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 7.5,
+  "build": 1.6,
+  "hit": 2.3,
+  "decay": 3.4,
+  "desc": "sweep suuuub"
+ },
+ "sweep-ventilator": {
+  "file": "Sweeps/Ventilator - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 10.0,
+  "build": 1.65,
+  "hit": 1.9,
+  "decay": 1.95,
+  "desc": "sweep ventilator"
+ },
+ "sweep-white-noise": {
+  "file": "Sweeps/White Noise - Sweeps - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 10.0,
+  "build": 4.0,
+  "hit": 4.9,
+  "decay": 6.85,
+  "desc": "sweep white noise"
+ },
+ "whoosh-deep": {
+  "file": "Whooshs/Deep - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.0,
+  "build": 0.3,
+  "hit": 0.5,
+  "decay": 0.95,
+  "desc": "whoosh deep"
+ },
+ "whoosh-fireball-1": {
+  "file": "Whooshs/Fireball 1 - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 9.0,
+  "build": 1.55,
+  "hit": 1.95,
+  "decay": 2.9,
+  "desc": "whoosh fireball 1"
+ },
+ "whoosh-fireball-2": {
+  "file": "Whooshs/Fireball 2 - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 4.0,
+  "build": 1.0,
+  "hit": 1.45,
+  "decay": 3.05,
+  "desc": "whoosh fireball 2"
+ },
+ "whoosh-fireball-3": {
+  "file": "Whooshs/Fireball 3 - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 8.0,
+  "build": 1.4,
+  "hit": 2.15,
+  "decay": 4.3,
+  "desc": "whoosh fireball 3"
+ },
+ "whoosh-formula-1": {
+  "file": "Whooshs/Formula 1 - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 5.45,
+  "build": 1.05,
+  "hit": 1.25,
+  "decay": 2.9,
+  "desc": "whoosh formula 1"
+ },
+ "whoosh-hi-end": {
+  "file": "Whooshs/Hi End - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 4.0,
+  "build": 1.0,
+  "hit": 1.45,
+  "decay": 3.05,
+  "desc": "whoosh hi end"
+ },
+ "whoosh-hi-pass": {
+  "file": "Whooshs/Hi Pass - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 9.0,
+  "build": 1.9,
+  "hit": 2.1,
+  "decay": 2.6,
+  "desc": "whoosh hi pass"
+ },
+ "whoosh-light": {
+  "file": "Whooshs/Light - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 4.0,
+  "build": 1.4,
+  "hit": 1.85,
+  "decay": 3.05,
+  "desc": "whoosh light"
+ },
+ "whoosh-low": {
+  "file": "Whooshs/Low - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 7.25,
+  "build": 1.55,
+  "hit": 2.0,
+  "decay": 3.85,
+  "desc": "whoosh low"
+ },
+ "whoosh-low-passed": {
+  "file": "Whooshs/Low Passed - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 3.5,
+  "build": 1.8,
+  "hit": 1.95,
+  "decay": 2.3,
+  "desc": "whoosh low passed"
+ },
+ "whoosh-one": {
+  "file": "Whooshs/One - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.0,
+  "build": 0.35,
+  "hit": 0.5,
+  "decay": 0.95,
+  "desc": "whoosh one"
+ },
+ "whoosh-sci-fi": {
+  "file": "Whooshs/Sci Fi - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.5,
+  "build": 0.25,
+  "hit": 0.45,
+  "decay": 2.4,
+  "desc": "whoosh sci fi"
+ },
+ "whoosh-soft-rain": {
+  "file": "Whooshs/Soft Rain - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 3.0,
+  "build": 0.75,
+  "hit": 0.95,
+  "decay": 1.4,
+  "desc": "whoosh soft rain"
+ },
+ "whoosh-sub-bass": {
+  "file": "Whooshs/Sub Bass - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 6.37,
+  "build": 1.9,
+  "hit": 2.15,
+  "decay": 2.5,
+  "desc": "whoosh sub bass"
+ },
+ "whoosh-whip": {
+  "file": "Whooshs/Whip - Whoosh - (Nikko Hunt's S.D.Essentials).wav",
+  "dur": 7.2,
+  "build": 0.35,
+  "hit": 0.45,
+  "decay": 2.15,
+  "desc": "whoosh whip"
+ }
+}

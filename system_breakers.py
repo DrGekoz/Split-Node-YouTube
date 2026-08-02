@@ -22,6 +22,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -37,6 +38,16 @@ try:
     _HAS_PROGRESS = True
 except ImportError:
     _HAS_PROGRESS = False
+
+try:
+    import split_node_titles
+except Exception:
+    split_node_titles = None
+
+try:
+    import trend_scorer
+except Exception:
+    trend_scorer = None
 
 # -- Config ----------------------------------------------------------
 PROJECT_DIR = Path(__file__).parent.resolve()
@@ -92,21 +103,38 @@ YOUTUBE_BASE_TAGS = [
     "3d animation", "metahuman", "people who beat the system", "incredible true stories",
 ]
 
-# RSS feeds for the niche (fallback pool - primary source is HN Algolia search)
+# RSS feeds for the niche (fallback pool - primary source is HN Algolia search).
+# Expanded Aug 2026 with AI / tech / security feeds to serve the trend-scan
+# categories (hacker, beat-the-system, lottery, AI, tech).
 RSS_FEEDS = [
+    # security / hacker
     "https://www.wired.com/feed/tag/cybersecurity/latest/rss",
     "https://krebsonsecurity.com/feed/",
     "https://feeds.feedburner.com/TheHackersNews",
-    "https://news.ycombinator.com/rss",
-    "https://feeds.bbci.co.uk/news/technology/rss.xml",
-    "https://www.theguardian.com/technology/rss",
     "https://www.bleepingcomputer.com/feed/",
     "https://www.404media.co/rss/",
+    "https://www.darkreading.com/rss.xml",
+    "https://www.schneier.com/feed/atom/",
+    "https://therecord.media/feed",
+    "https://grahamcluley.com/feed/",
+    "https://securityweekly.com/feed/",
+    # tech / startup / exploits
+    "https://news.ycombinator.com/rss",
+    "https://arstechnica.com/feed/",
+    "https://techcrunch.com/feed/",
+    "https://www.theverge.com/rss/index.xml",
+    "https://www.wired.com/feed/tag/tech/latest/rss",
+    # AI
+    "https://venturebeat.com/feed/",
+    "https://www.technologyreview.com/feed/",
+    "https://www.marktechpost.com/feed/",
+    "https://syncedreview.com/feed/",
+    # general news (beat-the-system stories surface here)
+    "https://feeds.bbci.co.uk/news/technology/rss.xml",
     "https://feeds.bbci.co.uk/news/world/rss.xml",
-    "https://feeds.washingtonpost.com/rss/world",
+    "https://www.theguardian.com/technology/rss",
     "https://www.theguardian.com/world/rss",
-    "https://www.theguardian.com/uk-news/rss",
-    "https://feeds.bbci.co.uk/news/uk/rss.xml",
+    "https://feeds.washingtonpost.com/rss/world",
 ]
 
 # HN Algolia search queries - tuned to the niche: math beating the lottery,
@@ -250,7 +278,108 @@ SFX_LIBRARY = {
     "mixkit-magic-sparkle-whoosh-2350.wav": {"dur": 3.5, "build": 0.1, "hit": 0.45, "decay": 1.25, "desc": "magic sparkle whoosh"},
     "mixkit-reverse-cinematic-impact-trailer-784.wav": {"dur": 10.08, "build": 0.1, "hit": 0.1, "decay": 2.65, "desc": "reverse cinematic impact"},
     "mixkit-short-space-stutter-intro-riser-1144.mp3": {"dur": 6.56, "build": 2.6, "hit": 6.25, "decay": 6.5, "desc": "space stutter riser (slow build)"},
+    # -- Split Node title/SFX additions (trimmed + pre-analyzed Aug 2026) --
+    "typewriter-clicks.wav": {"dur": 1.6, "build": 0.0, "hit": 0.1, "decay": 1.5, "desc": "typewriter keystrokes (1.6s, for 1.5s typewriter animation)", "max_dur": 1.5},
+    "glitch-off.wav": {"dur": 0.7, "build": 0.0, "hit": 0.15, "decay": 0.6, "desc": "short digital glitch (for 0.5s title glitch-off)", "max_dur": 0.5},
+    "camera-shutter-short.wav": {"dur": 1.0, "build": 0.15, "hit": 0.2, "decay": 0.4, "desc": "camera shutter click (new character/location switch)"},
 }
+
+# -- Load the analysed Nikko Hunt's S.D.Essentials library (aliases -> files) --
+# Built by analyze_sfx.py (re-run after adding new sounds). Each entry has a
+# "file" key pointing at the real path under cinematic_sounds/.
+_SFX_EXTRA_FILE = PROJECT_DIR / "sfx_library_extra.json"
+if _SFX_EXTRA_FILE.is_file():
+    try:
+        _extra = json.loads(_SFX_EXTRA_FILE.read_text())
+        for _k, _v in _extra.items():
+            if _k not in SFX_LIBRARY:
+                SFX_LIBRARY[_k] = _v
+    except Exception as _e:
+        print(f"  [WARN] sfx_library_extra.json load failed: {_e}")
+
+
+def _sfx_path(name: str) -> Optional[Path]:
+    """Resolve an SFX_LIBRARY name to its real file (handles subfolder paths)."""
+    meta = SFX_LIBRARY.get(name)
+    if not meta:
+        return None
+    rel = meta.get("file", name)
+    p = SFX_DIR / rel
+    return p if p.is_file() else None
+
+
+def _sfx_llm_choices() -> str:
+    """Full categorized SFX list for the shot-list prompt. Every category in
+    cinematic_sounds/ is exposed with a usage hint so the model can pick
+    ambience (nature/foley/soundscape) as well as hits/whooshes/risers."""
+    def pick(prefix: str) -> list[str]:
+        ks = sorted(k for k in SFX_LIBRARY if k.startswith(prefix))
+        return [k for k in ks
+                if k != "hit-shell-shock-high-ring-not-nice-for-ears"]
+    groups = [
+        ("HITS - dramatic impact / reveals / big moments", pick("hit-")),
+        ("WHOOSHES - transitions, camera moves, energy", pick("whoosh-")),
+        ("RISERS - build-up that resolves INTO a reveal", pick("riser-")),
+        ("SWEEPS - gliding transitions / scene shifts", pick("sweep-")),
+        ("GLITCHES - digital fracture / corruption", pick("glitch-")),
+        ("NATURE - outdoor ambience (rain, waves, thunder, jungle)", pick("nature-")),
+        ("FOLEY - real-world action/environment (traffic, footsteps, doors, engines)", pick("foley-")),
+        ("SOUNDSCAPES - tense/uneasy ambient beds (abyss, rumble, tension)", pick("soundscape-")),
+    ]
+    lines = [f"  {label}: {', '.join(ks)}" for label, ks in groups if ks]
+    base = [
+        "mixkit-big-cinematic-impact-788.mp3", "mixkit-cinematic-mystery-heartbeat-transition-492.wav",
+        "mixkit-cinematic-trailer-riser-790.wav", "mixkit-cinematic-transition-swoosh-heartbeat-trailer-488.wav",
+        "mixkit-cinematic-tunnel-reverb-woosh-1486.wav", "mixkit-cinematic-whoosh-deep-impact-1143.mp3",
+        "mixkit-cinematic-whoosh-fast-transition-1492.wav", "mixkit-epic-orchestra-transition-2290.wav",
+        "mixkit-glitchy-cinematic-suspense-hit-679.wav", "mixkit-magic-sparkle-whoosh-2350.wav",
+        "mixkit-reverse-cinematic-impact-trailer-784.wav", "mixkit-short-space-stutter-intro-riser-1144.mp3",
+    ]
+    lines.insert(0, "  MIXKIT (cinematic trailer sounds): " + ", ".join(base))
+    return "\n".join(lines)
+
+# -- Chapter / location / timeline title config -----------------------------
+# Narration paragraphs that begin with "Chapter N - ..." become black-screen
+# placeholder clips + centered glowing chapter cards.
+CHAPTER_RE = re.compile(r"^\s*chapter\s+(\d{1,2})\s*[-–:.]?\s*(.+)$", re.IGNORECASE)
+
+# Timeline anchors: dates/locations the narrator reads aloud, which become
+# bottom-left typewriter titles (GREEN = timeline, RED = location).
+MONTHS = r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+TIMELINE_PATTERNS = [
+    re.compile(rf"{MONTHS}\s+\d{{1,2}}(?:st|nd|rd|th)?[,\s]+\d{{4}}", re.IGNORECASE),   # March 2010 / March 12th, 2012
+    re.compile(rf"\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTHS}\s+\d{{4}}", re.IGNORECASE),       # 12th March 2012
+    re.compile(rf"{MONTHS}\s+\d{{4}}", re.IGNORECASE),                                   # March 2010 (no day)
+    re.compile(rf"(?:Late|Early|Mid)\s+\d{{4}}", re.IGNORECASE),                         # Late 2016
+    re.compile(rf"\b20\d{{2}}\b"),                                                       # bare year (accepted only at para start)
+]
+LOCATION_PATTERNS = [
+    # "Goulburn, New South Wales" / "Queen Square, Sydney" (comma pairs)
+    re.compile(r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2}),\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2})"),
+    # "in Sydney" / "at the kitchen table of his flat" (in/at + place)
+    re.compile(rf"\b(?:in|at|from)\s+(?:(?:the|a|an)\s+)?({MONTHS}|[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){{0,2}})\b"),
+]
+# Words too generic to be a location title (single-word in/at anchors)
+LOCATION_STOPWORDS = {
+    "court", "courthouse", "office", "house", "room", "bank", "city", "park",
+    "street", "road", "square", "station", "home", "bed", "car", "jail",
+    "prison", "kitchen", "apartment", "hall", "building", "center", "centre",
+    "town", "yard", "cell", "door", "front", "back", "top", "bottom", "side",
+    "morning", "night", "day", "year", "month", "week", "june", "july", "may",
+}
+TITLE_ANCHOR_MAX_CHARS = 110   # only look at the paragraph lead for anchors
+TITLE_SFX = {
+    "typewriter": "typewriter-clicks.wav",
+    "glitch": "glitch-off.wav",
+    "shutter": "camera-shutter-short.wav",
+    "intro": "mixkit-glitchy-cinematic-suspense-hit-679.wav",
+}
+# Timing contract for location/timeline titles (seconds)
+TYPEWRITER_SEC = 1.5
+TITLE_HOLD_SEC = 4.0
+GLITCH_OFF_SEC = 0.5
+# whisper / STT artifacts are deleted on episode completion
+WHISPER_JSON = "ep{ep:03d}_whisper.json"
 
 # Music library - tone-tagged
 MUSIC_LIBRARY = {
@@ -354,11 +483,61 @@ def _fetch_rss_feed(feed_url: str) -> list[dict]:
         print(f"  [RSS] failed: {str(e)[:60]}")
         return []
 
-def _collect_candidate_stories(used: set, skip: set) -> list[dict]:
+def _trend_topics() -> dict:
+    """Run the trend-research-toolkit topic scan (rising + under-served topics
+    per category). Cached 24h (TREND_SCAN_CACHE_HOURS env). Never blocks the
+    pipeline: any failure returns {} and story picking falls back to niche scoring."""
+    if trend_scorer is None:
+        return {}
+    try:
+        cache_h = int(os.environ.get("TREND_SCAN_CACHE_HOURS", "24"))
+    except Exception:
+        cache_h = 24
+    try:
+        return trend_scorer.scan_topics(creds_fn=_get_youtube_creds,
+                                        cache_hours=cache_h)
+    except Exception as e:
+        print(f"  [TREND] topic scan failed: {e}")
+        return {}
+
+
+def _trend_relevance(text: str, topics: dict) -> tuple[int, str]:
+    """How well a story matches the current trending topics. Returns
+    (score 0-100, best matched topic term)."""
+    if not topics:
+        return 0, ""
+    low = text.lower()
+    words = set(re.findall(r"[a-z0-9']+", low))
+    best = (0, "")
+    for cat, t in topics.items():
+        term = (t.get("term") or "").lower()
+        if not term:
+            continue
+        tw = re.findall(r"[a-z0-9']+", term)
+        if not tw:
+            continue
+        # multi-word term: ALL words must appear; single word: must appear
+        if len(tw) == 1:
+            hit = tw[0] in words
+        else:
+            hit = all(w in low for w in tw)
+        if hit:
+            score = int(t.get("score", 50) or 50)
+            if score > best[0]:
+                best = (score, term)
+    return best
+
+
+def _collect_candidate_stories(used: set, skip: set,
+                               trend_topics: Optional[dict] = None) -> list[dict]:
     """Find niche stories. Primary: HN Algolia search (scored, curated queries).
-    Fallback: RSS feed keyword scan. used = made episodes, skip = rejected this session."""
+    Fallback: RSS feed keyword scan. used = made episodes, skip = rejected this session.
+    Every candidate gets trend_relevance + final_score (rising/under-served shown
+    during the pick prompt). Never re-displays used or previously-rejected links."""
     matches = []
     seen_links = set()
+    seen_titles = set()
+    trend_topics = trend_topics or {}
 
     # -- Primary: HN Algolia niche search --
     queries = HN_SEARCH_QUERIES[:]
@@ -370,14 +549,27 @@ def _collect_candidate_stories(used: set, skip: set) -> list[dict]:
                 continue
             if it["score"] < 4:  # needs at least 2 strong keyword hits
                 continue
+            tkey = re.sub(r"[^a-z0-9]+", "", it["title"].lower())
+            if tkey and tkey in seen_titles:
+                continue
             seen_links.add(it["link"])
+            seen_titles.add(tkey)
+            trend_rel, matched_term = _trend_relevance(
+                f"{it['title']} {it.get('description', '')}", trend_topics)
+            it["trend_rel"] = trend_rel
+            it["trend_term"] = matched_term
+            it["final_score"] = round(
+                0.5 * min(it["score"] * 10, 100)
+                + 0.3 * trend_rel
+                + 0.2 * min(it.get("hn_points", 0), 100), 1)
             matches.append(it)
         if len(matches) >= 10:
             break
         time.sleep(0.4)
 
-    # Sort by score (strongest niche match first), tiebreak by HN points
-    matches.sort(key=lambda x: (x.get("score", 0), x.get("hn_points", 0)), reverse=True)
+    # Sort by final score (niche + trend + engagement), tiebreak HN points
+    matches.sort(key=lambda x: (x.get("final_score", 0), x.get("hn_points", 0)),
+                 reverse=True)
 
     # -- Fallback: RSS feeds if Algolia gave nothing usable --
     if not matches:
@@ -389,21 +581,38 @@ def _collect_candidate_stories(used: set, skip: set) -> list[dict]:
             for it in items:
                 if it["link"] in used or it["link"] in skip:
                     continue
+                tkey = re.sub(r"[^a-z0-9]+", "", it["title"].lower())
+                if tkey and tkey in seen_titles:
+                    continue
                 text = f"{it['title']} {it['description']}".lower()
                 score = _story_score(it["title"], it["description"])
                 if score >= 3:
                     it["score"] = score
+                    it["hn_points"] = 0
+                    trend_rel, matched_term = _trend_relevance(
+                        f"{it['title']} {it['description']}", trend_topics)
+                    it["trend_rel"] = trend_rel
+                    it["trend_term"] = matched_term
+                    it["final_score"] = round(
+                        0.5 * min(score * 10, 100) + 0.3 * trend_rel, 1)
+                    seen_titles.add(tkey)
                     matches.append(it)
             if len(matches) >= 8:
                 break
             time.sleep(0.3)
-        matches.sort(key=lambda x: x.get("score", 0), reverse=True)
+        matches.sort(key=lambda x: x.get("final_score", 0), reverse=True)
     return matches
 
 
 def _pick_story() -> tuple[str, str]:
     """Pick a story with user confirmation. Asks Y/n per candidate;
-    re-polls RSS when the candidate pool runs out."""
+    re-polls RSS when the candidate pool runs out.
+
+    Before collecting candidates, runs the trend-research-toolkit scan so each
+    candidate is shown with its RISING (Google Trends) and UNDER-SERVED (YouTube
+    competition) scores plus a final score. used articles are never re-displayed;
+    rejected candidates are skipped for the rest of the session.
+    """
     used = _load_used_articles()
     rejected = set()  # candidates the user said no to this session
     pool: list[dict] = []
@@ -411,7 +620,9 @@ def _pick_story() -> tuple[str, str]:
     rounds = 0
 
     print("\n[RSS] Scraping feeds for a 'beat the system' story...")
-    pool = _collect_candidate_stories(used, rejected)
+    print("  [TREND] scanning rising + under-served topics (trend-research-toolkit)...")
+    trend_topics = _trend_topics()
+    pool = _collect_candidate_stories(used, rejected, trend_topics)
     if not pool:
         print("  [FAIL] No articles found at all")
         return ("", "")
@@ -426,7 +637,7 @@ def _pick_story() -> tuple[str, str]:
                 return ("", "")
             print(f"\n  [RSS] Pool exhausted ({len(pool)} candidates). Re-polling feeds...")
             time.sleep(2)
-            pool = _collect_candidate_stories(used, rejected)
+            pool = _collect_candidate_stories(used, rejected, trend_topics)
             pool_idx = 0
             if not pool:
                 print("  [FAIL] No fresh articles found on re-poll")
@@ -438,6 +649,13 @@ def _pick_story() -> tuple[str, str]:
         print(f"  CANDIDATE STORY:")
         print(f"    {chosen['title']}")
         print(f"    {chosen['link']}")
+        # Score line: niche + rising (Google Trends) + under-served (YouTube)
+        fs = chosen.get("final_score")
+        tr = chosen.get("trend_rel", 0)
+        tt = chosen.get("trend_term", "")
+        hp = chosen.get("hn_points", 0)
+        print(f"    [final={fs if fs is not None else '?'} | niche={chosen.get('score', 0)*10}"
+              f"/100 | rising_topic='{tt}' ({tr}/100) | hn={hp}]")
         print(f"  {'='*60}")
         resp = input("  Use this topic? (Y/n/q): ").strip().lower()
         if resp in ("q", "quit"):
@@ -657,15 +875,38 @@ NARRATION_SYSTEM_PROMPT = (
     "The channel tells true stories of ordinary people who used their skills, brains, "
     "or nerve to beat the system - hackers, lottery mathematicians, card counters, "
     "scam-baiters, people who found legal loopholes and won the game of life. "
-    "\n\n"
+    "Your writing style is the Black Files / FERN true-crime documentary style.\n\n"
+    "STYLE RULES (follow ALL of them):\n"
+    "1. COLD OPEN: the very first paragraph must drop the viewer into a specific, "
+    "visceral scene - exact date, exact place, one dramatic image after another - "
+    "escalate the stakes, then end with a twist tease ('Except this story doesn't "
+    "end there...') and the question the whole episode answers.\n"
+    "2. PRESENT TENSE, CINEMATIC. Short punchy sentences and fragments for impact "
+    "('Case closed.' 'Declined. One word on a screen.').\n"
+    "3. EXACT NUMBERS, never vague. Dollar amounts, dates, durations, counts "
+    "('$449 a fortnight', '$2.1 million', '29 months', 'a $9 fee', 'five taps of $4,999'). "
+    "Never write 'a lot of money' - write the exact figure from the article.\n"
+    "4. TIME AND PLACE ANCHORS: every time the scene shifts, START the new paragraph "
+    "with a standalone date and/or location sentence ('December 12th, 2012. Goulburn, "
+    "New South Wales.' / 'March 2010.' / 'Late 2016, Queen Square, Sydney.'). The "
+    "viewer must always know where and when the story is. Use REAL place names from "
+    "the article.\n"
+    "5. METAPHOR AND SENSORY DETAIL: concrete images ('the account died mid-transaction "
+    "like a heart stopping between beats', 'a paper monument to a number nobody at the "
+    "bank appears to be reading').\n"
+    "6. RHETORICAL QUESTIONS as pivots between beats ('Who is watching this account? "
+    "'How do you take $2.1 million from a bank without breaking a single law?')\n"
+    "7. IRONY AND REVERSAL: set up the obvious reading, then flip it ('The law has a "
+    "name for that arrangement, and it isn't fraud. It's a loan.')\n"
+    "8. DIRECT ADDRESS 1-2 times per episode ('Be honest. If some part of you would "
+    "have typed that first $4,999 too...')\n"
+    "9. NEVER invent facts that contradict the article. Expand with cinematic framing, "
+    "sensory detail and dramatic tension only.\n\n"
     "I will give you an excerpt of a news article plus story context. Your job: EXPAND "
-    "it into a gripping documentary narration in the style of true-crime documentaries "
-    "(like FERN or Black Files). Write in the present tense, cinematic, dramatic - build "
-    "suspense, then resolve triumphantly near the end. You may add dramatic framing, "
-    "sensory detail, and storytelling flourishes, but NEVER invent facts that contradict "
-    "the article. Every narration paragraph must be 2-4 sentences and cover a DIFFERENT "
-    "beat - do not repeat ideas across paragraphs, and never repeat beats I tell you "
-    "are already covered."
+    "it into a gripping documentary narration. Write in the present tense, cinematic, "
+    "dramatic - build suspense, then resolve triumphantly near the end. Every narration "
+    "paragraph must be 2-4 sentences and cover a DIFFERENT beat - do not repeat ideas "
+    "across paragraphs, and never repeat beats I tell you are already covered."
     "\n\n"
     "When I ask you to 'generate exactly N narration paragraphs based on this context', "
     "produce EXACTLY N paragraphs, expanding the source material with cinematic detail "
@@ -727,6 +968,212 @@ def _build_narration_script(paragraphs: list[str]) -> list[str]:
         print(f"    {i+1}. {p[:70]}...")
     return narration_paras
 
+
+CHAPTER_PLAN_PROMPT = (
+    "You are a documentary editor for SPLIT NODE. You are given a finished "
+    "narration script (numbered paragraphs) for a true-crime documentary in the "
+    "Black Files style. The episode must be divided into 4-6 CHAPTERS, each "
+    "opening with a title card the narrator reads aloud as 'Chapter N - <Title>'.\n"
+    "Pick natural break points: where the story shifts location, era, or moves to "
+    "a new major event. The FIRST 1-3 paragraphs are the cold-open hook and must "
+    "NOT be a chapter start.\n"
+    "Respond with EXACTLY 4-6 lines, one per chapter, in this format:\n"
+    "<paragraph_number> | <Chapter Title, 2-6 words, punchy, no period>\n"
+    "Example:\n"
+    "4 | The Account That Never Said No\n"
+    "12 | Complete Freedom\n"
+    "No other text."
+)
+
+
+def _insert_chapter_markers(narration_paras: list[str]) -> tuple[list[str], list[dict]]:
+    """Split the narration into chapters: inserts 'Chapter N - Title' paragraphs.
+
+    Returns (new_narration, chapter_events) where each chapter event is
+    {chapter: n, title: str, para_idx: index of the inserted paragraph}.
+    Falls back to no chapters if the LLM call fails.
+    """
+    if len(narration_paras) < 12:
+        return narration_paras, []
+    print("\n[LLM] Chapter pass: picking chapter breaks + titles...")
+    try:
+        numbered = "\n".join(f"{i+1}. {p[:160]}" for i, p in enumerate(narration_paras))
+        text = _llm_chat([
+            {"role": "system", "content": CHAPTER_PLAN_PROMPT},
+            {"role": "user", "content": f"NARRATION SCRIPT:\n{numbered}"}
+        ], max_tokens=400, temp=0.5)
+        breaks = []
+        for line in text.splitlines():
+            m = re.match(r"^\s*(\d{1,3})\s*[|:]\s*(.+)$", line.strip())
+            if m:
+                idx = int(m.group(1)) - 1  # to 0-based paragraph index
+                title = re.sub(r"\s+", " ", m.group(2)).strip().strip(".\"'")
+                if 1 <= idx <= len(narration_paras) - 2 and 2 <= len(title) <= 60:
+                    if idx not in [b[0] for b in breaks]:
+                        breaks.append((idx, title))
+        breaks.sort()
+        breaks = breaks[:6]
+        if len(breaks) < 2:
+            print("  [LLM] Chapter plan unparsable, skipping chapters")
+            return narration_paras, []
+        out = list(narration_paras)
+        events = []
+        for n, (idx, title) in enumerate(breaks, start=1):
+            # insert at idx (0-based) in the CURRENT list
+            pos = idx + (n - 1)  # earlier insertions shift indices
+            para = f"Chapter {n} - {title}"
+            out.insert(pos, para)
+            events.append({"chapter": n, "title": title, "para_idx": pos})
+        print(f"  [LLM] {len(events)} chapters: " +
+              ", ".join(f"#{e['chapter']} '{e['title']}' @para{e['para_idx']+1}" for e in events))
+        return out, events
+    except Exception as e:
+        print(f"  [LLM] Chapter pass failed: {e}")
+        return narration_paras, []
+
+
+def _extract_anchor_events(narration_paras: list[str]) -> list[dict]:
+    """Find location (red) and timeline (green) anchors in paragraph leads.
+
+    Each event: {kind: 'location'|'timeline', text, para_idx, anchor_words}.
+    anchor_words are the whisper search words used to pin the exact read time.
+    """
+    events = []
+    for i, para in enumerate(narration_paras):
+        if CHAPTER_RE.match(para):
+            continue
+        lead = para[:TITLE_ANCHOR_MAX_CHARS]
+        # --- timeline: prefer the most specific date pattern in the lead ---
+        timeline = None
+        for pat in TIMELINE_PATTERNS:
+            m = pat.search(lead)
+            if m:
+                timeline = m.group(0).strip()
+                # bare-year matches must sit in the first 30 chars (scene anchor)
+                if re.fullmatch(r"20\d{2}", timeline) and m.start() > 30:
+                    timeline = None
+                    continue
+                break
+        # --- location: comma-pair first, then in/at + place ---
+        location = None
+        m_loc = LOCATION_PATTERNS[0].search(lead)
+        if m_loc:
+            location = (m_loc.group(1) + ", " + m_loc.group(2)).strip()
+        else:
+            m_in = LOCATION_PATTERNS[1].search(lead)
+            if m_in:
+                place = m_in.group(1)
+                if place.lower() not in LOCATION_STOPWORDS and len(place) >= 3:
+                    location = place.strip()
+        # A location lead often carries a timeline too ("Goulburn, NSW, March 2010") —
+        # both events fire together at the paragraph start; no filtering needed.
+        if timeline:
+            words = re.findall(r"[A-Za-z0-9]+", timeline.lower())
+            events.append({
+                "kind": "timeline", "text": timeline, "para_idx": i,
+                "anchor_words": words[:2] if words else [timeline.lower()],
+            })
+        if location:
+            words = re.findall(r"[A-Za-z']+", location.lower())
+            events.append({
+                "kind": "location", "text": location, "para_idx": i,
+                "anchor_words": words[:2] if words else [location.lower()],
+            })
+    if events:
+        kinds = {}
+        for e in events:
+            kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
+        print(f"  [TITLES] anchors found: " +
+              ", ".join(f"{k}={v}" for k, v in kinds.items()))
+        for e in events:
+            print(f"    {e['kind']:8s} para {e['para_idx']+1:3d}  '{e['text']}'")
+    return events
+
+
+def _build_person_events(shots: list[dict], clip_starts: list[float]) -> list[dict]:
+    """First on-screen appearance of each canonical character -> a bottom-left
+    PERSON typewriter title (gold). Fires at the exact moment the name is first
+    spoken (whisper-matched, scoped to the character's first shot onward so an
+    earlier passing mention doesn't steal the title)."""
+    canon = _character_canonical_map(shots)
+    seen = set()
+    events = []
+    for pos, shot in enumerate(shots):
+        if shot.get("is_chapter"):
+            continue
+        ch = shot.get("character", "NONE")
+        if ch == "NONE":
+            continue
+        name = canon.get(ch, ch)
+        key = _norm_char_name(name)[0]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        # all-caps spellings (e.g. the LLM wrote 'STEFAN MANDEL') display as
+        # proper case on the card; genuine mixed-case names are left alone.
+        display = name.title() if name.isupper() else name
+        nidx = shot.get("narration_idx", pos)
+        start = clip_starts[pos] if pos < len(clip_starts) else 0.0
+        words = re.findall(r"[A-Za-z']+", display)
+        events.append({
+            "kind": "person",
+            "text": display,
+            "para_idx": nidx,
+            "search_from": start,
+            "anchor_words": words[:2] if words else [display.lower()],
+        })
+    if events:
+        print("  [TITLES] person titles (first appearance): " +
+              ", ".join(e["text"] for e in events))
+    return events
+
+
+def _resolve_anchor_times(events: list[dict], words: list[dict],
+                          clip_starts: list[float]) -> list[dict]:
+    """Pin each anchor to the exact moment the narrator reads it.
+
+    words: faster-whisper word timings [{word, start, end}] over the voice track.
+    clip_starts[i]: absolute start time of paragraph i in the voice/video timeline.
+    Falls back to clip_start + 0.4 when the phrase isn't found.
+    """
+    resolved = []
+    for ev in events:
+        pi = ev["para_idx"]
+        fallback = (clip_starts[pi] + 0.4) if pi < len(clip_starts) else 0.0
+        t = None
+        anchor = [w.lower() for w in ev.get("anchor_words", []) if w]
+        if anchor and words:
+            # person titles: only match from the character's first shot onward
+            # (their name may be mentioned earlier in the narration)
+            search_from = ev.get("search_from")
+            # find first word, then the rest within a 7-word window
+            for i, w in enumerate(words):
+                if search_from is not None and w["start"] < search_from - 0.8:
+                    continue
+                wl = w["word"].strip(".,!?;:()\"'").lower()
+                if wl != anchor[0]:
+                    continue
+                if len(anchor) == 1:
+                    t = w["start"]
+                    break
+                window = words[i + 1:i + 7]
+                j = 0
+                for w2 in window:
+                    w2l = w2["word"].strip(".,!?;:()\"'").lower()
+                    if w2l == anchor[j + 1]:
+                        j += 1
+                        if j == len(anchor) - 1:
+                            t = w["start"]
+                            break
+                if t is not None:
+                    break
+        if t is None:
+            t = fallback
+        ev = dict(ev)
+        ev["start"] = round(t, 3)
+        resolved.append(ev)
+    return resolved
+
 # -- Stage 2: Shot list ----------------------------------------------
 
 SHOT_SYSTEM_PROMPT = (
@@ -738,6 +1185,10 @@ SHOT_SYSTEM_PROMPT = (
     "Each character must be identified by NAME (use the real name from the story, or "
     "a clearly consistent invented name if the story doesn't give one - and reuse the "
     "exact same name every time that person appears). "
+    "CHARACTER NAME RULE: once a person is named, ALWAYS repeat the exact same full name "
+    "verbatim in every shot they appear in. NEVER switch to first-name-only, last-name-only, "
+    "ALL CAPS, initials, or a different spelling - 'Stefan Mandel' stays 'Stefan Mandel' "
+    "in every single shot. "
     "The scenes must show the characters actually DOING something - an action that "
     "moves the story forward. Never static portraits. Full scenes based on the actions "
     "they take in the narration.\n\n"
@@ -751,12 +1202,10 @@ SHOT_SYSTEM_PROMPT = (
     "<SFX filename or NONE> | <suspense | neutral | triumphant>\n"
     "Example line:\n"
     "MS | low-angle | Stefan Mandel | lottery mathematician | Stefan sits at a candlelit desk in a cramped 1980s Bucharest apartment, hunched over a spreadsheet of every number combination, a worn calculator in hand. | mixkit-cinematic-trailer-riser-790.wav | suspense\n"
-    "SFX choices: mixkit-big-cinematic-impact-788.mp3, mixkit-cinematic-mystery-heartbeat-transition-492.wav, "
-    "mixkit-cinematic-trailer-riser-790.wav, mixkit-cinematic-transition-swoosh-heartbeat-trailer-488.wav, "
-    "mixkit-cinematic-tunnel-reverb-woosh-1486.wav, mixkit-cinematic-whoosh-deep-impact-1143.mp3, "
-    "mixkit-cinematic-whoosh-fast-transition-1492.wav, mixkit-epic-orchestra-transition-2290.wav, "
-    "mixkit-glitchy-cinematic-suspense-hit-679.wav, mixkit-magic-sparkle-whoosh-2350.wav, "
-    "mixkit-reverse-cinematic-impact-trailer-784.wav, mixkit-short-space-stutter-intro-riser-1144.mp3\n"
+    "SFX choices (pick ONE fitting sound, or NONE for calm shots). Match the sound to the "
+    "moment - whoosh/sweep for transitions, riser before a reveal, hit for impact, "
+    "nature/foley for outdoor or environment-rich scenes, soundscape for creeping tension:\n"
+    + _sfx_llm_choices() + "\n"
     "TONE guidance: suspense during tense/risky parts, triumphant near the end when they win."
 )
 
@@ -833,12 +1282,35 @@ def _parse_shot_response(text: str) -> dict:
 
 
 def _build_shot_list(narration_paras: list[str]) -> list[dict]:
-    """Stage 2: for each narration paragraph, generate a shot entry."""
+    """Stage 2: for each narration paragraph, generate a shot entry.
+
+    Chapter paragraphs ("Chapter N - Title") get a direct black-card shot
+    (no LLM call, no image generation - the render pass shows a black
+    placeholder where the glowing chapter title is burned in pass 2).
+    """
     print("\n[LLM] Stage 2: building shot list from narration...")
     shots = []
     for i, para in enumerate(narration_paras):
         if len(shots) >= 120:
             break
+        m_chap = CHAPTER_RE.match(para)
+        if m_chap:
+            shots.append({
+                "narration": para,
+                "narration_idx": i,
+                "shot_type": "CU",
+                "angle": "eye-level",
+                "character": "NONE",
+                "character_role": "",
+                "scene": "black chapter title card placeholder",
+                "sfx": "NONE",
+                "tone": "neutral",
+                "is_chapter": True,
+                "chapter_num": int(m_chap.group(1)),
+                "chapter_title": m_chap.group(2).strip(),
+            })
+            print(f"  [LLM] Shot {len(shots)}: [CHAPTER {m_chap.group(1)}] '{m_chap.group(2).strip()}'")
+            continue
         text = _llm_chat([
             {"role": "system", "content": SHOT_SYSTEM_PROMPT},
             {"role": "user", "content": (
@@ -880,6 +1352,7 @@ def _build_shot_list(narration_paras: list[str]) -> list[dict]:
 
         shots.append({
             "narration": para,
+            "narration_idx": i,
             "shot_type": shot_type,
             "angle": angle,
             "character": character,
@@ -896,6 +1369,7 @@ def _build_shot_list(narration_paras: list[str]) -> list[dict]:
         for i, para in enumerate(narration_paras[:12]):
             shots.append({
                 "narration": para,
+                "narration_idx": i,
                 "shot_type": ["EWS", "WS", "MS", "CU", "ECU"][i % 5],
                 "angle": ["eye-level", "low-angle", "high-angle", "over-the-shoulder", "from-behind"][i % 5],
                 "character": "NONE" if i % 4 == 0 else f"Character{i}",
@@ -909,13 +1383,62 @@ def _build_shot_list(narration_paras: list[str]) -> list[dict]:
     return shots
 
 def _merge_character_aliases(shots: list[dict]) -> list[dict]:
-    """Collapse character aliases onto their full name.
+    """Collapse every spelling variant of a character onto ONE canonical full name.
 
-    Articles often reference someone by surname or first name only
-    ('Irwin' for 'Jessy Irwin'), which makes the pipeline build TWO character
-    sheets for the same person. When one name is a strict token-subset of
-    another, every reference is remapped to the fuller name.
+    Articles + the LLM produce messy variants: 'IRWIN' / 'Irwin' / 'Mr Irwin' /
+    'J. Irwin' / 'Jessy Irwin' / 'the IRS' / 'I.R.S.' ... which previously built
+    2-3 character sheets for the same person. This maps each distinct spelling
+    to a canonical full name using:
+      - case/punctuation/honorific normalization (I.R.S. == IRS)
+      - exact compact-form equality (Mark == MARK == mark)
+      - token-subset folding ('Irwin' -> 'Jessy Irwin', 'J. Irwin' -> 'Jessy Irwin')
+    The canonical name is the fullest (most tokens, then longest, then first-seen).
     """
+    canon = _character_canonical_map(shots)
+    changed = 0
+    for s in shots:
+        c = s.get("character", "NONE")
+        target = canon.get(c)
+        if target and target != c:
+            s["character"] = target
+            changed += 1
+    if changed:
+        merges = ", ".join(f"{k}->{v}" for k, v in canon.items() if k != v)
+        print(f"  [LLM] Character alias merge: {changed} shot(s) remapped ({merges})")
+    return shots
+
+
+# Honorifics dropped when normalizing a character name for dedup.
+CHAR_HONORIFICS = (
+    "mr|mrs|ms|miss|dr|prof|sir|madam|mx|fr|sgt|cpl|lt|capt|captain|officer|"
+    "agent|det|detective|insp|chief|judge|gov|governor|sen|senator|rep|bro|sis|"
+    "pvt|pfc|constable|sergeant|lieutenant"
+)
+# Words that carry no identity for dedup purposes.
+CHAR_STOPWORDS = {"the", "a", "an", "of", "and", "de", "la", "van", "von", "for", "in", "at", "on"}
+
+
+def _norm_char_name(name: str) -> tuple[str, set[str]]:
+    """Normalize a character name -> (compact, significant tokens).
+
+    compact drops every non-alphanumeric char (so 'I.R.S.' == 'IRS') and every
+    stopword token ('the IRS' == 'IRS'), but keeps single-letter initials so
+    acronyms survive. tokens are the significant words used for subset
+    matching (single-letter initials, honorifics and stopwords removed,
+    possessives stripped).
+    """
+    n = name.lower()
+    n = re.sub(r"\(.*?\)", " ", n)                       # parentheticals
+    n = re.sub(r"\b(?:%s)\.?\b" % CHAR_HONORIFICS, " ", n)  # honorifics
+    n = re.sub(r"'s\b", "", n)                           # possessives
+    raw_toks = re.findall(r"[a-z0-9']+", n)
+    compact = "".join(t for t in raw_toks if t not in CHAR_STOPWORDS)
+    toks = {t for t in raw_toks if len(t) > 1 and t not in CHAR_STOPWORDS}
+    return compact, toks
+
+
+def _character_canonical_map(shots: list[dict]) -> dict[str, str]:
+    """Distinct character spelling -> canonical full name (see alias merge)."""
     names = []
     for s in shots:
         c = (s.get("character") or "NONE").strip()
@@ -924,30 +1447,48 @@ def _merge_character_aliases(shots: list[dict]) -> list[dict]:
         if c not in names:
             names.append(c)
     if len(names) < 2:
-        return shots
-    canonical = {}
-    for name in names:
-        canon = name
-        n_toks = set(re.findall(r"[A-Za-z']+", name.lower()))
-        for other in names:
-            if other == name:
-                continue
-            o_toks = set(re.findall(r"[A-Za-z']+", other.lower()))
-            if n_toks and o_toks and n_toks < o_toks:
-                canon = other  # first fuller name wins
-                break
-        canonical[name] = canon
-    changed = 0
-    for s in shots:
-        c = s.get("character", "NONE")
-        target = canonical.get(c)
-        if target and target != c:
-            s["character"] = target
-            changed += 1
-    if changed:
-        merges = ", ".join(f"{k}->{v}" for k, v in canonical.items() if k != v)
-        print(f"  [LLM] Character alias merge: {changed} shot(s) remapped ({merges})")
-    return shots
+        return {n: n for n in names}
+    info = {n: _norm_char_name(n) for n in names}
+
+    parent = {n: n for n in names}
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    # Pass 1: exact normalized equality (Mark == MARK == mark, IRS == I.R.S.)
+    for a in names:
+        for b in names:
+            if a != b and info[a][0] and info[a][0] == info[b][0]:
+                union(a, b)
+    # Pass 2: token-subset (Irwin -> Jessy Irwin; J. Irwin -> Jessy Irwin)
+    for a in names:
+        at = info[a][1]
+        if not at:
+            continue
+        for b in names:
+            if a != b and info[b][1] and (at < info[b][1] or info[b][1] < at):
+                union(a, b)
+
+    def rank(n: str) -> tuple:
+        # fuller name first, then fewer punctuation chars, then not starting
+        # with an article, then not ALL-CAPS, then longer string, then
+        # first-seen order (earlier index wins). Produces 'Jessy Irwin' over
+        # 'IRWIN'/'J. Irwin', 'Mark' over 'MARK', 'IRS' over 'I.R.S.'/'the IRS'.
+        return (len(info[n][1]), -n.count("."),
+                -(1 if re.match(r"^(the|a|an)\b", n, re.IGNORECASE) else 0),
+                -(1 if n.isupper() else 0), len(n), -names.index(n))
+    best = {}
+    for n in names:
+        r = find(n)
+        if r not in best or rank(n) > rank(best[r]):
+            best[r] = n
+    return {n: best[find(n)] for n in names}
 
 # -- Stage 2b: Character sheets --------------------------------------
 
@@ -990,13 +1531,15 @@ CHARACTER_SHEET_SYSTEM_PROMPT = (
 def _build_character_sheets(shots: list[dict], narration: list[str]) -> dict:
     """Stage 2b: poll the LLM once per unique character for a precise repeatable sheet."""
     print("\n[LLM] Stage 2b: building character sheets...")
-    # Collect unique named characters in order of first appearance (case-insensitive
-    # so 'ARS' and 'Ars' are treated as the same character - previously each casing
-    # variant got its own sheet and separate image-generation treatment)
+    # Collect unique named characters in order of first appearance, using the
+    # same canonical map as _merge_character_aliases so case/acronym/honorific
+    # variants ('IRS' vs 'I.R.S.', 'IRWIN' vs 'Jessy Irwin') NEVER produce
+    # duplicate sheets for the same person.
+    canon = _character_canonical_map(shots)
     names = []
     for s in shots:
-        c = s.get("character", "NONE")
-        if c != "NONE" and c.lower() not in [n.lower() for n in names]:
+        c = canon.get(s.get("character", "NONE"), "NONE")
+        if c != "NONE" and c not in names:
             names.append(c)
     if not names:
         print("  [LLM] No named characters found - skipping sheets")
@@ -1087,7 +1630,10 @@ def _character_prompt_block(sheet: dict, angle: str) -> str:
 
 # -- RunPod Z-Image-Turbo --------------------------------------------
 
-def _runpod_generate(prompt: str, seed: int, size: str = "1280*720", timeout: int = 240) -> Optional[str]:
+def _runpod_generate(prompt: str, seed: int, size: str = "1280*720",
+                     timeout: int = 240, out_dir: Optional[Path] = None) -> Optional[str]:
+    out_dir = out_dir or SHOTS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "input": {
             "prompt": prompt,
@@ -1114,7 +1660,7 @@ def _runpod_generate(prompt: str, seed: int, size: str = "1280*720", timeout: in
                     print(f"  [RUNPOD] no result URL (attempt {attempt+1})")
                     time.sleep(3)
                     continue
-                out_path = str(SHOTS_DIR / f"shot_{seed}.png")
+                out_path = str(out_dir / f"shot_{seed}.png")
                 urllib.request.urlretrieve(img_url, out_path)
                 if os.path.getsize(out_path) > 1000:
                     print(f"  [RUNPOD] OK {os.path.basename(out_path)} ({os.path.getsize(out_path)//1024}KB)")
@@ -1166,13 +1712,33 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     return prompt
 
 
-def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = None) -> list[dict]:
+def _black_placeholder(episode_num: int) -> str:
+    """1920x1080 pure-black PNG used for chapter title placeholder clips."""
+    ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    out = str(ep_dir / "_black.png")
+    if os.path.isfile(out) and os.path.getsize(out) > 1000:
+        return out
+    from PIL import Image
+    Image.new("RGB", (1920, 1080), (0, 0, 0)).save(out)
+    return out
+
+
+def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = None,
+                        episode_num: int = 0) -> list[dict]:
     character_sheets = character_sheets or {}
+    ep_dir = SHOTS_DIR / f"ep{episode_num:03d}" if episode_num else None
+    black = _black_placeholder(episode_num) if episode_num else None
     print(f"\n[IMAGES] Generating {len(shots)} 3D shots via RunPod Z-Image-Turbo...")
     for idx, shot in enumerate(shots):
+        if shot.get("is_chapter"):
+            shot["seed"] = 0
+            shot["image_path"] = black
+            print(f"  [SHOT {idx+1}/{len(shots)}] chapter placeholder (no image)")
+            continue
         seed = 10000 + idx * 137 + random.randint(0, 999)
         prompt = _build_shot_prompt(shot, character_sheets)
-        path = _runpod_generate(prompt, seed)
+        path = _runpod_generate(prompt, seed, out_dir=ep_dir)
         shot["seed"] = seed
         shot["image_path"] = path
         if path:
@@ -1234,12 +1800,85 @@ def _normalize_voice_0db(wav_path: str) -> str:
         except: pass
     return wav_path
 
+def _tts_worker(narration_paras: list[str], episode_num: int,
+                results: dict, stop: threading.Event) -> None:
+    """Background worker: queue EVERY narration paragraph into the PocketTTS
+    server, one at a time, with retries. Runs concurrently with the shot list,
+    character sheets and image generation (the big time win of the pipeline).
+
+    results[i] = path of the finished clip (or None on failure). Files are
+    named by NARRATION index (narration_{i:02d}.wav) so they map 1:1 to shots
+    via shot['narration_idx'] even when shot parsing skips a paragraph.
+    """
+    ep_dir = TTS_TEMP / f"ep_{episode_num}"
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    for i, text in enumerate(narration_paras):
+        if stop.is_set():
+            results[i] = None
+            continue
+        out = str(ep_dir / f"narration_{i:02d}.wav")
+        if os.path.isfile(out) and os.path.getsize(out) > 1000:
+            results[i] = out
+            print(f"  [TTS {i+1}/{len(narration_paras)}] reused ({_get_audio_duration(out):.1f}s)")
+            continue
+        ok = False
+        for attempt in range(3):
+            if _pocket_tts_generate(text, out):
+                _normalize_voice_0db(out)
+                ok = os.path.isfile(out) and os.path.getsize(out) > 1000
+                if ok:
+                    break
+            time.sleep(1 + attempt)
+        if ok:
+            results[i] = out
+            print(f"  [TTS {i+1}/{len(narration_paras)}] {_get_audio_duration(out):.1f}s - {text[:50]}...")
+        else:
+            results[i] = None
+            print(f"  [TTS {i+1}/{len(narration_paras)}] FAILED after retries - {text[:50]}...")
+        time.sleep(0.2)
+
+
+def _start_tts_worker(narration_paras: list[str], episode_num: int):
+    """Kick off TTS generation in a background thread. Returns (thread, results,
+    stop_event). Join the thread before rendering."""
+    print(f"\n[TTS] Queueing {len(narration_paras)} narration clips into PocketTTS "
+          f"({TTS_VOICE}) in the background...")
+    results: dict[int, Optional[str]] = {}
+    stop = threading.Event()
+    t = threading.Thread(target=_tts_worker,
+                         args=(narration_paras, episode_num, results, stop),
+                         daemon=True)
+    t.start()
+    return t, results, stop
+
+
+def _finalize_tts(shots: list[dict], results: dict, episode_num: int) -> None:
+    """Map finished TTS clips onto shots by narration index."""
+    ep_dir = TTS_TEMP / f"ep_{episode_num}"
+    for pos, shot in enumerate(shots):
+        nidx = shot.get("narration_idx", pos)
+        if shot.get("is_chapter"):
+            shot["tts_path"] = str(ep_dir / f"narration_{nidx:02d}.wav")
+            continue
+        path = results.get(nidx)
+        if path and os.path.isfile(path):
+            shot["tts_path"] = path
+        else:
+            # fallback: any file written by the worker at this narration index
+            cand = str(ep_dir / f"narration_{nidx:02d}.wav")
+            shot["tts_path"] = cand if os.path.isfile(cand) else None
+    ok = sum(1 for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"]))
+    print(f"  [TTS] {ok}/{len(shots)} clips ready (0dB)")
+
+
 def _generate_all_tts(shots: list[dict], episode_num: int) -> None:
+    """Sequential TTS (used by resume flows where parallelism isn't needed)."""
     print(f"\n[TTS] Generating {len(shots)} narration clips (built-in male voice: {TTS_VOICE})...")
     ep_dir = TTS_TEMP / f"ep_{episode_num}"
     ep_dir.mkdir(parents=True, exist_ok=True)
     for idx, shot in enumerate(shots):
-        out = str(ep_dir / f"narration_{idx:02d}.wav")
+        nidx = shot.get("narration_idx", idx)
+        out = str(ep_dir / f"narration_{nidx:02d}.wav")
         ok = _pocket_tts_generate(shot["narration"], out)
         if ok:
             _normalize_voice_0db(out)
@@ -1252,17 +1891,28 @@ def _generate_all_tts(shots: list[dict], episode_num: int) -> None:
 
 # -- Audio mix: voice + music + timecoded SFX ------------------------
 
-def _build_audio_mix(shots: list[dict], episode_num: int) -> Optional[str]:
+def _build_audio_mix(shots: list[dict], episode_num: int,
+                     title_events: Optional[list] = None):
     """Build the full audio track: voice (0dB) + music (-18dB) + SFX (-14dB hit-aligned).
-    Returns path to final mixed WAV."""
+
+    New SFX in this version:
+      - mixkit glitchy suspense hit at t=0 (every video opens with it)
+      - camera shutter at every new-character / new-location switch
+      - typewriter clicks at each location/timeline title start (1.5s)
+      - glitch-off at each title start + 5.5s (0.5s)
+
+    Returns (mix_wav_path, voice_wav_path, clip_starts):
+      voice_wav_path is the deterministic voice-only track (for whisper timing),
+      clip_starts[i] is the REAL absolute start time of clip i (0.3s pads).
+    """
     valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
     if not valid:
         print("  [AUDIO] No TTS clips")
-        return None
+        return None, None, []
 
     temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_audio_{episode_num}_"))
     try:
-        # -- Voice track: concat with 0.3s pads, loudness already normalized --
+        # -- Voice track: concat with 0.3s pads; REAL start times --
         voice_parts = []
         clip_starts = []  # absolute start time of each clip in the final timeline
         cursor = 0.0
@@ -1270,7 +1920,7 @@ def _build_audio_mix(shots: list[dict], episode_num: int) -> Optional[str]:
             clip_starts.append(cursor)
             d = _get_audio_duration(shot["tts_path"])
             voice_parts.append((shot["tts_path"], cursor, d))
-            cursor += d + 0.6  # 0.3s pad after each clip
+            cursor += d + 0.3  # 0.3s pad after each clip (matches the pad files below)
 
         total_dur = cursor
         print(f"  [AUDIO] Voice timeline: {total_dur:.1f}s total, {len(valid)} clips")
@@ -1298,17 +1948,22 @@ def _build_audio_mix(shots: list[dict], episode_num: int) -> Optional[str]:
             ["ffmpeg", "-y", "-v", "error", "-i", str(voice_raw),
              "-af", f"volume={VOICE_DB}dB", "-c:a", "pcm_s16le", str(voice_path)],
             capture_output=True, text=True, timeout=60)
+        # Deterministic copy of the voice-only track for the whisper title pass
+        RENDERED_AUDIO.mkdir(parents=True, exist_ok=True)
+        voice_out = str(RENDERED_AUDIO / f"ep{episode_num:03d}_voice.wav")
+        if os.path.isfile(voice_out) and os.path.getsize(voice_out) > 1000:
+            pass
+        else:
+            shutil.copyfile(str(voice_path), voice_out)
 
         # -- Music bed: suspense first 65% of the timeline, triumphant last 35%. --
-        # Music plays under EVERY shot (never silent). Tracks cycle per section so
-        # the same clip is never used back-to-back. Levels: -18dB.
         music_segments = []
         suspense_pool = MUSIC_LIBRARY["suspense"]
         triumphant_pool = MUSIC_LIBRARY["triumphant"]
         sus_idx, tri_idx = 0, 0
         section_cut = total_dur * 0.65
         for shot, start in zip(valid, clip_starts):
-            d = _get_audio_duration(shot["tts_path"]) + 0.6
+            d = _get_audio_duration(shot["tts_path"]) + 0.3
             if start < section_cut:
                 pool, cur = suspense_pool, sus_idx
                 sus_idx += 1
@@ -1344,34 +1999,130 @@ def _build_audio_mix(shots: list[dict], episode_num: int) -> Optional[str]:
             if music_raw.is_file() and os.path.getsize(music_raw) > 1000:
                 music_path = str(music_raw)
 
-        # -- SFX: hit-aligned placement at -14dB --
-        sfx_inputs = []
-        sfx_delays = []  # adelay ms
-        sfx_trims = []   # (skip_seconds) crop head when hit occurs later than target
+        # -- SFX placements: (src, target_time, max_dur) -- hit lands at target --
+        placements = []
+        # 1) Intro glitchy suspense hit at the very start of every video
+        intro = SFX_DIR / TITLE_SFX["intro"]
+        if intro.is_file():
+            placements.append((str(intro), 0.0, 6.5))
+            print("  [AUDIO] SFX intro glitch hit @0.0s")
+        # 2) Per-shot LLM SFX (hit at shot start + 0.2s). Long ambience
+        #    (soundscapes/nature run 20-60s) is capped at 10s so it beds under
+        #    the shot without bleeding across the whole video.
         for shot, start in zip(valid, clip_starts):
             name = shot.get("sfx", "NONE")
             if name == "NONE" or name not in SFX_LIBRARY:
                 continue
-            src = SFX_DIR / name
-            if not src.is_file():
+            src = _sfx_path(name)
+            if src:
+                cap = min(SFX_LIBRARY.get(name, {}).get("dur", 8.0), 10.0)
+                placements.append((str(src), start + 0.2, cap))
+        # 3) Camera shutter + whoosh: new character introduced OR new location
+        #    (whoosh only when the LLM didn't already pick an sfx for the shot,
+        #    so we never triple-stack sounds on one beat).
+        rng = random.Random(episode_num * 7)
+        def _pick_sfx(prefix: str) -> Optional[str]:
+            ks = [k for k in SFX_LIBRARY
+                  if k.startswith(prefix) and _sfx_path(k)]
+            return rng.choice(ks) if ks else None
+        loc_paras = {ev["para_idx"] for ev in (title_events or [])
+                     if ev.get("kind") == "location"}
+        prev_char = None
+        for pos, (shot, start) in enumerate(zip(valid, clip_starts)):
+            if shot.get("is_chapter") or start < 2.0:
                 continue
-            meta = SFX_LIBRARY[name]
-            # Place so the HIT lands at clip start + 0.2s (just as the shot begins)
-            target = start + 0.2
-            if meta["hit"] <= target:
-                # SFX hit occurs early enough: delay so hit lands at target
-                delay_ms = max(int((target - meta["hit"]) * 1000), 0)
+            ch = shot.get("character", "NONE")
+            nidx = shot.get("narration_idx", pos)
+            is_new_char = False
+            if ch != "NONE":
+                if prev_char is not None and ch != prev_char:
+                    is_new_char = True
+                prev_char = ch
+            is_new_loc = nidx in loc_paras
+            if is_new_char or is_new_loc:
+                shutter = SFX_DIR / TITLE_SFX["shutter"]
+                if shutter.is_file():
+                    placements.append((str(shutter), start + 0.1, None))
+                    print(f"  [AUDIO] Camera shutter @{start + 0.1:.1f}s "
+                          f"({'new char ' + ch if is_new_char else ''}"
+                          f"{'new location' if is_new_loc else ''})")
+                if shot.get("sfx", "NONE") == "NONE":
+                    wkey = (_pick_sfx("whoosh-") if is_new_char
+                            else _pick_sfx("sweep-"))
+                    if wkey:
+                        wm = SFX_LIBRARY[wkey]
+                        placements.append((str(_sfx_path(wkey)),
+                                           start + 0.15,
+                                           wm.get("hit", 0.5) + 1.0))
+                        print(f"  [AUDIO] {('Whoosh' if is_new_char else 'Sweep')} "
+                              f"'{wkey}' @{start + 0.15:.1f}s")
+        # 3b) Deterministic SFX: every chapter card gets a riser that builds
+        #     INTO the card pop + a hit landing exactly on it.
+        for ev in title_events or []:
+            if ev.get("kind") != "chapter":
+                continue
+            ct = ev.get("start", 0.0)
+            if ct <= 1.0:
+                continue
+            riser = _pick_sfx("riser-")
+            if riser:
+                rm = SFX_LIBRARY[riser]
+                placements.append((str(_sfx_path(riser)), ct - 0.15,
+                                   rm.get("hit", 2.0) + 0.6))
+                print(f"  [AUDIO] Chapter riser '{riser}' -> {ct:.1f}s")
+            hit = _pick_sfx("hit-")
+            if hit == "hit-shell-shock-high-ring-not-nice-for-ears":
+                hit = None  # ear-bleeding ring never goes on a chapter card
+            if hit:
+                hm = SFX_LIBRARY[hit]
+                placements.append((str(_sfx_path(hit)), ct,
+                                   hm.get("hit", 0.1) + 1.2))
+                print(f"  [AUDIO] Chapter hit '{hit}' @{ct:.1f}s")
+        # 4) Typewriter clicks + glitch-off for every location/timeline/person title
+        for ev in title_events or []:
+            if ev.get("kind") not in ("location", "timeline", "person"):
+                continue
+            st = ev.get("start", 0.0)
+            tw = SFX_DIR / TITLE_SFX["typewriter"]
+            gl = SFX_DIR / TITLE_SFX["glitch"]
+            if tw.is_file():
+                placements.append((str(tw), st, TYPEWRITER_SEC))
+            if gl.is_file():
+                placements.append((str(gl), st + TYPEWRITER_SEC + TITLE_HOLD_SEC, GLITCH_OFF_SEC))
+        # Dedupe: two titles on the same paragraph fire at the same moment -
+        # keep only ONE typewriter/glitch sound so the clicks don't double up.
+        deduped = []
+        for src, target, max_dur in placements:
+            dup = False
+            for d_src, d_tgt, _d_max in deduped:
+                if d_src == src and abs(d_tgt - target) < 0.05:
+                    dup = True
+                    break
+            if not dup:
+                deduped.append((src, target, max_dur))
+        placements = deduped
+        # 5) Resolve placements -> delays/trims
+        sfx_inputs, sfx_delays, sfx_trims, sfx_durs = [], [], [], []
+        for src, target, max_dur in placements:
+            name = os.path.basename(src)
+            meta = SFX_LIBRARY.get(name)
+            if meta is None:
+                # not pre-analyzed: assume hit at 0.05, no head crop
+                meta = {"hit": 0.05}
+            hit = meta.get("hit", 0.05)
+            if hit <= target:
+                delay_ms = max(int((target - hit) * 1000), 0)
                 skip_s = 0.0
             else:
-                # Hit occurs late in the file: crop the head so the hit lands at target.
-                # Keep (hit - target) seconds of pre-hit build-up for the attack.
-                skip_s = meta["hit"] - target
+                skip_s = hit - target
                 delay_ms = 0
-            sfx_inputs.append(str(src))
+            sfx_inputs.append(src)
             sfx_delays.append(delay_ms)
             sfx_trims.append(skip_s)
-            print(f"  [AUDIO] SFX {name}: hit@{target:.1f}s (file hit={meta['hit']}s) -> "
-                  f"{'crop ' + f'{skip_s:.2f}s' if skip_s else f'delay {delay_ms}ms'}")
+            sfx_durs.append(max_dur or 0.0)
+            print(f"  [AUDIO] SFX {name}: hit@{target:.1f}s (file hit={hit}s) -> "
+                  f"{'crop ' + f'{skip_s:.2f}s' if skip_s else f'delay {delay_ms}ms'}"
+                  f"{f' (max {max_dur}s)' if max_dur else ''}")
 
         # -- Mix everything --
         inputs = []
@@ -1385,24 +2136,19 @@ def _build_audio_mix(shots: list[dict], episode_num: int) -> Optional[str]:
             inputs.append(music_path)
             filter_parts.append(f"[{idx}:a]aresample=44100[m{idx}]")
             idx += 1
-        sfx_filters = []
-        for i, (s, d, sk) in enumerate(zip(sfx_inputs, sfx_delays, sfx_trims)):
+        for i, (s, d, sk, md) in enumerate(zip(sfx_inputs, sfx_delays, sfx_trims, sfx_durs)):
             inputs.append(s)
             pre = f"atrim=start={sk:.3f},asetpts=PTS-STARTPTS," if sk > 0 else ""
+            post = f",atrim=0:{md:.2f}" if md > 0 else ""
             filter_parts.append(
-                f"[{idx}:a]aresample=44100,{pre}adelay={d}|{d},volume={SFX_DB}dB[s{idx}]")
-            sfx_filters.append(f"[s{idx}]")
+                f"[{idx}:a]aresample=44100,{pre}adelay={d}|{d},volume={SFX_DB}dB{post}[s{idx}]")
             idx += 1
 
         if not inputs:
             print("  [AUDIO] No audio inputs")
-            return None
+            return None, None, clip_starts
 
-        # Build amix
-        mix_inputs = []
-        for i in range(idx):
-            mix_inputs.append(f"[v{i}]" if i == 0 else f"[m{i}]" if i == 1 and music_path and i < idx else f"[s{i}]")
-        # Simpler: collect all processed labels
+        # Collect processed labels in input order
         labels = []
         li = 0
         if voice_path and os.path.isfile(voice_path):
@@ -1431,18 +2177,101 @@ def _build_audio_mix(shots: list[dict], episode_num: int) -> Optional[str]:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if r.returncode != 0 or not os.path.isfile(final_wav) or os.path.getsize(final_wav) < 1000:
             print(f"  [AUDIO] Mix failed: {r.stderr[-300:]}")
-            return None
+            return None, None, clip_starts
         dur = _get_audio_duration(final_wav)
         print(f"  [OK] Mixed audio: {_fmt_time(dur)}, {os.path.getsize(final_wav)//1024}KB -> {final_wav}")
-        return final_wav
+        return final_wav, voice_out, clip_starts
     finally:
         shutil.rmtree(str(temp_dir), ignore_errors=True)
+
+# -- Whisper title pass (faster-whisper word timings) -----------------
+
+def _transcribe_voice(episode_num: int, voice_path: Optional[str] = None) -> list[dict]:
+    """Word-level timings of the voice track via faster-whisper (base, CPU).
+
+    Cached to rendered_audio/ep{N:03d}_whisper.json (reused on resume; deleted
+    when the episode completes). vad_filter=False is critical - TTS voices have
+    no natural speech pauses and VAD returns EMPTY segments.
+    """
+    RENDERED_AUDIO.mkdir(parents=True, exist_ok=True)
+    cache = str(RENDERED_AUDIO / WHISPER_JSON.format(ep=episode_num))
+    if os.path.isfile(cache) and os.path.getsize(cache) > 100:
+        try:
+            words = json.loads(Path(cache).read_text())
+            print(f"  [STT] whisper cache reused ({len(words)} words)")
+            return words
+        except Exception:
+            pass
+    if not voice_path or not os.path.isfile(voice_path):
+        voice_path = str(RENDERED_AUDIO / f"ep{episode_num:03d}_voice.wav")
+    if not os.path.isfile(voice_path):
+        print("  [STT] no voice track for whisper")
+        return []
+    print(f"  [STT] faster-whisper word timings on voice track...")
+    try:
+        from faster_whisper import WhisperModel
+        model = WhisperModel("base", device="cpu", compute_type="int8")
+        segments, _info = model.transcribe(voice_path, language="en",
+                                           word_timestamps=True, vad_filter=False)
+        words = []
+        for seg in segments:
+            if seg.words:
+                for w in seg.words:
+                    words.append({"word": w.word.strip(), "start": w.start, "end": w.end})
+        Path(cache).write_text(json.dumps(words))
+        print(f"  [STT] {len(words)} words timed")
+        return words
+    except Exception as e:
+        print(f"  [STT] whisper failed: {e}")
+        return []
+
+
+def _build_resolved_title_events(chapter_events: list[dict],
+                                 anchor_events: list[dict],
+                                 words: list[dict],
+                                 clip_starts: list[float]) -> list[dict]:
+    """Combine chapter + anchor events into one resolved list for the burn pass.
+
+    chapter events: start = whisper time of 'chapter N', end = black clip end.
+    anchor events : start = whisper time of the date/location phrase.
+    """
+    resolved = []
+    # chapter -> find when "chapter N" is spoken
+    for ev in chapter_events:
+        pi = ev["para_idx"]
+        fallback = (clip_starts[pi] + 0.4) if pi < len(clip_starts) else 0.0
+        end = (clip_starts[pi + 1] if pi + 1 < len(clip_starts) else
+               (clip_starts[pi] + 5.0)) if pi < len(clip_starts) else fallback + 4.0
+        t = None
+        num_words = {1: ["one", "1"], 2: ["two", "2"], 3: ["three", "3"],
+                     4: ["four", "4"], 5: ["five", "5"], 6: ["six", "6"]}
+        if words:
+            for i, w in enumerate(words):
+                wl = w["word"].strip(".,!?;:()\"'").lower()
+                if wl != "chapter":
+                    continue
+                nxt = words[i + 1]["word"].strip(".,!?;:()\"'-").lower() if i + 1 < len(words) else ""
+                if nxt in num_words.get(ev["chapter"], []):
+                    t = w["start"]
+                    break
+        resolved.append({
+            "kind": "chapter", "start": round(t or fallback, 3), "end": round(end, 3),
+            "chapter_num": ev["chapter"], "title": ev["title"],
+            "text": f"Chapter {ev['chapter']} - {ev['title']}",
+        })
+    resolved.extend(_resolve_anchor_times(anchor_events, words, clip_starts))
+    return resolved
 
 # -- Render (FFmpeg 1080p) -------------------------------------------
 
 def _render_clip(image_path: str, audio_path: str, output_path: str,
-                 fallback_img: Optional[str] = None) -> bool:
-    """Render one shot: slow-zoom image + narration audio -> 1080p clip (video only audio kept for sync)."""
+                 fallback_img: Optional[str] = None,
+                 black_frames: bool = False) -> bool:
+    """Render one shot: slow-zoom image + narration audio -> 1080p clip.
+
+    black_frames=True prepends 2 frames of pure black before the image
+    (camera-shutter mimic when a new character/location is introduced).
+    """
     W_RES, H_RES = 1920, 1080
     if not os.path.isfile(image_path):
         image_path = fallback_img or ""
@@ -1453,18 +2282,23 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
         img.save(image_path)
     dur = max(_get_audio_duration(audio_path), 0.5) + 0.6
     n_frames = max(int(dur * 24), 24)
-    # Smooth zoom: upscale the source 2x with lanczos BEFORE zoompan so the
-    # per-frame zoom steps are sub-pixel (kills the choppy integer stepping),
+    # Smooth zoom: upscale the source 4x with lanczos BEFORE zoompan so the
+    # per-frame zoom steps are sub-pixel (measured: 4x prescale halves the
+    # frame-to-frame motion variance vs 2x - cv 0.73 -> 0.41 on noise imagery),
     # and zoom from the exact center so the crop never drifts.
     zoom_expr = f"z='if(eq(on,1),1,min(1+0.06*(on-1)/{max(n_frames-1,1)},1.06))'"
-    filter_graph = (
+    chain = (
         f"[0:v]loop=1:size=1:start=0,"
-        f"scale=3840:2160:flags=lanczos:force_original_aspect_ratio=increase,"
-        f"crop=3840:2160,"
+        f"scale=7680:4320:flags=lanczos:force_original_aspect_ratio=increase,"
+        f"crop=7680:4320,"
         f"zoompan={zoom_expr}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
         f"d={n_frames}:s={W_RES}x{H_RES}:fps=24,"
-        f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(dur-0.3,0):.2f}:d=0.3[vout]"
+        f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(dur-0.3,0):.2f}:d=0.3"
     )
+    if black_frames:
+        # 2 frames of black at the very start = camera shutter between images
+        chain += ",tpad=start=2:color=black"
+    filter_graph = chain + "[vout]"
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", image_path,
@@ -1517,23 +2351,115 @@ def _master_gain_filter(audio_path: str) -> str:
         print(f"  [AUDIO] Master gain probe error: {e}")
         return ""
 
-def _render_video(shots: list[dict], episode_num: int) -> str:
-    """Render all shots into one 1080p video with full audio mix."""
+def _compute_clip_starts(shots: list[dict]) -> list[float]:
+    """Absolute start times of each clip in the voice/video timeline (0.3s pads).
+    Must stay in sync with _build_audio_mix's cursor math."""
+    starts, cursor = [], 0.0
+    for s in shots:
+        if not (s.get("tts_path") and os.path.isfile(s["tts_path"])):
+            continue
+        starts.append(cursor)
+        cursor += _get_audio_duration(s["tts_path"]) + 0.3
+    return starts
+
+
+def _ensure_voice_track(shots: list[dict], episode_num: int) -> Optional[str]:
+    """Build rendered_audio/ep{N:03d}_voice.wav if missing (same concat as the
+    mix: clips + 0.3s pads). Used by the whisper title pass on resume."""
+    RENDERED_AUDIO.mkdir(parents=True, exist_ok=True)
+    out = str(RENDERED_AUDIO / f"ep{episode_num:03d}_voice.wav")
+    if os.path.isfile(out) and os.path.getsize(out) > 1000:
+        return out
+    valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
+    if not valid:
+        return None
+    temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_voice_{episode_num}_"))
+    try:
+        concat_list = temp_dir / "vc.txt"
+        with open(concat_list, "w") as f:
+            for i, shot in enumerate(valid):
+                f.write(f"file '{str(Path(shot['tts_path']).resolve())}'\n")
+                pad = temp_dir / f"pad_{i}.wav"
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                     "anullsrc=r=24000:cl=mono", "-t", "0.3",
+                     "-c:a", "pcm_s16le", str(pad)],
+                    capture_output=True, text=True, timeout=30)
+                f.write(f"file '{str(pad.resolve())}'\n")
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+             "-i", str(concat_list), "-c:a", "pcm_s16le", out],
+            capture_output=True, text=True, timeout=180)
+        if r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 1000:
+            return out
+        print(f"  [STT] voice track build failed: {r.stderr[-200:]}")
+        return None
+    finally:
+        shutil.rmtree(str(temp_dir), ignore_errors=True)
+
+
+def _cleanup_stt_artifacts(episode_num: int) -> None:
+    """Delete whisper/STT caches + title markers when the episode completes."""
+    try:
+        for p in RENDERED_AUDIO.glob(f"ep{episode_num:03d}_whisper.json"):
+            p.unlink()
+            print(f"  [CLEAN] removed {p.name}")
+        for p in RENDERED_VIDEO.glob(f"split_node_ep{episode_num:03d}*.titled"):
+            p.unlink()
+        for p in RENDERED_VIDEO.glob(f"split_node_ep{episode_num:03d}_titles.ass"):
+            p.unlink()
+    except Exception as e:
+        print(f"  [CLEAN] stt cleanup error: {e}")
+
+
+def _camera_shutter_paras(shots: list[dict], title_events: Optional[list] = None) -> set:
+    """narration_idx of shots that introduce a NEW character or NEW location
+    (camera shutter SFX + 2 black frames). Mirrors the mix's shutter logic."""
+    loc_paras = {ev["para_idx"] for ev in (title_events or [])
+                 if ev.get("kind") == "location"}
+    out = set()
+    prev_char = None
+    for pos, shot in enumerate(shots):
+        if shot.get("is_chapter"):
+            continue
+        ch = shot.get("character", "NONE")
+        nidx = shot.get("narration_idx", pos)
+        new_char = False
+        if ch != "NONE":
+            if prev_char is not None and ch != prev_char:
+                new_char = True
+            prev_char = ch
+        if new_char or nidx in loc_paras:
+            out.add(nidx)
+    return out
+
+
+def _render_video(shots: list[dict], episode_num: int,
+                  title_events: Optional[list] = None) -> str:
+    """Render all shots into one 1080p video with full audio mix.
+
+    title_events = RESOLVED title events ({kind, start, end, ...}) - used to
+    (a) place typewriter/glitch/shutter SFX into the mix, and (b) burn the
+    animated glowing titles in pass 2 after the render.
+    """
     print("\n[VIDEO] Rendering 1080p documentary...")
     valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
     if not valid:
         print("  [FAIL] No TTS clips to render")
         return ""
 
-    # Build the full audio mix first (voice+music+sfx). Output path is
+    # Build the full audio mix first (voice+music+sfx+title sfx). Output path is
     # deterministic, so an already-finished mix is reused on resume.
     mixed_audio = str(RENDERED_AUDIO / f"ep{episode_num:03d}_mix.wav")
     if os.path.isfile(mixed_audio) and os.path.getsize(mixed_audio) > 1000:
         print(f"  [AUDIO] Mix exists, reusing ({os.path.getsize(mixed_audio)//1024}KB)")
     else:
-        mixed_audio = _build_audio_mix(valid, episode_num)
-    if not mixed_audio:
+        _build_audio_mix(valid, episode_num, title_events)
+    if not os.path.isfile(mixed_audio) or os.path.getsize(mixed_audio) < 1000:
         print("  [WARN] Audio mix failed, falling back to voice-only concat")
+        mixed_audio = ""
+
+    shutter_paras = _camera_shutter_paras(valid, title_events)
 
     temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_render_{episode_num}_"))
     clip_files = []
@@ -1554,10 +2480,14 @@ def _render_video(shots: list[dict], episode_num: int) -> str:
                 reused += 1
                 print(f"  [CLIP {idx+1}/{len(valid)}] reused from batch_temp")
                 continue
-            ok = _render_clip(shot.get("image_path", ""), shot["tts_path"], clip_out, fallback_img)
+            nidx = shot.get("narration_idx", idx)
+            black_frames = nidx in shutter_paras
+            ok = _render_clip(shot.get("image_path", ""), shot["tts_path"], clip_out,
+                              fallback_img, black_frames=black_frames)
             if ok:
                 clip_files.append(clip_out)
-                print(f"  [CLIP {idx+1}/{len(valid)}] rendered")
+                print(f"  [CLIP {idx+1}/{len(valid)}] rendered"
+                      f"{' (shutter: 2 black frames)' if black_frames else ''}")
             else:
                 print(f"  [CLIP {idx+1}/{len(valid)}] FAILED")
         print(f"  [CLIPS] {reused}/{len(clip_files)} reused from batch_temp, "
@@ -1627,6 +2557,25 @@ def _render_video(shots: list[dict], episode_num: int) -> str:
         dur = _get_audio_duration(output_path)
         size_mb = os.path.getsize(output_path) / 1024 / 1024
         print(f"  [OK] 1080p video: {_fmt_time(dur)}, {size_mb:.1f}MB -> {output_path}")
+
+        # -- PASS 2: burn animated glowing titles at whisper-matched times --
+        if split_node_titles is not None and title_events:
+            marker = output_path + ".titled"
+            if os.path.isfile(marker):
+                print("  [TITLES] already burned (marker present), skipping pass 2")
+            else:
+                ass_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titles.ass")
+                burned = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titled.mp4")
+                try:
+                    split_node_titles.build_title_ass(title_events, ass_path)
+                    print(f"  [TITLES] pass 2: burning {len(title_events)} title events...")
+                    if split_node_titles.burn_titles(output_path, ass_path, burned, timeout=2400):
+                        os.replace(burned, output_path)
+                        Path(marker).write_text("1")
+                        print("  [TITLES] burned OK (animated glowing titles)")
+                except Exception as e:
+                    print(f"  [TITLES] pass 2 failed: {e}")
+
         # Episode complete: clean up the batch clips
         for clip in clip_dir.glob("clip*.mp4"):
             try: clip.unlink()
@@ -1722,7 +2671,21 @@ def _generate_titles(topic: str, episode_num: int) -> list[str]:
         result.append(t)
     while len(result) < 3:
         result.append(f"{prefix} The {topic[:40]} story that broke the system")
-    return result[:3]
+    result = result[:3]
+
+    # Score the 3 titles against REAL Google Trends demand + YouTube competition
+    # (trend-research-toolkit: SerpAPI trends + YouTube Data API via Split Node OAuth).
+    if trend_scorer is not None:
+        try:
+            scored = trend_scorer.score_titles(result, creds_fn=_get_youtube_creds)
+            print("  [TREND] title scores (best first):")
+            for s in scored:
+                print(f"    {s['score']:5.1f}  demand={str(s.get('demand')):>5}  "
+                      f"traj={s.get('trajectory','n/a'):>9}  room={str(s.get('room_to_rank')):>5}  {s['title']}")
+            result = [s["title"] for s in scored]
+        except Exception as e:
+            print(f"  [TREND] title scoring failed: {e}")
+    return result
 
 DESCRIPTION_SYSTEM_PROMPT = (
     "You write YouTube video descriptions for SPLIT NODE, a 3D animated documentary "
@@ -1772,6 +2735,40 @@ def _generate_description(topic: str, episode_num: int, article_url: str) -> str
         f"and vote on future topics: {DISCORD_INVITE}\n\n"
         f"#{''.join(w for w in topic.split()[:3])} #Documentary #TrueStories"
     )
+
+
+def _append_chapters_to_description(description: str,
+                                    title_events: Optional[list]) -> str:
+    """Append YouTube chapter markers (whisper-matched timecodes) to the
+    description:
+
+        CHAPTERS
+        0:00 - Intro
+        1:45 - The Account That Never Said No
+        ...
+
+    Idempotent: never appends twice. Returns the description unchanged if
+    there are fewer than 2 chapter events (YouTube needs 3+ entries).
+    """
+    chapters = [ev for ev in (title_events or []) if ev.get("kind") == "chapter"]
+    if len(chapters) < 2:
+        return description
+    if "\nCHAPTERS\n" in description or description.rstrip().endswith("CHAPTERS"):
+        return description
+
+    def _ts(s: float) -> str:
+        s = max(int(round(s)), 0)
+        m, sec = divmod(s, 60)
+        return f"{m}:{sec:02d}"
+
+    lines = ["", "", "CHAPTERS", "0:00 - Intro"]
+    for ev in sorted(chapters, key=lambda e: e.get("start", 0)):
+        title = (ev.get("title") or "").strip()
+        if title:
+            lines.append(f"{_ts(ev.get('start', 0))} - {title}")
+    if len(lines) < 6:  # Intro + <3 chapters - YouTube won't show the panel
+        return description
+    return description + "\n".join(lines)
 
 def _generate_tags(topic: str, episode_num: int) -> list[str]:
     msg = [
@@ -2006,11 +3003,31 @@ except ImportError:
 
 # -- Discord announcement --------------------------------------------
 
+def _strip_discord_pitch(text: str) -> str:
+    """Remove Discord invite links + invite-pitch paragraphs from an
+    announcement body. The announcement is posted INSIDE the Discord server,
+    so pitching the server / linking the invite there is noise. The YouTube
+    description itself keeps the pitch untouched."""
+    if not text:
+        return text
+    t = text.replace(DISCORD_INVITE, "").replace(DISCORD_INVITE.rstrip("/"), "")
+    keep = []
+    for p in t.split("\n\n"):
+        low = p.lower()
+        is_pitch = ("discord" in low and any(
+            k in low for k in ("join", "invite", "early access", "server",
+                               "community", "vote on future")))
+        if not is_pitch and p.strip():
+            keep.append(p.strip())
+    return re.sub(r"\n{3,}", "\n\n", "\n\n".join(keep)).strip()
+
+
 def _post_discord_announcement(topic: str, video_id: str, episode_num: int,
                                wait_seconds: int = 60, description: str = "") -> None:
     """Wait, then post the announcement to all Discord channels.
 
-    Uses the video's own YouTube description as the announcement body,
+    Uses the video's own YouTube description as the announcement body
+    (with the Discord invite pitch stripped - we're already inside Discord),
     wrapped in a hype line at top + bottom, with the YouTube link.
     """
     if not video_id:
@@ -2020,10 +3037,11 @@ def _post_discord_announcement(topic: str, video_id: str, episode_num: int,
     time.sleep(wait_seconds)
     url = f"https://youtu.be/{video_id}"
     body = (description or f"{topic}\n\nSplit Node episode #{episode_num:03d} is live on YouTube!").strip()
+    body = _strip_discord_pitch(body)
     message = (
         f"NEW EPISODE IS LIVE ON YOUTUBE!\n\n"
         f"{body}\n\n"
-        f"Watch the full episode now, and join the Discord for early access to future episodes!\n\n"
+        f"Watch the full episode now!\n\n"
         f"{url}"
     )
     print(f"  [DISCORD] Announcement:\n    {message[:120]}...")
@@ -2081,8 +3099,9 @@ def _preflight() -> bool:
             print(f"  [OK] LM Studio reachable")
     except Exception as e:
         print(f"  [WARN] LM Studio not reachable: {e}")
-    sfx_count = sum(1 for f in SFX_DIR.iterdir() if f.is_file()) if SFX_DIR.is_dir() else 0
-    print(f"  [OK] Cinematic sounds: {sfx_count} files")
+    sfx_count = sum(1 for _k in SFX_LIBRARY if _sfx_path(_k) is not None)
+    sfx_disk = sum(1 for f in SFX_DIR.rglob("*") if f.is_file()) if SFX_DIR.is_dir() else 0
+    print(f"  [OK] Cinematic sounds: {sfx_count} in library ({sfx_disk} files on disk)")
     if not CLIENT_SECRETS.is_file():
         print(f"  [FAIL] Split Node client secrets missing: {CLIENT_SECRETS.name}")
         ok = False
@@ -2095,10 +3114,12 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
                        shots: Optional[list] = None, character_sheets: Optional[dict] = None,
                        titles: Optional[list] = None, description: str = "",
                        tags: Optional[list] = None, thumb_path: str = "",
-                       video_path: str = "", video_id: str = "") -> None:
+                       video_path: str = "", video_id: str = "",
+                       chapter_events: Optional[list] = None,
+                       anchor_events: Optional[list] = None) -> None:
     """Save episode state so it can be resumed if interrupted."""
     state = {
-        "version": 1,
+        "version": 2,
         "stage": stage,
         "episode_num": episode_num,
         "article_url": article_url,
@@ -2111,6 +3132,8 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
         "thumb_path": thumb_path,
         "video_path": video_path,
         "video_id": video_id,
+        "chapter_events": chapter_events or [],
+        "anchor_events": anchor_events or [],
     }
     try:
         tmp = RESUME_FILE.with_suffix(".tmp")
@@ -2162,28 +3185,37 @@ def _resume_episode(state: dict) -> None:
     thumb_path = state.get("thumb_path", "")
     video_path = state.get("video_path", "")
     video_id = state.get("video_id", "")
+    chapter_events = state.get("chapter_events", [])
+    anchor_events = state.get("anchor_events", [])
 
     print(f"\n{'='*60}")
     print(f"  RESUME - Split Node Episode #{episode_num:03d}")
     print(f"  Stage: {stage} | Shots: {len(shots)}")
     print(f"{'='*60}\n")
 
+    def _save(stg):
+        _save_resume_state(stg, episode_num, article_url, topic, shots,
+                           character_sheets, titles, description, tags,
+                           thumb_path, video_path, video_id,
+                           chapter_events, anchor_events)
+
     # 1. Images: regenerate only the missing ones (same seeds -> same look)
-    missing_img = [s for s in shots if not (s.get("image_path") and os.path.isfile(s["image_path"]))]
+    ep_shot_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+    missing_img = [s for s in shots
+                   if not (s.get("is_chapter") or
+                           (s.get("image_path") and os.path.isfile(s["image_path"])))]
     if missing_img:
         print(f"\n[IMAGES] Regenerating {len(missing_img)} missing shots...")
         for shot in missing_img:
             seed = shot.get("seed") or (10000 + random.randint(0, 999))
             prompt = _build_shot_prompt(shot, character_sheets)
-            path = _runpod_generate(prompt, seed)
+            path = _runpod_generate(prompt, seed, out_dir=ep_shot_dir)
             shot["seed"] = seed
             shot["image_path"] = path
             print(f"  [SHOT] {'image ready' if path else 'IMAGE FAILED - fallback'} "
                   f"(char={shot.get('character', 'NONE')})")
             time.sleep(1)
-        _save_resume_state("images", episode_num, article_url, topic, shots,
-                           character_sheets, titles, description, tags,
-                           thumb_path, video_path, video_id)
+        _save("images")
     else:
         print(f"  [RESUME] All {len(shots)} images present")
 
@@ -2194,9 +3226,9 @@ def _resume_episode(state: dict) -> None:
         ep_dir = TTS_TEMP / f"ep_{episode_num}"
         ep_dir.mkdir(parents=True, exist_ok=True)
         for idx, shot in enumerate(missing_tts):
-            if not shot.get("tts_path"):
-                shot["tts_path"] = str(ep_dir / f"narration_{idx:02d}_resume.wav")
-            out = shot["tts_path"]
+            nidx = shot.get("narration_idx", idx)
+            out = str(ep_dir / f"narration_{nidx:02d}.wav")
+            shot["tts_path"] = out
             ok = _pocket_tts_generate(shot["narration"], out)
             if ok:
                 _normalize_voice_0db(out)
@@ -2204,27 +3236,40 @@ def _resume_episode(state: dict) -> None:
             else:
                 print(f"  [TTS] FAILED - {shot['narration'][:50]}...")
             time.sleep(0.5)
-        _save_resume_state("tts", episode_num, article_url, topic, shots,
-                           character_sheets, titles, description, tags,
-                           thumb_path, video_path, video_id)
+        _save("tts")
     else:
         print(f"  [RESUME] All {len(shots)} TTS clips present")
 
-    # 3. Video render - reuses finished clips in batch_temp + finished mix
+    # 3. Title pass: whisper the voice track, resolve exact title times
+    #    (chapter cards + location/timeline/person anchors). Runs before the
+    #    render so the typewriter/glitch/shutter SFX land at whisper-matched
+    #    times.
+    title_events = []
+    person_events = []
+    if shots:
+        clip_starts0 = _compute_clip_starts(shots)
+        person_events = _build_person_events(shots, clip_starts0)
+    if (chapter_events or anchor_events or person_events):
+        print("\n[STT] Title pass: whisper timing + event resolution...")
+        voice = _ensure_voice_track(shots, episode_num)
+        words = _transcribe_voice(episode_num, voice)
+        clip_starts = _compute_clip_starts(shots)
+        title_events = _build_resolved_title_events(
+            chapter_events, anchor_events + person_events, words, clip_starts)
+        for ev in title_events:
+            print(f"    [{ev['kind']}] @{ev['start']:.2f}s '{ev.get('text', ev.get('title', ''))}'")
+
+    # 4. Video render - reuses finished clips in batch_temp + finished mix
     if video_path and os.path.isfile(video_path) and os.path.getsize(video_path) > 1000:
         print(f"  [RESUME] Video exists, skipping: {video_path}")
     else:
         print(f"\n[VIDEO] Rendering 1080p (finished clips reused from batch_temp)...")
-        video_path = _render_video(shots, episode_num)
+        video_path = _render_video(shots, episode_num, title_events)
         if not video_path:
             print("  [HALT] Video render failed - state kept for another resume.")
-            _save_resume_state("video", episode_num, article_url, topic, shots,
-                               character_sheets, titles, description, tags,
-                               thumb_path, video_path, video_id)
+            _save("video")
             return
-        _save_resume_state("video", episode_num, article_url, topic, shots,
-                           character_sheets, titles, description, tags,
-                           thumb_path, video_path, video_id)
+        _save("video")
 
     # 4. Titles / description / tags (stored, or regenerated once)
     if not titles:
@@ -2234,6 +3279,7 @@ def _resume_episode(state: dict) -> None:
             print(f"  Title {i+1}: {t}")
     if not description:
         description = _generate_description(topic, episode_num, article_url)
+        description = _append_chapters_to_description(description, title_events)
     if not tags:
         llm_tags = _generate_tags(topic, episode_num)
         tags = YOUTUBE_BASE_TAGS + [t for t in llm_tags if t not in YOUTUBE_BASE_TAGS]
@@ -2266,9 +3312,7 @@ def _resume_episode(state: dict) -> None:
     else:
         print("  [SKIP] YouTube upload disabled")
 
-    _save_resume_state("upload", episode_num, article_url, topic, shots,
-                       character_sheets, titles, description, tags,
-                       thumb_path, video_path, video_id)
+    _save("upload")
 
     print(f"\n  {'='*50}")
     print(f"  EPISODE #{episode_num:03d} COMPLETE (RESUMED)")
@@ -2277,6 +3321,7 @@ def _resume_episode(state: dict) -> None:
         print(f"  YouTube:  https://youtu.be/{video_id}")
     print(f"  Shots: {len(shots)} | Stage: {stage} -> upload")
 
+    _cleanup_stt_artifacts(episode_num)
     _clear_resume_state()
 
 
@@ -2325,7 +3370,7 @@ def main():
         input("  Press Enter to exit...")
         return
 
-    # 3. Stage 1: narration script
+    # 3. Stage 1: narration script (Black Files style, cold open + anchors)
     narration = _build_narration_script(paragraphs)
 
     # 3b. Rate each narration segment against the topic, discard <= 4/10
@@ -2335,49 +3380,93 @@ def main():
             print("  [FILTER] All narration segments off-topic, rebuilding from filtered article...")
             narration = _build_narration_script(paragraphs)
 
-    # 4. Stage 2: shot list from narration
+    # 3c. Chapter pass: insert 'Chapter N - Title' paragraphs (black cards)
+    narration, chapter_events = _insert_chapter_markers(narration)
+    # 3d. Location/timeline anchors -> red/green bottom-left typewriter titles
+    anchor_events = _extract_anchor_events(narration)
+
+    # 3e. START TTS IN PARALLEL: queue ALL narration into PocketTTS in a
+    # background thread, while the main thread builds shots, character sheets
+    # and images. TTS and image gen run at the same time.
+    tts_thread, tts_results, tts_stop = _start_tts_worker(narration, episode_num)
+
+    # 4. Stage 2: shot list from narration (chapter paras become black cards)
     shots = _build_shot_list(narration)
 
     # 4b. Stage 2b: character sheets for every named character
     character_sheets = _build_character_sheets(shots, narration)
-    _save_resume_state("story", episode_num, article_url, topic, shots, character_sheets)
+    _save_resume_state("story", episode_num, article_url, topic, shots,
+                       character_sheets, chapter_events=chapter_events,
+                       anchor_events=anchor_events)
 
-    # 5. Generate images (character sheet prepended, angle-matched view)
-    shots = _generate_all_shots(shots, character_sheets)
-    _save_resume_state("images", episode_num, article_url, topic, shots, character_sheets)
+    # 5. Generate images (character sheet prepended, angle-matched view) -
+    #    runs while the TTS worker keeps generating in the background.
+    shots = _generate_all_shots(shots, character_sheets, episode_num=episode_num)
+    _save_resume_state("images", episode_num, article_url, topic, shots,
+                       character_sheets, chapter_events=chapter_events,
+                       anchor_events=anchor_events)
 
-    # 6. TTS narration (built-in male voice, 0dB)
-    _generate_all_tts(shots, episode_num)
-    _save_resume_state("tts", episode_num, article_url, topic, shots, character_sheets)
+    # 6. Join the TTS worker: all narration clips should be ready now
+    tts_thread.join(timeout=1800)
+    _finalize_tts(shots, tts_results, episode_num)
+    _save_resume_state("tts", episode_num, article_url, topic, shots,
+                       character_sheets, chapter_events=chapter_events,
+                       anchor_events=anchor_events)
 
-    # 7. Render 1080p with full audio mix (voice+music+SFX)
-    video_path = _render_video(shots, episode_num)
+    # 6b. Title pass: whisper the voice track, resolve exact title times so
+    #     the typewriter/glitch/shutter SFX + title cards match the narration.
+    title_events = []
+    person_events = []
+    if shots:
+        clip_starts0 = _compute_clip_starts(shots)
+        person_events = _build_person_events(shots, clip_starts0)
+    if chapter_events or anchor_events or person_events:
+        print("\n[STT] Title pass: whisper timing + event resolution...")
+        voice = _ensure_voice_track(shots, episode_num)
+        words = _transcribe_voice(episode_num, voice)
+        clip_starts = _compute_clip_starts(shots)
+        title_events = _build_resolved_title_events(
+            chapter_events, anchor_events + person_events, words, clip_starts)
+        for ev in title_events:
+            print(f"    [{ev['kind']}] @{ev['start']:.2f}s '{ev.get('text', ev.get('title', ''))}'")
+        _save_resume_state("titles", episode_num, article_url, topic, shots,
+                           character_sheets, chapter_events=chapter_events,
+                           anchor_events=anchor_events)
+
+    # 7. Render 1080p with full audio mix (voice+music+SFX+title SFX), black
+    #    chapter placeholders, shutter black frames, then burn the titles.
+    video_path = _render_video(shots, episode_num, title_events)
     if not video_path:
         print("  [HALT] Video render failed.")
         input("  Press Enter to exit...")
         return
     _save_resume_state("video", episode_num, article_url, topic, shots,
                        character_sheets, titles=[], description="",
-                       tags=[], video_path=video_path)
+                       tags=[], video_path=video_path,
+                       chapter_events=chapter_events, anchor_events=anchor_events)
 
-    # 8. Titles + description
+    # 8. Titles + description (3 titles scored by Google Trends + YouTube
+    #    competition, best first)
     titles = _generate_titles(topic, episode_num)
     for i, t in enumerate(titles):
         print(f"  Title {i+1}: {t}")
     description = _generate_description(topic, episode_num, article_url)
+    description = _append_chapters_to_description(description, title_events)
     llm_tags = _generate_tags(topic, episode_num)
     all_tags = YOUTUBE_BASE_TAGS + [t for t in llm_tags if t not in YOUTUBE_BASE_TAGS]
     tags_str = ",".join(all_tags)
     _save_resume_state("metadata", episode_num, article_url, topic, shots,
                        character_sheets, titles=titles, description=description,
-                       tags=all_tags, video_path=video_path)
+                       tags=all_tags, video_path=video_path,
+                       chapter_events=chapter_events, anchor_events=anchor_events)
 
     # 9. Thumbnail
     thumb_path = str(THUMBNAILS_DIR / f"ep{episode_num:03d}_thumb.png")
     thumb_ok = _generate_thumbnail(topic, thumb_path)
     _save_resume_state("thumbnail", episode_num, article_url, topic, shots,
                        character_sheets, titles=titles, description=description,
-                       tags=all_tags, thumb_path=thumb_path, video_path=video_path)
+                       tags=all_tags, thumb_path=thumb_path, video_path=video_path,
+                       chapter_events=chapter_events, anchor_events=anchor_events)
 
     # 10. Upload to Split Node channel
     if YOUTUBE_UPLOAD_ENABLED:
@@ -2411,6 +3500,7 @@ def main():
     if YOUTUBE_UPLOAD_ENABLED:
         print(f"  YouTube: {f'https://youtu.be/{video_id}' if video_id else 'NOT UPLOADED'}")
     print(f"\n  Done! Press Enter to exit.")
+    _cleanup_stt_artifacts(episode_num)
     _clear_resume_state()
     input()
 
