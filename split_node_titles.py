@@ -6,7 +6,7 @@ Generates an .ass subtitle file with three kinds of animated titles:
                      Shown over the black placeholder clips while the narrator
                      reads "Chapter N - ...".
 2. LOCATION TITLES — bottom-left, RED glow, per-character typewriter reveal
-                     (1.5s), 4s hold, then a 0.5s glitch-off (staggered char
+                     (0.7s), 4s hold, then a 0.5s glitch-off (staggered char
                      exits + RGB-split ghost copies + flicker).
 3. TIMELINE TITLES — bottom-left, GREEN glow, identical typewriter/glitch
                      behaviour. Only shown at the exact moment the date is
@@ -18,9 +18,9 @@ Generates an .ass subtitle file with three kinds of animated titles:
 Timing contract (per event, absolute seconds in the final video):
     chapter : start = when "chapter N" is spoken, end = black clip end
     loc/time: start = when the anchor phrase is spoken
-              typewriter  start .. start+1.5
-              hold        start+1.5 .. start+5.5
-              glitch-off  start+5.5 .. start+6.0
+              typewriter  start .. start+0.7
+              hold        start+0.7 .. start+4.7
+              glitch-off  start+4.7 .. start+5.2
 
 The typewriter uses a monospace font (Consolas) with per-character \pos
 events; char advance is measured with PIL so characters never overlap.
@@ -37,6 +37,12 @@ try:
     _HAS_PIL = True
 except Exception:
     _HAS_PIL = False
+
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except Exception:
+    _HAS_TQDM = False
 
 # ---------------------------------------------------------------------------
 # ASS base template
@@ -177,9 +183,9 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
     # Escape ASS characters
     text = text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
     n = max(len(text), 1)
-    step = 1.5 / n                 # per-char typewriter delay
-    hold_end = ev["start"] + 5.5   # glitch starts here
-    glitch_end = ev["start"] + 6.0
+    step = 0.7 / n                 # per-char typewriter delay
+    hold_end = ev["start"] + 4.7   # glitch starts here (0.7 type + 4.0 hold)
+    glitch_end = ev["start"] + 5.2
 
     lines = []
     x = margin
@@ -214,7 +220,7 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
     cursor = (f"{{\\an7\\pos({cx:.1f},{base_y})\\1c&HFFFFFF&\\bord(1)\\blur(0.4)\\alpha&HFF&{blink}}}"
               f"{{\\alpha&H00&}}_")
     # NOTE: alpha&H00& after the brace means cursor starts visible; blink chain then runs
-    lines.append(_dialog(ev["start"] + 1.5, hold_end, style, cursor, layer=4))
+    lines.append(_dialog(ev["start"] + 0.7, hold_end, style, cursor, layer=4))
 
     # RGB-split ghost copies during the glitch window (chromatic aberration)
     full_w = _text_width("Consolas", fontsize, text)
@@ -272,15 +278,32 @@ def build_title_ass(events: list[dict], out_path: str,
     return out_path
 
 
+def _probe_duration(path: str) -> float:
+    """Total video duration in seconds (0.0 on failure)."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30)
+        return float(r.stdout.strip())
+    except Exception:
+        return 0.0
+
+
 def burn_titles(video_path: str, ass_path: str, out_path: str,
                 timeout: int = 2400) -> bool:
-    """Re-encode video with the title .ass burned in (NVENC, faststart)."""
+    """Re-encode video with the title .ass burned in (NVENC, faststart).
+
+    Streams ffmpeg -progress to a live bar (tqdm when available, otherwise
+    plain ASCII) so a 15-25 min burn shows % + ETA instead of dead air.
+    """
     # Windows: drive-letter colon in absolute paths breaks the subtitles filter.
     # Use relative paths with cwd set to the video's directory instead.
     vdir = Path(video_path).resolve().parent
     vname = Path(video_path).name
     aname = Path(ass_path).name
     oname = Path(out_path).name
+    total = _probe_duration(video_path)
     cmd = [
         "ffmpeg", "-y", "-v", "error",
         "-i", vname,
@@ -289,11 +312,47 @@ def burn_titles(video_path: str, ass_path: str, out_path: str,
         "-c:a", "copy",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
+        "-progress", "pipe:1", "-nostats",
         oname,
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                       cwd=str(vdir))
-    if r.returncode != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) < 1000:
-        print(f"  [TITLES] Burn failed: {r.stderr[-400:]}")
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, cwd=str(vdir))
+    except Exception as e:
+        print(f"  [TITLES] Burn launch failed: {e}")
+        return False
+    pbar = None
+    if _HAS_TQDM and total > 0:
+        pbar = _tqdm(total=total, unit="s", desc="  [TITLES] Burn",
+                     bar_format="{desc}: {percentage:3.0f}%|{bar}| "
+                                "{n:.0f}/{total_fmt}s [{elapsed}<{remaining}]")
+    last_sec = 0.0
+    try:
+        for line in proc.stdout:
+            if pbar is None or not line:
+                continue
+            if line.startswith("out_time_us="):
+                try:
+                    sec = int(line.split("=", 1)[1].strip()) / 1e6
+                except ValueError:
+                    continue
+            elif line.startswith("out_time_ms="):
+                try:
+                    sec = int(line.split("=", 1)[1].strip()) / 1e3
+                except ValueError:
+                    continue
+            else:
+                continue
+            pbar.update(max(0.0, min(sec - last_sec, total - pbar.n)))
+            last_sec = sec
+    except Exception:
+        pass
+    stderr = proc.stderr.read() if proc.stderr else ""
+    proc.wait()
+    if pbar:
+        pbar.close()
+        print()
+    if proc.returncode != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) < 1000:
+        print(f"  [TITLES] Burn failed: {stderr[-400:]}")
         return False
     return True

@@ -85,8 +85,10 @@ FAL_API_KEY = os.environ.get("FAL_API_KEY", "")
 RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY", "")
 RUNPOD_ENDPOINT = "https://api.runpod.ai/v2/z-image-turbo/runsync"
 
-# TTS: built-in male PocketTTS voice (no voice clone)
-TTS_VOICE = "alba"
+# TTS: custom cloned voice ref (from youtube.com/shorts/wBJdFVdCCyM).
+# When TTS_VOICE is a file path it is uploaded as voice_wav (clone); a bare
+# name (e.g. "alba") selects a built-in PocketTTS catalog voice via voice_url.
+TTS_VOICE = str(PROJECT_DIR / "voice_refs" / "split_node.wav")
 
 # Channel / branding
 CHANNEL_NAME = "Split Node"
@@ -247,6 +249,89 @@ SCENE_STYLE = (
     "no clothing, no anatomy, absolutely no persons in the frame"
 )
 
+# B-roll image cache: no-character shots (server farms, hacker screens, graphs,
+# money, etc.) reuse pre-generated images from image-assets/ instead of being
+# regenerated every episode. Lookup is keyword-overlap on the scene description.
+IMAGE_ASSETS_DIR = PROJECT_DIR / "image-assets"
+_ASSET_STOP = {
+    "the", "a", "an", "of", "in", "on", "at", "with", "and", "or", "but", "his",
+    "her", "their", "its", "is", "are", "was", "were", "be", "been", "to", "from",
+    "by", "for", "as", "into", "onto", "over", "under", "through", "between",
+    "against", "during", "showing", "seen", "full", "dark", "dim", "dimly", "lit",
+    "low", "cinematic", "moody", "wide", "extreme", "close", "up", "shot", "view",
+    "scene", "framing", "camera", "angle", "room", "roomful", "empty", "large",
+    "small", "big", "old", "new", "huge", "tiny", "single", "multiple", "several",
+}
+
+
+def _scene_keywords(scene: str) -> list[str]:
+    toks = re.findall(r"[a-z0-9']+", (scene or "").lower())
+    return [t for t in toks if t not in _ASSET_STOP and len(t) > 2]
+
+
+def _lookup_broll_asset(scene: str) -> Optional[str]:
+    """Find a cached no-character image matching the scene. None if no match."""
+    if not IMAGE_ASSETS_DIR.is_dir():
+        return None
+    kw = _scene_keywords(scene)
+    if not kw:
+        return None
+    best, best_score = None, 0
+    for f in IMAGE_ASSETS_DIR.glob("*.png"):
+        name_kw = set(f.stem.lower().split("_"))
+        score = sum(1 for t in kw if t in name_kw)
+        if score > best_score:
+            best, best_score = f, score
+    return str(best) if best_score >= 1 else None
+
+
+def _cache_broll_asset(image_path: str, scene: str) -> str:
+    """Copy a freshly generated no-character image into image-assets/ (keyword
+    filename) so future episodes reuse it instead of regenerating."""
+    try:
+        if not image_path or not os.path.isfile(image_path):
+            return image_path
+        IMAGE_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        kw = _scene_keywords(scene)[:6]
+        if not kw:
+            return image_path
+        dst = IMAGE_ASSETS_DIR / (f"{'_'.join(kw)}.png")
+        if dst.exists():
+            return str(dst)
+        import shutil as _sh
+        _sh.copy2(image_path, dst)
+        # Pipeline rule: every image in image-assets/ must be 1920x1080.
+        # GPU-accelerated upscale (scale_cuda lanczos) in place.
+        try:
+            _upscale_to_1080p(str(dst))
+        except Exception:
+            pass
+        return str(dst)
+    except Exception:
+        return image_path
+
+def _upscale_to_1080p(image_path: str) -> None:
+    """Upscale an image to exactly 1920x1080 in place using 4x_NMKD-Siax_200k.
+
+    Pipeline rule: all images that enter the workflow (b-roll cache, RunPod
+    shots, FAL GPT Image 2 downloads) are upscaled to 1080p with the ComfyUI
+    model BEFORE FFmpeg touches them - so the zoompan render never upscales a
+    soft 608p source and output stays crisp at hevc_nvenc 1080p.
+    """
+    script = PROJECT_DIR / "upscale_model.py"
+    if not script.is_file():
+        return
+    model = r"F:\ComfyUI_windows_portable\ComfyUI\models\upscale_models\4x_NMKD-Siax_200k.pth"
+    comfy_py = r"F:\ComfyUI_windows_portable\python_embeded\python.exe"
+    if not os.path.isfile(model) or not os.path.isfile(comfy_py):
+        return
+    try:
+        import subprocess as _sp
+        _sp.run([comfy_py, str(script), model, image_path, image_path],
+                capture_output=True, text=True, timeout=180)
+    except Exception:
+        pass
+
 # Camera logic per the documentary shot-list framework
 CAMERA_LOGIC = """
 DOCUMENTARY CAMERA LOGIC - shot variety by wideness and angle:
@@ -375,7 +460,7 @@ TITLE_SFX = {
     "intro": "mixkit-glitchy-cinematic-suspense-hit-679.wav",
 }
 # Timing contract for location/timeline titles (seconds)
-TYPEWRITER_SEC = 1.5
+TYPEWRITER_SEC = 0.7
 TITLE_HOLD_SEC = 4.0
 GLITCH_OFF_SEC = 0.5
 # whisper / STT artifacts are deleted on episode completion
@@ -398,6 +483,8 @@ MUSIC_LIBRARY = {
 VOICE_DB = 0.0
 MUSIC_DB = -18.0
 SFX_DB = -14.0
+# Camera shutter is a punchy transient - it needs to CUT through (user: -4dB)
+SHUTTER_DB = -4.0
 
 # Discord announcement bot
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
@@ -718,6 +805,72 @@ def _is_junk_paragraph(text: str) -> bool:
         return True
     return False
 
+
+# ---------------------------------------------------------------------------
+# Narration meta-strip: LLM commentary ("Here are exactly 5 narration
+# paragraphs:", "Paragraph 1:", "Narration:", "Sure, here are...") must
+# never reach the script or the TTS. Hardened on the prompt side too
+# (NARRATION_SYSTEM_PROMPT rule 10) - this is the belt-and-suspenders gate.
+# ---------------------------------------------------------------------------
+_NARRATION_META_FULL_RE = re.compile(
+    r"^(?:"
+    # "here are exactly 5 narration paragraphs" / "...paragraphs:" / "...paragraphs - "
+    r"(?:(?:sure|okay|ok|of\s+course|certainly|absolutely|got\s+it|understood|"
+    r"here\s+you\s+go|no\s+problem|right|great)[,!\s]+)?"
+    r"(?:here|below|above|the\s+following|these|those)\s+(?:are|is|come|follow)"
+    r"[\s\S]*?paragraphs?[\s\S]{0,40}?(?:[:-]|$)"
+    r"|(?:here'?s|that'?s|it'?s)\s+(?:the\s+)?(?:narration|script|draft|story)[\s\S]*$"
+    r"|(?:i'?ve|i\s+have|i'?ll|i\s+will)\s+(?:written|prepared|drafted|created|"
+    r"provided|added|included|expanded)[\s\S]*$"
+    r"|paragraphs?\s*\d*\s*[:-][\s\S]*$"
+    r"|(?:let\s+me|now\s+(?:i|let))\s+(?:write|draft|create)\s+(?:the\s+)?"
+    r"(?:narration|script|paragraph|draft)[\s\S]*$"
+    r")$",
+    re.IGNORECASE,
+)
+
+_NARRATION_PREFIX_RE = re.compile(
+    r"^(?:"
+    # "Sure, here are exactly 5 narration paragraphs: <actual content>"
+    r"(?:(?:sure|okay|ok|of\s+course|certainly|absolutely|got\s+it|understood|"
+    r"here\s+you\s+go|no\s+problem|right|great)[,!\s]+)?"
+    r"(?:here|below|above|the\s+following|these|those)\s+(?:are|is|come|follow)"
+    r"[\s\S]*?paragraphs?[\s\S]{0,40}?[:-]\s*"
+    r"|(?:here'?s|that'?s|it'?s)\s+(?:the\s+)?(?:narration|script|draft|story)[\s\S]*?[:-]\s*"
+    r"|(?:narration|narration\s+script|script|draft|story|response)\s*[:-]\s*"
+    r"|(?:context|story\s+context|article\s+excerpt|excerpt|already\s+covered)\b[\s\S]*?[:-]\s*"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _strip_narration_meta(text: str) -> str:
+    """Strip LLM meta-commentary so it never lands in the script or TTS.
+
+    Order matters: glued prefixes ("Narration: December 12th, 2012...")
+    are stripped FIRST so the actual content survives, then pure-meta lines
+    ("Here are exactly 5 narration paragraphs") are dropped, then list
+    numbering ("4. text" - small numbers only, so dates like '2012.' are
+    never eaten). Chapter card lines ("Chapter 2 - Title") pass through.
+    Returns "" for pure-meta, cleaned text otherwise.
+    """
+    text = (text or "").strip().strip('"\'`*').strip()
+    if not text:
+        return ""
+    m = _NARRATION_PREFIX_RE.match(text)
+    if m:
+        text = text[m.end():].strip().strip('"\'`*').strip()
+        # fragment guard: leftover label-ish fragment with no terminal
+        # punctuation ("The story so far") is meta, not narration
+        if text and len(text) < 40 and not re.search(r"[.!?]$", text):
+            return ""
+    if _NARRATION_META_FULL_RE.match(text):
+        return ""
+    m = re.match(r"^(\d{1,2})[.)]\s+(.+)", text)
+    if m and int(m.group(1)) <= 30:
+        text = m.group(2).strip()
+    return text
+
 def _llm_score_batch(messages: list[dict], max_tokens: int = 300) -> str:
     """Minimal LM Studio call for relevance scoring (no stop tokens, low temp)."""
     data = json.dumps({
@@ -868,7 +1021,7 @@ def _llm_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -
 
 # -- Stage 1: Narration script ---------------------------------------
 
-TARGET_NARRATION_PARAS = 90
+TARGET_NARRATION_PARAS = 115
 
 NARRATION_SYSTEM_PROMPT = (
     "You are a documentary scriptwriter for a YouTube channel called SPLIT NODE. "
@@ -901,7 +1054,13 @@ NARRATION_SYSTEM_PROMPT = (
     "8. DIRECT ADDRESS 1-2 times per episode ('Be honest. If some part of you would "
     "have typed that first $4,999 too...')\n"
     "9. NEVER invent facts that contradict the article. Expand with cinematic framing, "
-    "sensory detail and dramatic tension only.\n\n"
+    "sensory detail and dramatic tension only.\n"
+    "10. OUTPUT CONTRACT: say NOTHING except the narration itself. Never write meta "
+    "text or labels - no 'Here are exactly 5 narration paragraphs', no 'Paragraph 1:', "
+    "no 'Narration:', no 'Sure, here are...', no 'I've written...', no numbering, no "
+    "headers, no stage directions, no intros, no summaries, no signposting of any kind. "
+    "Every line you output is read ALOUD by the narrator, so a single meta word is "
+    "spoken on camera. Output ONLY the raw narration paragraphs.\n\n"
     "I will give you an excerpt of a news article plus story context. Your job: EXPAND "
     "it into a gripping documentary narration. Write in the present tense, cinematic, "
     "dramatic - build suspense, then resolve triumphantly near the end. Every narration "
@@ -951,6 +1110,7 @@ def _build_narration_script(paragraphs: list[str]) -> list[str]:
         added = 0
         for p in parts:
             p_clean = re.sub(r"^\s*[-*#]+\s*", "", p).strip()
+            p_clean = _strip_narration_meta(p_clean)
             if len(p_clean) > 40:
                 narration_paras.append(p_clean)
                 added += 1
@@ -969,66 +1129,142 @@ def _build_narration_script(paragraphs: list[str]) -> list[str]:
     return narration_paras
 
 
-CHAPTER_PLAN_PROMPT = (
-    "You are a documentary editor for SPLIT NODE. You are given a finished "
-    "narration script (numbered paragraphs) for a true-crime documentary in the "
-    "Black Files style. The episode must be divided into 4-6 CHAPTERS, each "
-    "opening with a title card the narrator reads aloud as 'Chapter N - <Title>'.\n"
-    "Pick natural break points: where the story shifts location, era, or moves to "
-    "a new major event. The FIRST 1-3 paragraphs are the cold-open hook and must "
-    "NOT be a chapter start.\n"
-    "Respond with EXACTLY 4-6 lines, one per chapter, in this format:\n"
-    "<paragraph_number> | <Chapter Title, 2-6 words, punchy, no period>\n"
+CHAPTER_TARGET = 10
+CHAPTER_TARGET_MINUTES = 2.5
+CHAPTER_INTRO_FRAC = 0.15   # chapter 1 (cold open) gets 15% of runtime
+CHAPTER_OUTRO_FRAC = 0.15   # final chapter gets 15% of runtime
+WORDS_PER_SEC = 2.4         # narration pace for duration estimates
+
+
+def _estimate_para_duration(para: str) -> float:
+    """Narration duration estimate (seconds) from word count (~2.4 wps)."""
+    words = len(re.findall(r"\S+", para))
+    return max(words, 6) / WORDS_PER_SEC
+
+
+def _pick_chapter_breaks(narration_paras: list[str]) -> list[int]:
+    """Duration-aligned chapter breaks (0-based paragraph indices).
+
+    Targets CHAPTER_TARGET chapters: intro 15% of runtime, outro 15%, middle
+    chapters split the rest evenly. This stops one chapter from running away
+    with the episode (the old LLM-picked breaks let the final chapter run
+    from 7:30 to the end of the video). Returns fewer breaks if the
+    narration is too short to space them out.
+    """
+    durs = [_estimate_para_duration(p) for p in narration_paras]
+    total = sum(durs)
+    if total <= 0:
+        return []
+    n_chap = CHAPTER_TARGET
+    mid_frac = (1.0 - CHAPTER_INTRO_FRAC - CHAPTER_OUTRO_FRAC) / max(n_chap - 2, 1)
+    targets = []
+    for c in range(1, n_chap):  # cumulative end of chapter c
+        if c == 1:
+            targets.append(CHAPTER_INTRO_FRAC)
+        elif c == n_chap - 1:
+            targets.append(1.0 - CHAPTER_OUTRO_FRAC)
+        else:
+            targets.append(CHAPTER_INTRO_FRAC + (c - 1) * mid_frac)
+    cum = 0.0
+    cum_at = []
+    for d in durs:
+        cum_at.append(cum)
+        cum += d
+    breaks = []
+    prev = -1
+    min_gap = 3
+    last_allowed = len(narration_paras) - min_gap
+    for frac in targets:
+        t = frac * total
+        idx = 0
+        for i, t0 in enumerate(cum_at):
+            if t0 >= t:
+                idx = i
+                break
+        else:
+            idx = len(narration_paras) - 1
+        idx = max(idx, prev + min_gap)
+        if idx > last_allowed:
+            break
+        breaks.append(idx)
+        prev = idx
+    return breaks
+
+
+CHAPTER_TITLES_PROMPT = (
+    "You are a documentary editor for SPLIT NODE. Chapters open with a title "
+    "card the narrator reads aloud as 'Chapter N - <Title>'.\n"
+    "The chapter break paragraph numbers are ALREADY FIXED - you only write "
+    "the titles.\n"
+    "Write EXACTLY {n} punchy chapter titles (2-6 words each, no period), one "
+    "per break, in this format:\n"
+    "<paragraph_number> | <Chapter Title>\n"
     "Example:\n"
     "4 | The Account That Never Said No\n"
-    "12 | Complete Freedom\n"
     "No other text."
 )
 
 
-def _insert_chapter_markers(narration_paras: list[str]) -> tuple[list[str], list[dict]]:
-    """Split the narration into chapters: inserts 'Chapter N - Title' paragraphs.
+def _llm_chapter_titles(narration_paras: list[str], breaks: list[int]) -> list[str]:
+    """LLM writes one 2-6 word title per ALREADY-chosen chapter break.
 
-    Returns (new_narration, chapter_events) where each chapter event is
+    Returns a list parallel to breaks; empty string means the LLM skipped
+    that break (caller falls back to a derived title).
+    """
+    numbered = "\n".join(f"{i+1}. {p[:160]}" for i, p in enumerate(narration_paras))
+    break_nums = ", ".join(str(b + 1) for b in breaks)
+    text = _llm_chat([
+        {"role": "system", "content": CHAPTER_TITLES_PROMPT.format(n=len(breaks))},
+        {"role": "user", "content": (
+            f"FIXED CHAPTER BREAKS (paragraph numbers): {break_nums}\n\n"
+            f"NARRATION SCRIPT:\n{numbered}"
+        )}
+    ], max_tokens=400, temp=0.5)
+    title_map = {}
+    for line in text.splitlines():
+        m = re.match(r"^\s*(\d{1,3})\s*[|:]\s*(.+)$", line.strip())
+        if m:
+            idx = int(m.group(1)) - 1
+            title = re.sub(r"\s+", " ", m.group(2)).strip().strip(".\"'")
+            if 2 <= len(title) <= 60:
+                title_map[idx] = title
+    return [title_map.get(b, "") for b in breaks]
+
+
+def _insert_chapter_markers(narration_paras: list[str]) -> tuple[list[str], list[dict]]:
+    """Split the narration into duration-aligned chapters.
+
+    Chapter boundaries are picked by ESTIMATED RUNTIME (word count), not by
+    the LLM - intro and outro chapters get 15% each, the middle chapters are
+    even, and each is ~CHAPTER_TARGET_MINUTES long. The LLM only supplies the
+    titles. Returns (new_narration, chapter_events) where each event is
     {chapter: n, title: str, para_idx: index of the inserted paragraph}.
-    Falls back to no chapters if the LLM call fails.
     """
     if len(narration_paras) < 12:
         return narration_paras, []
-    print("\n[LLM] Chapter pass: picking chapter breaks + titles...")
+    print(f"\n[CHAPTERS] Duration-aligned breaks: {CHAPTER_TARGET} chapters "
+          f"x ~{CHAPTER_TARGET_MINUTES}min (intro/outro longer)...")
     try:
-        numbered = "\n".join(f"{i+1}. {p[:160]}" for i, p in enumerate(narration_paras))
-        text = _llm_chat([
-            {"role": "system", "content": CHAPTER_PLAN_PROMPT},
-            {"role": "user", "content": f"NARRATION SCRIPT:\n{numbered}"}
-        ], max_tokens=400, temp=0.5)
-        breaks = []
-        for line in text.splitlines():
-            m = re.match(r"^\s*(\d{1,3})\s*[|:]\s*(.+)$", line.strip())
-            if m:
-                idx = int(m.group(1)) - 1  # to 0-based paragraph index
-                title = re.sub(r"\s+", " ", m.group(2)).strip().strip(".\"'")
-                if 1 <= idx <= len(narration_paras) - 2 and 2 <= len(title) <= 60:
-                    if idx not in [b[0] for b in breaks]:
-                        breaks.append((idx, title))
-        breaks.sort()
-        breaks = breaks[:6]
+        breaks = _pick_chapter_breaks(narration_paras)
         if len(breaks) < 2:
-            print("  [LLM] Chapter plan unparsable, skipping chapters")
+            print("  [CHAPTERS] Narration too short to space chapters, skipping")
             return narration_paras, []
+        titles = _llm_chapter_titles(narration_paras, breaks)
         out = list(narration_paras)
         events = []
-        for n, (idx, title) in enumerate(breaks, start=1):
-            # insert at idx (0-based) in the CURRENT list
+        for n, idx in enumerate(breaks, start=1):
+            title = titles[n - 1].strip() if n - 1 < len(titles) else ""
+            if not title:
+                words = re.findall(r"[A-Za-z0-9']+", narration_paras[idx])
+                title = (" ".join(words[:3]) or f"Chapter {n}").title()
             pos = idx + (n - 1)  # earlier insertions shift indices
-            para = f"Chapter {n} - {title}"
-            out.insert(pos, para)
+            out.insert(pos, f"Chapter {n} - {title}")
             events.append({"chapter": n, "title": title, "para_idx": pos})
-        print(f"  [LLM] {len(events)} chapters: " +
-              ", ".join(f"#{e['chapter']} '{e['title']}' @para{e['para_idx']+1}" for e in events))
+        print("  [CHAPTERS] " + ", ".join(
+            f"#{e['chapter']} '{e['title']}' @para{e['para_idx']+1}" for e in events))
         return out, events
     except Exception as e:
-        print(f"  [LLM] Chapter pass failed: {e}")
+        print(f"  [CHAPTERS] pass failed: {e}")
         return narration_paras, []
 
 
@@ -1528,55 +1764,277 @@ CHARACTER_SHEET_SYSTEM_PROMPT = (
     "FULL BODY: <complete canonical description combining everything above INCLUDING the full outfit into one dense paragraph to prepend to every image prompt>\n"
 )
 
+# ---------------------------------------------------------------------------
+# CHARACTER ROSTER - 20 fixed archetypes (Metahuman 3D renders, no mannequins).
+# These are TEXT-ONLY character sheets: exact, repeatable image prompts so the
+# same archetype looks identical in every episode. Story characters are mapped
+# to an archetype by role keywords (gender/age fallback for generic roles),
+# and the SAME archetype look is reused across the whole show.
+#
+# Field semantics (consumed by _character_prompt_block):
+#   gender/age/build/face/hair/outfit -> explicit prompt fields
+#   full_body -> canonical anchor sentence(s) with the EXACT clothing
+#   hints    -> role keywords used to assign a story character to this archetype
+# ---------------------------------------------------------------------------
+CHARACTER_ROSTER = [
+    {
+        "id": "hacker", "label": "Hacker",
+        "hints": ["hack", "cyber", "cracker", "exploit", "dark web", "script kiddie",
+                  "computer criminal", "intruder", "breacher"],
+        "gender": "male", "age": "late 20s",
+        "build": "slim, wiry, slightly hunched posture",
+        "face": "Face Shape: Oval, slightly elongated. Forehead: High and broad, exhibiting a smooth, gently sloping curvature. Eyebrows: Medium thickness, possessing a defined arch that starts relatively low on the brow bone and sweeps upward in a gentle, consistent arc; they are well-groomed but not overly sculpted. Eyes: Almond shape, medium size, set moderately wide apart with slight lateral spacing. Iris color is a warm hazel/light brown. Eyelids show distinct upper lid definition with minimal hooding, and the lower lids have subtle puffiness at the outer corners. Nose: The bridge is straight and well-defined, exhibiting moderate width; the tip is slightly rounded but refined, projecting moderately from the face plane. Cheekbones: Moderately pronounced, creating soft but discernible planes beneath the eyes, rising gently towards the temples. Cheeks: Fullness is present, giving a youthful roundness to the mid-face, with slight natural shadowing near the nasolabial folds. Jawline: Clean and well-defined, transitioning smoothly from the lower cheek area down to a moderately tapered chin. Chin: Rounded yet firm, projecting slightly forward (orthognathic). Mouth and Lips: The lips are of medium fullness; the upper lip is slightly thinner than the lower lip, featuring a defined Cupid's bow. The mouth rests in a relaxed, slight upward curve. Ears: Medium size, set close to the head, with a visibl",
+        "hair": "messy dark hair in a loose bun, strands falling over the forehead",
+        "outfit": "black hoodie with the hood down, dark grey t-shirt underneath, black cargo pants, worn black sneakers, thin silver chain necklace",
+        "full_body": "A late-20s male hacker, slim and wiry with a slightly hunched posture. Sharp angular jaw, pale skin, intense dark eyes, light stubble, messy dark hair in a loose bun. Wearing a black hoodie with the hood down over a dark grey t-shirt, black cargo pants, worn black sneakers, and a thin silver chain necklace.",
+    },
+    {
+        "id": "police-officer", "label": "Police Officer",
+        "hints": ["polic", "officer", "constable", "sergeant", "cop", "law enforcement", "patrol officer", "uniformed officer"],
+        "gender": "male", "age": "early 30s",
+        "build": "broad-shouldered, athletic, physically fit",
+        "face": "Face shape: Oval, slightly elongated vertically. Forehead: High and broad, exhibiting a smooth, gently sloping curve towards the hairline. Eyebrows: Medium thickness, possessing a defined arch that starts relatively low on the brow bone and sweeps upward with moderate taper at the tail. Eyes: Deep-set, almond to slightly rounded shape; dark brown/near black iris color; medium size; well-spaced horizontally (neither too close nor widely set); upper eyelids are moderately hooded, showing slight creasing at the outer corners. Nose: The bridge is straight and robust, possessing a moderate width that tapers cleanly down to a defined tip; the nostrils are well-formed with visible alar creases. Cheekbones: Pronounced and high, creating distinct planes beneath the eyes, though the flesh above them is relatively smooth. Cheeks: Fullness is moderate, giving a grounded appearance, with subtle definition leading into the jawline. Jawline: Strong and clearly defined, exhibiting a sharp angle at the gonial angle. Chin: Medium projection, rounded yet firm, providing a solid anchor to the lower face. Mouth and Lips: The mouth is horizontally proportioned; lips are of medium fullness—the upper lip is slightly thinner than the lower lip, which has a gentle Cupid's bow definition. Ears: Set moderately high on the head, proportionate in size, with smooth helix contours and visible antihelical fold",
+        "hair": "short neat brown hair, high and tight cut",
+        "outfit": "dark navy police uniform shirt with a generic unmarked badge on the chest (no agency lettering), black trousers, duty belt, black boots",
+        "full_body": "An early-30s male police officer, broad-shouldered and athletic. Clean-shaven with a strong jaw, blue eyes, and short neat brown hair in a high-and-tight cut. Wearing a dark navy police uniform shirt with a generic unmarked badge (no agency lettering), black trousers, a duty belt, and black boots.",
+    },
+    {
+        "id": "special-agent", "label": "Special Agent",
+        "hints": ["special agent", "federal agent", "secret service", "bureau", "fed", "fbi", "agency investigator", "plainclothes agent", "intel officer"],
+        "gender": "male", "age": "mid 40s",
+        "build": "solid, gym-fit, broad chest",
+        "face": "Face shape: Oval, slightly elongated vertically. Forehead: High and broad, exhibiting a smooth, gently sloping curve. Eyebrows: Medium thickness, well-defined arch that begins relatively low on the brow bone and peaks sharply before tapering to a moderate tail length. Eyes: Almond-shaped, medium size, deep set beneath prominent supraorbital ridges. Iris color is a warm hazel, flecked with gold; lids show a distinct crease, and the lower lid has subtle puffiness at the outer corners. Spacing: Proportional, slightly wider than the average intercanthal distance. Nose: Straight bridge, well-defined but not overly sharp dorsum, tip is moderately rounded with a slight downward projection (nasolabial angle), width is proportionate to the midface. Cheekbones: High and pronounced, creating distinct planes beneath the eyes; cheeks themselves are relatively smooth, showing minimal volume loss for his apparent age. Jawline: Strong and chiseled, exhibiting a clear definition that transitions smoothly into the neck. Chin: Moderately pointed (subtly V-shaped), well-supported by the jaw structure. Mouth: Medium width, possessing a gentle upward curve at the corners. Lips: Fullness is balanced; the upper lip is slightly thinner than the lower lip, with a defined Cupid's bow. Ears: Set moderately high on the head, proportionate size, helix shows a slight inward roll (concha), lobe is smooth and",
+        "hair": "short cropped dark hair with grey at the temples",
+        "outfit": "plain dark charcoal suit, white shirt, black tie, no badge, no insignia, no logos - an anonymous federal look",
+        "full_body": "A mid-40s male special agent, solid and gym-fit with a broad chest. Square jaw, weathered skin, cold grey eyes, short stubble, short cropped dark hair with grey at the temples. Wearing a plain dark charcoal suit, white shirt and black tie - no badge, no insignia, no logos, an anonymous federal look.",
+    },
+    {
+        "id": "lawyer", "label": "Lawyer",
+        "hints": ["lawyer", "attorney", "barrister", "solicitor", "counsel", "prosecutor", "defence lawyer", "defense attorney", "legal", "judge", "litigator"],
+        "gender": "male", "age": "early 40s",
+        "build": "lean, tall, upright posture",
+        "face": "Face shape: Oval, slightly elongated. Forehead: High and broad, exhibiting a smooth, gently sloping curve. Eyebrows: Medium thickness, well-defined arch starting relatively low on the brow bone, tapering to a slight, soft tail. Eyes: Almond-shaped, medium size, deep set beneath prominent supraorbital ridges. Iris colour is a warm hazel/light brown, framed by dark lashes. Eyelids show moderate hooding, particularly on the upper lid, with visible creasing at the outer corners. Spacing is proportional and balanced. Nose: Straight bridge, moderately wide at the base, transitioning to a defined yet softly rounded tip. Nostrils are well-formed and symmetrical. Cheekbones: Moderately high set, providing subtle but distinct definition beneath the skin; cheeks themselves appear full but taut over the bone structure. Jawline: Cleanly defined, strong curve leading down from the mandibular angle. Chin: Proportionate to the rest of the face, slightly rounded at the apex. Mouth and Lips: Medium width mouth. Upper lip is fuller, exhibiting a gentle Cupid's bow; lower lip is full and smooth, with a slight downward curve at the corners. Ears: Set relatively close to the head, medium size, well-formed helix and antihelix structure, visible lobe shows subtle definition. Skin tone: Fair, warm undertones (peachy/light tan). Skin texture: Smooth overall, but pores are visible across the T-zone (fore",
+        "hair": "neat dark brown hair, side part, lightly gelled",
+        "outfit": "tailored navy suit, crisp white shirt, burgundy silk tie, polished leather shoes, leather briefcase",
+        "full_body": "An early-40s male lawyer, lean and tall with upright posture. Narrow face, wire-rimmed glasses, sharp nose, trimmed beard, neat dark brown hair with a side part. Wearing a tailored navy suit, crisp white shirt, burgundy silk tie, polished leather shoes, carrying a leather briefcase.",
+    },
+    {
+        "id": "mid40s-male", "label": "Everyman, mid-40s male",
+        "hints": ["mid-40s male", "middle-aged man", "family man", "husband", "father of", "regular guy", "everyman"],
+        "gender": "male", "age": "mid 40s",
+        "build": "average build, soft around the middle, broad hands",
+        "face": "Face shape: Oblong, tapering slightly towards a defined chin. Forehead: High and broad, exhibiting subtle horizontal creasing across the brow area. Eyebrows: Medium thickness, possessing a gently arched, somewhat rugged shape; the inner corners are slightly more pronounced than the outer sweep. Eyes: Deep-set, almond-shaped, medium size, dark (appears deep brown/black in monochrome), with moderate spacing. Eyelids: The upper lid shows slight hooding, and there is visible creasing at the outer canthus. Nose: Straight bridge, moderately wide at the base, terminating in a slightly bulbous yet refined tip; nostrils are well-defined. Cheekbones: Moderately prominent, creating subtle shadowing beneath them when viewed from this angle, with soft fullness to the cheeks themselves. Jawline: Strong and clearly defined, transitioning smoothly into a tapered chin. Chin: Moderate projection, rounded but firm. Mouth and Lips: The lips are medium in fullness; the upper lip is slightly thinner than the lower, forming a relaxed, downturned curve at the corners. Ears: Medium size, set relatively close to the head, with visible vertical folds (helix/antihelix) and a slight prominence on the lobe. Skin tone: Appears weathered, suggesting a warm, medium olive undertone in natural light; texture is finely porous but shows significant topographical variation due to age. Blemishes/Texture: Pronounced",
+        "hair": "dark brown hair receding at the temples, neatly combed",
+        "outfit": "plain navy polo shirt, khaki chinos, brown leather belt, simple analogue watch",
+        "full_body": "A mid-40s male everyman, average build, soft around the middle with broad hands. Rounded face, tired brown eyes, slight smile lines, stubble, dark brown hair receding at the temples. Wearing a plain navy polo shirt, khaki chinos, a brown leather belt and a simple analogue watch.",
+    },
+    {
+        "id": "mid40s-female", "label": "Professional woman, mid-40s",
+        "hints": ["mid-40s female", "middle-aged woman", "working mother", "professional woman"],
+        "gender": "female", "age": "mid 40s",
+        "build": "slim, elegant, straight posture",
+        "face": "Face shape: Oval, slightly tapering towards a defined chin. Forehead: Moderately high, broad, with subtle horizontal creasing across the brow area. Eyebrows: Medium thickness, moderately arched, possessing a natural, somewhat uneven texture; the inner corners are slightly denser than the outer sweeps. Eyes: Deep-set, almond shape, medium size, dark brown/hazel colour. Spacing is average, with slight medial convergence at the inner canthi. Eyelids: Upper lid shows moderate hooding, revealing a defined crease; lower lids exhibit fine creasing and slight puffiness. Nose: Bridge is straight and moderately high, exhibiting subtle dorsal flattening near the glabella. Tip is rounded but firm, slightly bulbous. Width is proportionate to the face, neither overly narrow nor wide. Cheekbones: Prominent, well-defined, showing moderate elevation beneath the skin, creating soft shadowing under the zygomatic arches. Cheeks: Fullness has diminished with age, revealing deeper nasolabial folds that run from the nose wings down towards the corners of the mouth. Jawline: Strong and clearly defined, exhibiting a slight mandibular angle prominence. Chin: Rounded yet firm, well-supported by underlying structure. Mouth and Lips: The lips are medium fullness; the upper lip is slightly thinner than the lower. Shape is naturally curved into a gentle, resting smile. Ears: Medium size, set close to the hea",
+        "hair": "shoulder-length chestnut hair, blunt cut, tucked behind one ear",
+        "outfit": "charcoal blazer over a cream blouse, black tailored trousers, low heels, small pearl earrings",
+        "full_body": "A mid-40s professional woman, slim and elegant with straight posture. Fine features, warm hazel eyes, minimal makeup, gentle frown lines, shoulder-length chestnut hair in a blunt cut. Wearing a charcoal blazer over a cream blouse, black tailored trousers, low heels and small pearl earrings.",
+    },
+    {
+        "id": "young-male", "label": "Young man, 20s",
+        "hints": ["young male", "young man", "teenager", "teen", "student", "college", "intern", "20s male", "twenties"],
+        "gender": "male", "age": "early 20s",
+        "build": "lean, lanky, long limbs",
+        "face": "Face shape: Oval, with subtle tapering towards a defined chin. Forehead: High and smoothly curved, exhibiting a gentle convexity. Eyebrows: Medium thickness, possessing a soft, slightly arched shape that begins relatively low on the brow bone. Eyes: Almond-shaped, medium size, set moderately wide apart. Iris colour is a warm hazel/light brown; eyelids show a distinct crease and slight hooding at the outer corners. Nose: Straight bridge, well-defined but not overly sharp, with a softly rounded tip and moderate width across the alar base. Cheekbones: Moderately prominent, creating gentle hollows beneath them that catch the light subtly. Cheeks: Fullness is present, giving a youthful plumpness, particularly in the malar region. Jawline: Cleanly defined, exhibiting a smooth transition from the lower cheek to the chin. Chin: Rounded and proportionate, neither overly pointed nor blunt. Mouth and Lips: The lips are full, especially the lower lip, which has a generous curve (cupid's bow is well-defined). The overall mouth shape is relaxed and slightly downturned at the corners. Ears: Medium size, set close to the head, with a smooth helix and antihelix; the lobe is rounded and fleshy. Skin tone: Fair, possessing a warm, rosy undertone. Skin texture: Very smooth, porcelain-like quality, though fine pores are visible across the cheeks and nose bridge. Blemishes/Wrinkles: Minimal; faint l",
+        "hair": "thick sandy-brown hair, messy fringe",
+        "outfit": "oversized grey hoodie, black jeans with a wallet chain, white sneakers, backpack",
+        "full_body": "An early-20s young man, lean and lanky with long limbs. Boyish face, bright eyes, light freckles, clean-shaven, thick sandy-brown hair with a messy fringe. Wearing an oversized grey hoodie, black jeans with a wallet chain, white sneakers and a backpack.",
+    },
+    {
+        "id": "young-female", "label": "Young woman, 20s",
+        "hints": ["young female", "young woman", "girl", "student female", "intern female", "20s female"],
+        "gender": "female", "age": "early 20s",
+        "build": "petite, energetic posture",
+        "face": "Face shape: Oval, with subtle tapering towards a defined chin. Forehead: High and smooth, exhibiting a gentle, convex curve. Eyebrows: Medium thickness, well-arched with a slight downward sweep at the outer corners; they possess a natural, soft taper from the inner arch. Eyes: Almond-shaped, medium size, deep set beneath slightly hooded lids. Iris color is a warm hazel, flecked with amber and green. Eyelids show moderate creasing at the outer canthus. Spacing is balanced, neither too wide nor too close together. Nose: The bridge is straight and moderately high, exhibiting subtle definition (a slight dorsal hump). The tip is refined, slightly rounded, and well-proportioned to the face width. Width is average for her facial structure. Cheekbones: Moderately prominent, creating gentle but distinct planes beneath the eyes; they rise smoothly from the mid-cheek area. Cheeks: Softly contoured, with a natural flush visible in the apples, suggesting healthy blood flow. Jawline: Clean and well-defined, exhibiting a smooth transition from the lower cheek to the chin. Chin: Gently rounded, proportionate, and slightly pointed (a subtle V-shape). Mouth and Lips: The mouth is naturally closed, forming a relaxed, slight upturn at the corners. Lips are medium fullness; the upper lip is slightly thinner than the lower lip, which has a soft cupid's bow definition. Ears: Medium size, set relative",
+        "hair": "long straight auburn hair, centre part",
+        "outfit": "cream knit sweater, high-waisted blue jeans, white canvas sneakers, small crossbody bag",
+        "full_body": "An early-20s young woman, petite with an energetic posture. Round face, large green eyes, light makeup, long straight auburn hair with a centre part. Wearing a cream knit sweater, high-waisted blue jeans, white canvas sneakers and a small crossbody bag.",
+    },
+    {
+        "id": "old-male", "label": "Elderly man, 60s-70s",
+        "hints": ["old male", "elderly man", "retiree", "pensioner", "grandfather", "senior man", "60s", "70s", "80s"],
+        "gender": "male", "age": "late 60s",
+        "build": "stooped, thin, frail frame",
+        "face": "face shape. Forehead is moderately high and smooth, exhibiting subtle horizontal lines across the brow area. Eyebrows are medium thickness, possessing a gentle arch that tapers slightly towards the temples; they appear well-defined but not overly sculpted. Eyes are dark (implied brown/black), almond-shaped with moderate size, set at an average distance apart. The upper eyelids show slight creasing at the outer corners, and the lower lids exhibit fine lines radiating outwards from the tear ducts. Nose has a straight, defined bridge that is slightly broad at the base; the tip is rounded but firm, and the overall width is proportional to the face. Cheekbones are moderately prominent, creating soft shadows beneath them when smiling, with the cheeks themselves appearing full and relaxed in this expression. The jawline is strong and well-defined, transitioning smoothly into a slightly tapered chin that has a gentle curve at the bottom point. Mouth is wide and open in a genuine smile, revealing upper teeth that are even and bright; the lips are medium fullness—the upper lip is slightly thinner than the lower. Ears are set relatively close to the head, appearing proportionate, with visible antihelical folds and smooth lobe texture. Skin tone is warm, tanned (implied), exhibiting a fine-grained texture overall. Texture details include numerous small pores across the cheeks and forehead,",
+        "hair": "thinning white hair, combed over",
+        "outfit": "brown cardigan over a checked flannel shirt, corduroy trousers, worn leather slippers",
+        "full_body": "A late-60s elderly man, stooped and thin with a frail frame. Deeply lined face, bushy grey eyebrows, kind brown eyes, thick grey moustache, thinning white hair combed over. Wearing a brown cardigan over a checked flannel shirt, corduroy trousers and worn leather slippers.",
+    },
+    {
+        "id": "old-female", "label": "Elderly woman, 60s-70s",
+        "hints": ["old female", "elderly woman", "grandmother", "senior woman", "nan", "nana"],
+        "gender": "female", "age": "late 60s",
+        "build": "small, slightly stooped",
+        "face": "Face shape: Oval, slightly elongated vertically. Forehead: High and broad, exhibiting a smooth, gently sloping contour with subtle horizontal lines etched across the upper third. Eyebrows: Medium thickness, possessing a well-defined arch that starts moderately low on the brow bone and sweeps upward to a distinct peak before tapering softly. Eyes: Almond shape, medium size, set slightly wide apart (approximately 1.5 eye-widths apart). Iris colour is a warm hazel, flecked with gold; the eyelids show moderate creasing at the outer corners, and the lower lids display faint puffiness. Nose: The bridge is straight and moderately high, exhibiting slight definition near the medial canthus. The tip is softly rounded, neither overly sharp nor bulbous, and the overall width is proportionate to the face. Cheekbones: Prominent and gently convex, casting soft shadows beneath them, particularly visible in the zygomatic arch area. Cheeks: Fullness is moderate; the skin appears slightly lifted on the malar region, suggesting good underlying structure. Jawline: Defined and gracefully curved, transitioning smoothly from the cheek to a moderately tapered chin. Chin: Rounded yet firm, possessing sufficient projection to balance the lower face. Mouth and Lips: The lips are medium fullness, with the upper lip being slightly thinner than the bottom lip. The shape is naturally curved into a gentle, clo",
+        "hair": "short silver-white curls",
+        "outfit": "floral print blouse, beige cardigan, pleated knee-length skirt, comfortable flat shoes, pearl necklace",
+        "full_body": "A late-60s elderly woman, small and slightly stooped. Soft wrinkled face, warm blue eyes, gentle smile, reading glasses on a chain, short silver-white curls. Wearing a floral print blouse, beige cardigan, pleated knee-length skirt, comfortable flat shoes and a pearl necklace.",
+    },
+    {
+        "id": "politician", "label": "Politician",
+        "hints": ["politician", "senator", "congress", "mayor", "minister", "parliament", "mp ", "campaign", "government official", "council"],
+        "gender": "male", "age": "early 50s",
+        "build": "sturdy, imposing, upright",
+        "face": "Face shape: Oval, slightly elongated. Forehead: High and broad, exhibiting a smooth, gently sloping curve towards the temples. Eyebrows: Medium thickness, well-defined arching upwards from a relatively straight headline; they possess a slight, natural taper at the outer edges. Eyes: Deep-set, almond-shaped, medium size, dark brown/deep hazel colour. They are spaced evenly, with moderate intercanthal distance. Eyelids: Upper lids show defined creases (hooded appearance), while lower lids are smooth but exhibit fine creasing beneath them. Nose: The bridge is straight and moderately high, exhibiting a subtle dorsal hump near the glabella. The tip is slightly rounded and projects minimally beyond the face plane. Width is proportional to the mid-face width. Cheekbones: Prominent and well-defined, creating moderate shadow definition under the zygomatic arches; they have a gentle upward sweep towards the temples. Cheeks: Fullness is moderate, with slight natural depressions (nasolabial folds) leading from the nose base down toward the corners of the mouth. Jawline: Strong and clearly defined, transitioning smoothly from the lower cheek to a well-set chin. Chin: Rounded yet firm, projecting slightly forward (orthognathic). Mouth and Lips: The lips are medium fullness; the upper lip is slightly thinner than the lower lip. The shape is naturally curved into a gentle, closed smile/smirk.",
+        "hair": "full dark hair with grey streaks, immaculately styled",
+        "outfit": "charcoal three-piece suit, light blue shirt, muted striped tie, American flag lapel-free (no pins, no logos), pocket square",
+        "full_body": "An early-50s male politician, sturdy and imposing with upright posture. Broad face, confident smile, cleft chin, groomed eyebrows, full dark hair with grey streaks immaculately styled. Wearing a charcoal three-piece suit, light blue shirt, muted striped tie, no pins and no logos, with a pocket square.",
+    },
+    {
+        "id": "banker", "label": "Banker / Loan Officer",
+        "hints": ["bank", "banker", "loan", "mortgage", "financ", "lender", "credit", "wealth manager", "teller"],
+        "gender": "male", "age": "mid 40s",
+        "build": "soft build, sedentary posture",
+        "face": "Face shape: Oval, with subtle tapering towards a defined chin. Forehead: Moderately high and broad, exhibiting a smooth, slightly convex curve. Eyebrows: Medium thickness, possessing a gentle, naturally arched shape; the arch is neither overly sharp nor completely flat. Eyes: Almond-shaped, medium size, set moderately wide apart. Iris color is a deep hazel, flecked with amber near the pupil. Eyelids show a distinct crease and moderate hooding above the upper lid. Nose: The bridge is straight and well-defined, exhibiting slight prominence; the tip is gently rounded but refined, and the overall width is proportional to the face. Cheekbones: Moderately high set, displaying soft definition beneath the skin, creating subtle shadow planes. Cheeks: Fullness is moderate, with a natural flush visible in the apples. Jawline: Cleanly defined, strong, and angular, transitioning smoothly into the chin. Chin: Medium projection, slightly rounded at the very tip, providing a balanced anchor to the lower face. Mouth and Lips: The mouth is naturally set, neither overly wide nor narrow. Lips are medium fullness; the upper lip has a distinct Cupid's bow, while the lower lip is fuller and curves gently downward at the corners. Ears: Medium size, set close to the head, with a smooth helix and antihelix structure; they appear proportionate and well-formed. Skin Tone: Warm olive tone, exhibiting a hea",
+        "hair": "slicked-back dark hair with grey sides",
+        "outfit": "light grey suit, white shirt, red tie, banker's vest, leather shoes",
+        "full_body": "A mid-40s male banker, soft build with a sedentary posture. Round face, thin lips, heavy-lidded eyes, tortoiseshell glasses, slicked-back dark hair with grey sides. Wearing a light grey suit, white shirt, red tie and a banker's vest with leather shoes.",
+    },
+    {
+        "id": "casino-dealer", "label": "Casino Dealer",
+        "hints": ["casino", "dealer", "croupier", "card room", "blackjack", "poker table", "pit boss", "roulette"],
+        "gender": "male", "age": "early 30s",
+        "build": "lean, precise movements",
+        "face": "Face shape: Oval, with subtle tapering towards a defined chin. Forehead: High and smooth, exhibiting a gentle convex curve. Eyebrows: Medium thickness, possessing a well-defined arch that starts slightly lower than the natural brow line, giving an attentive expression. Eyes: Almond-shaped, medium size, set moderately wide apart. Iris color appears to be a warm hazel or light brown (though monochrome), framed by dark lashes. Eyelids: Upper lid shows moderate creasing at the outer corner; lower lids are smooth but show faint vascularity beneath. Nose: Straight bridge of medium width, tapering gracefully to a slightly rounded tip that is neither overly bulbous nor excessively narrow. Cheekbones: Moderately pronounced, creating soft but distinct planes beneath the eyes and extending slightly upward towards the temples. Cheeks: Fullness is moderate; the skin appears taut over the zygomatic arches, with subtle definition in the malar region. Jawline: Cleanly defined, strong curve leading to a well-proportioned chin. Chin: Rounded yet firm, projecting slightly forward from the lower face plane. Mouth and Lips: The lips are medium fullness; the upper lip is slightly thinner than the lower, exhibiting a gentle Cupid's bow. The corners of the mouth turn upward in a subtle, relaxed smile. Ears: Set at an average distance from the head, proportionate to the skull size; the lobe is smooth a",
+        "hair": "short black hair, neatly parted",
+        "outfit": "crisp white dress shirt, black vest, black bow tie, dark trousers, sleeves rolled to the forearm",
+        "full_body": "An early-30s male casino dealer, lean with precise movements. Angular face, unreadable expression, deep-set eyes, short black hair neatly parted. Wearing a crisp white dress shirt, black vest, black bow tie and dark trousers with the sleeves rolled to the forearm.",
+    },
+    {
+        "id": "accountant", "label": "Accountant / Auditor",
+        "hints": ["accountant", "auditor", "tax", "bookkeeper", "actuary", "ledger", "compliance", "forensic"],
+        "gender": "female", "age": "late 30s",
+        "build": "slim, precise, upright",
+        "face": "Face shape: Oval, with subtle tapering towards a defined chin. Forehead: High and smoothly curved, exhibiting minimal horizontal creasing at the temples. Eyebrows: Medium thickness, possessing a gentle, slightly arched sweep; the inner corners are well-defined, meeting the brow bone cleanly. Eyes: Dark brown, almond-shaped, medium size, set moderately wide apart with slight lateral spacing. The upper eyelids show a defined crease, and the lower lids present subtle puffiness beneath the outer canthi. Nose: The bridge is straight and moderately high, exhibiting a slight convex curve near the radix; the tip is well-defined, slightly rounded, and proportionate in width to the face. Cheekbones: Moderately prominent, creating soft but distinct planes that catch the light along the zygomatic arches. Cheeks: Fullness is present, particularly on the malar region, giving a healthy, grounded appearance. Jawline: Strong and clearly delineated, transitioning smoothly from the cheekbone area down to a defined mandibular angle. Chin: Rounded yet firm, projecting slightly forward, providing a balanced terminus to the lower face. Mouth and Lips: The mouth is closed in a relaxed, neutral expression. The lips are medium fullness; the upper lip has a distinct Cupid's bow, while the lower lip is fuller and curves gently downwards at the corners. Ears: Medium-sized, set close to the head, with smoot",
+        "hair": "dark hair in a tight low bun",
+        "outfit": "dark green blouse, black pencil skirt, grey cardigan, sensible black pumps, wristwatch",
+        "full_body": "A late-30s female accountant, slim and precise with upright posture. Sharp features, thin-framed glasses, focused grey eyes, dark hair in a tight low bun. Wearing a dark green blouse, black pencil skirt, grey cardigan, sensible black pumps and a wristwatch.",
+    },
+    {
+        "id": "security-guard", "label": "Security Guard",
+        "hints": ["security guard", "guard", "doorman", "bouncer", "night watchman", "security officer", "gatehouse"],
+        "gender": "male", "age": "mid 40s",
+        "build": "heavyset, broad shoulders",
+        "face": "Face shape: Oval, tapering slightly towards a defined chin. Forehead: High and broad, exhibiting subtle horizontal lines of age around the temples. Eyebrows: Medium thickness, possessing a strong, moderately arched shape; the inner corners are slightly more pronounced than the outer sweep. Eyes: Deep-set, almond-shaped, medium size, dark (implied brown/hazel), with moderate spacing. Eyelids: The upper lid shows slight creasing at the outer canthus; the lower lid is relatively smooth but exhibits fine lines beneath it. Nose: Straight bridge, well-defined and slightly prominent dorsally; the tip is subtly rounded yet firm, with a medium width across the alar base. Cheekbones: High and pronounced, casting distinct shadows under the zygomatic arches, giving the mid-face structure significant definition. Cheeks: Moderately full, particularly when relaxed, but tautened by expression, showing slight indentation near the nasolabial folds. Jawline: Strong and angular, sharply defined against the neck, leading to a well-proportioned chin. Chin: Medium size, slightly squared off, providing a solid anchor to the lower face. Mouth and Lips: The mouth is set in a contemplative, downturned curve. The lips are of medium fullness; the upper lip is thinner with a distinct Cupid's bow, while the lower lip is fuller and more generous. Ears: Medium-sized, set relatively close to the head, exhibitin",
+        "hair": "buzzed grey-brown hair",
+        "outfit": "plain dark security uniform with a generic unmarked patch (no lettering), black cap, radio on the shoulder, black tactical boots",
+        "full_body": "A mid-40s male security guard, heavyset with broad shoulders. Heavy face, thick neck, small eyes, short beard, buzzed grey-brown hair. Wearing a plain dark security uniform with a generic unmarked patch (no lettering), black cap, radio on the shoulder and black tactical boots.",
+    },
+    {
+        "id": "executive", "label": "Corporate Executive",
+        "hints": ["ceo", "executive", "founder", "director", "chairman", "president of", "boss", "owner", "tycoon", "magnate"],
+        "gender": "male", "age": "mid 50s",
+        "build": "tall, commanding, broad",
+        "face": "face shape. Forehead is moderately high and smooth, exhibiting a gentle convex curve. Eyebrows are medium thickness, possessing a defined arch that starts relatively low on the brow bone and sweeps upward in a graceful, slightly elongated manner. Eyes are a deep hazel-brown, almond-shaped, of average size, with moderate spacing; the upper eyelids show a distinct crease, while the lower lids appear smooth but possess subtle puffiness at the outer corners. The nose has a straight, well-defined bridge that is neither overly narrow nor wide, tapering to a slightly rounded tip. Cheekbones are moderately prominent, creating gentle planes of definition beneath the eyes, with the cheeks themselves appearing full and soft rather than gaunt. The jawline is strong and clearly defined, transitioning smoothly into a proportionate chin which is slightly rounded at the center point. The mouth is medium width, featuring lips that are neither overly thin nor excessively plump; the upper lip has a distinct Cupid's bow, while the lower lip offers a fuller curve. Ears are set close to the head, appearing proportional in size, with smooth helix and antihelix contours. Skin tone is a warm, light olive hue, exhibiting a finely textured surface punctuated by visible pores across the T-zone (forehead/nose) and faint, scattered reddish-brown freckles concentrated on the upper cheeks. There are minimal s",
+        "hair": "silver-grey hair, slicked back",
+        "outfit": "expensive navy suit, crisp white shirt, no tie, luxury watch, leather brogues",
+        "full_body": "A mid-50s male corporate executive, tall and commanding with a broad build. Chiselled face, sharp cheekbones, piercing eyes, groomed grey beard, silver-grey hair slicked back. Wearing an expensive navy suit, crisp white shirt with no tie, a luxury watch and leather brogues.",
+    },
+    {
+        "id": "detective", "label": "Detective / Private Investigator",
+        "hints": ["detective", "private investigator", "pi", "inspector", "sleuth", "homicide", "investigator"],
+        "gender": "male", "age": "late 40s",
+        "build": "wiry, tired, coiled energy",
+        "face": "Face shape: Oval, slightly elongated. Forehead: High, broad, with a gentle, smooth curve leading down to the temples. Eyebrows: Medium thickness, well-defined arch that is neither overly sharp nor too soft; they follow a classic, moderate parabolic curve. Eyes: Almond-shaped, medium size, deep-set beneath prominent brow bones. Iris color appears dark brown/hazel in the monochrome image. Eyelids: Upper lids are moderately hooded, showing a distinct crease; lower lids show slight puffiness and fine lines radiating outwards. Spacing: Proportional, slightly wider than average. Nose: Straight bridge, well-defined but not overly sharp dorsum. Tip is rounded with a subtle downward curve (a hint of a 'button' tip). Width: Medium width, proportionate to the face. Cheekbones: Moderately high and prominent, creating distinct planes beneath the eyes; cheeks themselves are full but taut, suggesting good underlying structure. Jawline: Strong, clearly defined, exhibiting a crisp angle from the lower ear towards the chin. Chin: Well-formed, slightly rounded apex, projecting moderately forward. Mouth: Medium width, horizontally proportioned. Lips: Full, particularly the bottom lip which is fuller than the top; Cupid's bow is distinct and well-defined. Ears: Set at an average height, proportionate size, with a smooth helix and antihelix structure; lobe is medium thickness. Skin Tone: Appears to",
+        "hair": "unruly dark hair with grey flecks",
+        "outfit": "rumpled tan trench coat over a dark shirt, loosened tie, worn leather shoes, notepad",
+        "full_body": "A late-40s male detective, wiry and tired with coiled energy. Gaunt face, deep eye bags, five o'clock shadow, sharp nose, unruly dark hair with grey flecks. Wearing a rumpled tan trench coat over a dark shirt, a loosened tie, worn leather shoes, holding a notepad.",
+    },
+    {
+        "id": "journalist", "label": "Journalist / Reporter",
+        "hints": ["journalist", "reporter", "writer", "editor", "correspondent", "press", "columnist", "news"],
+        "gender": "female", "age": "early 30s",
+        "build": "slim, quick, alert",
+        "face": "Face Shape: Oval, slightly elongated vertically. Forehead: High and broad, exhibiting a smooth, gently sloping curve towards the temples. The hairline is natural and well-defined. Eyebrows: Medium thickness, possessing a distinct arch that starts moderately low on the brow bone, peaks sharply near the center, and tapers gracefully to a medium tail length. They are relatively straight across the inner corner. Eyes: Almond shape, medium size, set slightly deep beneath the brow ridge. Iris color is a warm hazel-brown, flecked with gold. The upper eyelids show moderate creasing at the outer corners; the lower lids have subtle puffiness and fine lines radiating from the tear ducts. Eyelashes are dark brown, moderately long, and curled upward. Nose: Medium width overall. The bridge is straight and well-defined, showing a slight convex curve near the glabella. The tip is slightly rounded but defined, with a subtle downward tilt at the nostrils (alae). Cheekbones: Moderately prominent, creating gentle but noticeable hollows beneath them when viewed frontally. They are smoothly contoured rather than sharply angular. Cheeks: Fullness is moderate; the skin appears taut over the cheek structure, suggesting good underlying bone definition. Jawline: Clean and well-defined, exhibiting a smooth transition from the zygomatic arch down to the chin. It is neither overly sharp nor excessively soft",
+        "hair": "dark wavy hair in a low ponytail",
+        "outfit": "beige trench coat over a striped top, dark jeans, ankle boots, generic press badge with no logo, small recorder",
+        "full_body": "An early-30s female journalist, slim and alert. Expressive face, curious brown eyes, light freckles, thin lips, dark wavy hair in a low ponytail. Wearing a beige trench coat over a striped top, dark jeans, ankle boots, a generic press badge with no logo, holding a small recorder.",
+    },
+    {
+        "id": "scientist", "label": "Scientist / Engineer",
+        "hints": ["scientist", "researcher", "engineer", "technician", "physicist", "professor", "developer", "architect", "analyst", "lab", "researcher"],
+        "gender": "male", "age": "late 30s",
+        "build": "average, focused posture",
+        "face": "Face shape: Oval, slightly elongated vertically. Forehead: High and broad, exhibiting a smooth, gently sloping contour with subtle horizontal lines etched across the upper third. Eyebrows: Medium thickness, possessing a distinct arch that begins relatively low on the brow bone and peaks sharply before tapering to a fine point; they are well-defined and moderately dense. Eyes: Almond shape, medium size, set slightly deep beneath the brow ridge. Iris color is a warm hazel, flecked with gold near the pupil. Eyelids show moderate hooding, particularly the upper lid, creating soft shadows in the medial canthus. Spacing between eyes is proportional to the width of the face. Nose: The bridge is straight and moderately high, exhibiting slight definition/chiseled quality on the supraorbital area. The tip is slightly bulbous but refined, with a subtle downward curve at the very end. Width is average for his facial structure. Cheekbones: Prominent, displaying moderate projection beneath the zygomatic arch; they are well-defined and catch the light strongly. Cheeks: Fullness is moderate, giving a healthy, somewhat robust appearance to the mid-face area, with slight natural indentation visible near the nasolabial folds. Jawline: Strong and clearly defined, presenting a clean, slightly squared termination beneath the lower lip. Chin: Medium projection, rounded but firm, fitting smoothly into",
+        "hair": "dark hair with a neat undercut",
+        "outfit": "navy button-down shirt with sleeves rolled up, dark chinos, utility vest, lanyard with generic ID card (no logos)",
+        "full_body": "A late-30s male scientist, average build with a focused posture. High forehead, thoughtful eyes, glasses, short beard, dark hair with a neat undercut. Wearing a navy button-down shirt with sleeves rolled up, dark chinos, a utility vest and a lanyard with a generic ID card (no logos).",
+    },
+    {
+        "id": "lottery-clerk", "label": "Lottery / Shop Clerk",
+        "hints": ["clerk", "cashier", "retailer", "shopkeeper", "store owner", "attendant", "ticket seller"],
+        "gender": "female", "age": "early 50s",
+        "build": "soft build, warm posture",
+        "face": "Face shape: Oval, slightly elongated vertically. Forehead: High and smooth, exhibiting a gentle convex curve. Eyebrows: Medium thickness, well-defined arch that begins relatively low on the brow bone and sweeps up sharply to a distinct apex before tapering gently. Eyes: Deep-set, almond-shaped, medium size, dark brown/near-black iris color. Spacing is balanced; intercanthal distance appears slightly wider than the width of one eye. Eyelids: Upper lid shows moderate hooding with visible crease definition; lower lid is smooth but exhibits subtle puffiness at the outer corners. Nose: Straight bridge, moderately wide at the base, tip is softly rounded with a slight downward projection (nasolabial fold accentuation). Cheekbones: Prominent and well-defined, creating noticeable planes beneath the zygomatic arches. Cheeks: Fullness is moderate; skin appears taut over the cheekbones but retains soft volume in the malar region. Jawline: Strong and clearly defined, transitioning smoothly from the lower cheek to a moderately pointed chin. Chin: Well-proportioned, slightly rounded apex, projecting adequately from the face plane. Mouth and Lips: Medium width mouth. Upper lip is fuller, exhibiting a gentle Cupid's bow; lower lip is full and slightly more voluminous than the upper. Shape is generally soft and curved. Ears: Set moderately close to the head, size appears average for her facial s",
+        "hair": "shoulder-length blonde hair with grey roots, clipped back",
+        "outfit": "red polo shirt uniform, black trousers, name tag without a name (blank), comfortable shoes",
+        "full_body": "An early-50s female shop clerk, soft build with a warm posture. Friendly round face, laugh lines, kind eyes, light makeup, shoulder-length blonde hair with grey roots clipped back. Wearing a red polo shirt uniform, black trousers, a blank name tag and comfortable shoes.",
+    },
+]
+
+
+def _assign_archetype(name: str, role: str = "", scene: str = "") -> dict:
+    """Map a story character (name + role) to the closest fixed archetype.
+
+    Role keywords win; gender/age words in the role/scene drive the generic
+    everyman fallback. Returns a CHARACTER_ROSTER dict (never None) so every
+    story person gets a consistent, repeatable Metahuman look.
+    """
+    rl = f"{role} {scene}".lower()
+    for arch in CHARACTER_ROSTER:
+        if any(h in rl for h in arch["hints"]):
+            return arch
+    female = bool(re.search(r"\b(female|woman|women|girl|she|her|madam|lady|grandmother)\b", rl))
+    old = bool(re.search(r"\b(old|elderly|60s|70s|80s|senior|retiree|grandmother|grandfather)\b", rl))
+    young = bool(re.search(r"\b(young|teen|student|20s|twenties|intern)\b", rl))
+    if female:
+        return _roster_by_id("old-female" if old else "young-female" if young else "mid40s-female")
+    return _roster_by_id("old-male" if old else "young-male" if young else "mid40s-male")
+
+
+def _roster_by_id(arch_id: str) -> dict:
+    for arch in CHARACTER_ROSTER:
+        if arch["id"] == arch_id:
+            return arch
+    return CHARACTER_ROSTER[4]  # mid40s-male
+
+
+def _character_sheet_from_archetype(arch: dict, name: str, role: str = "") -> dict:
+    """Turn a roster archetype into a character sheet dict (same shape the
+    prompt builder expects: gender/age/build/face/hair/outfit/full_body)."""
+    sheet = {"name": name, "role": role, "archetype": arch["id"]}
+    for f in ("gender", "age", "build", "face", "hair", "outfit", "full_body"):
+        sheet[f] = arch.get(f, "")
+    return sheet
+
+
 def _build_character_sheets(shots: list[dict], narration: list[str]) -> dict:
-    """Stage 2b: poll the LLM once per unique character for a precise repeatable sheet."""
-    print("\n[LLM] Stage 2b: building character sheets...")
-    # Collect unique named characters in order of first appearance, using the
-    # same canonical map as _merge_character_aliases so case/acronym/honorific
-    # variants ('IRS' vs 'I.R.S.', 'IRWIN' vs 'Jessy Irwin') NEVER produce
-    # duplicate sheets for the same person.
+    """Map every unique story character to a FIXED roster archetype.
+
+    Deterministic (no LLM, no cost, zero per-episode variance): a character's
+    look comes from the static 20-archetype roster, so 'the hacker' looks the
+    same in every episode. Falls back to the generic everyman archetype.
+    """
     canon = _character_canonical_map(shots)
-    names = []
+    sheets = {}
     for s in shots:
         c = canon.get(s.get("character", "NONE"), "NONE")
-        if c != "NONE" and c not in names:
-            names.append(c)
-    if not names:
-        print("  [LLM] No named characters found - skipping sheets")
-        return {}
-
-    story_ctx = "\n".join(narration[:30])[:6000]
-    sheets = {}
-    for name in names:
-        role = ""
-        for s in shots:
-            if s.get("character") == name and s.get("character_role"):
-                role = s["character_role"]
-                break
-        text = _llm_chat([
-            {"role": "system", "content": CHARACTER_SHEET_SYSTEM_PROMPT},
-            {"role": "user", "content": (
-                f"CHARACTER: {name}\nROLE: {role or 'character in the story'}\n\n"
-                f"STORY CONTEXT:\n{story_ctx}\n\n"
-                f"Create the precise character sheet for {name}."
-            )}
-        ], max_tokens=900, temp=0.7)
-
-        sheet = {"name": name, "role": role}
-        fields = ["ROLE", "GENDER", "AGE", "BUILD", "FACE", "HAIR", "OUTFIT",
-                  "FRONT VIEW", "LEFT VIEW", "RIGHT VIEW", "BACK VIEW", "FULL BODY"]
-        for f in fields:
-            m = re.search(rf"^{f}:\s*(.+)$", text, re.MULTILINE)
-            if m:
-                sheet[f.lower().replace(" ", "_")] = m.group(1).strip()
-        # FULL BODY fallback: synthesize from parts if missing
-        if not sheet.get("full_body"):
-            parts = [sheet.get("build", ""), sheet.get("face", ""), sheet.get("hair", ""), sheet.get("outfit", "")]
-            sheet["full_body"] = ". ".join(p for p in parts if p)
-        sheets[name] = sheet
-        print(f"  [LLM] Character sheet: {name} (gender={sheet.get('gender','?')}, age={sheet.get('age','?')})")
-        time.sleep(0.3)
-    print(f"  [LLM] Character sheets complete: {len(sheets)} characters")
+        if c == "NONE" or c in sheets:
+            continue
+        role = s.get("character_role", "")
+        arch = _assign_archetype(c, role, s.get("scene", ""))
+        sheets[c] = _character_sheet_from_archetype(arch, c, role)
+        print(f"  [CAST] {c} -> {arch['label']}"
+              f"{f' (role: {role})' if role else ''}")
+    print(f"  [CAST] {len(sheets)} characters assigned from the fixed roster")
     return sheets
 
 def _character_view_block(sheet: dict, angle: str) -> str:
@@ -1664,6 +2122,11 @@ def _runpod_generate(prompt: str, seed: int, size: str = "1280*720",
                 urllib.request.urlretrieve(img_url, out_path)
                 if os.path.getsize(out_path) > 1000:
                     print(f"  [RUNPOD] OK {os.path.basename(out_path)} ({os.path.getsize(out_path)//1024}KB)")
+                    # Pipeline rule: shots render at 1920x1080 -> upscale now
+                    try:
+                        _upscale_to_1080p(out_path)
+                    except Exception:
+                        pass
                     return out_path
             elif result.get("status") == "FAILED":
                 print(f"  [RUNPOD] FAILED: {str(result.get('error'))[:120]}")
@@ -1736,6 +2199,16 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             shot["image_path"] = black
             print(f"  [SHOT {idx+1}/{len(shots)}] chapter placeholder (no image)")
             continue
+        # B-roll cache: no-character shots reuse image-assets/ when the scene
+        # keywords match - skips regeneration entirely (and the cost).
+        if shot.get("character", "NONE") == "NONE":
+            cached = _lookup_broll_asset(shot.get("scene", ""))
+            if cached:
+                shot["seed"] = 0
+                shot["image_path"] = cached
+                print(f"  [SHOT {idx+1}/{len(shots)}] B-ROLL CACHE reuse "
+                      f"{os.path.basename(cached)} (char=NONE)")
+                continue
         seed = 10000 + idx * 137 + random.randint(0, 999)
         prompt = _build_shot_prompt(shot, character_sheets)
         path = _runpod_generate(prompt, seed, out_dir=ep_dir)
@@ -1743,6 +2216,9 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         shot["image_path"] = path
         if path:
             print(f"  [SHOT {idx+1}/{len(shots)}] image ready (char={shot.get('character','NONE')})")
+            # Freshly generated b-roll goes INTO the cache for next time
+            if shot.get("character", "NONE") == "NONE":
+                shot["image_path"] = _cache_broll_asset(path, shot.get("scene", ""))
         else:
             print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED - will use fallback")
         time.sleep(1)
@@ -1754,14 +2230,31 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
 
 def _pocket_tts_generate(text: str, output_path: str, timeout: int = 180) -> bool:
     """Generate TTS via PocketTTS HTTP API using built-in catalog voice (alba)."""
+    # TTS gate: strip LLM meta-commentary before it is spoken (belt-and-
+    # suspenders on top of the parse-time strip + prompt rule 10).
+    text = _strip_narration_meta(text)
+    if not text.strip():
+        print("  [TTS skip] narration meta only, nothing to speak")
+        return False
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     import urllib.request as _ur
     boundary = "----splitnode" + str(int(time.time() * 1000))
     def _field(name, value):
         return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
                 f"{value}\r\n").encode()
-    body = (_field("text", text) + _field("voice_url", TTS_VOICE) +
-            f"--{boundary}--\r\n".encode())
+    body = _field("text", text)
+    if os.path.isfile(TTS_VOICE):
+        # Custom cloned voice: upload the reference WAV as voice_wav
+        with open(TTS_VOICE, "rb") as vf:
+            ref_data = vf.read()
+        body += (f"--{boundary}\r\n"
+                 f"Content-Disposition: form-data; name=\"voice_wav\"; "
+                 f"filename=\"{os.path.basename(TTS_VOICE)}\"\r\n"
+                 f"Content-Type: audio/wav\r\n\r\n").encode() + ref_data + b"\r\n"
+    else:
+        # Built-in catalog voice
+        body += _field("voice_url", TTS_VOICE)
+    body += f"--{boundary}--\r\n".encode()
     req = _ur.Request(POCKET_TTS_URL + "/tts", data=body, method="POST", headers={
         "Content-Type": f"multipart/form-data; boundary={boundary}"
     })
@@ -1956,48 +2449,105 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
         else:
             shutil.copyfile(str(voice_path), voice_out)
 
-        # -- Music bed: suspense first 65% of the timeline, triumphant last 35%. --
-        music_segments = []
-        suspense_pool = MUSIC_LIBRARY["suspense"]
-        triumphant_pool = MUSIC_LIBRARY["triumphant"]
-        sus_idx, tri_idx = 0, 0
-        section_cut = total_dur * 0.65
-        for shot, start in zip(valid, clip_starts):
-            d = _get_audio_duration(shot["tts_path"]) + 0.3
-            if start < section_cut:
-                pool, cur = suspense_pool, sus_idx
-                sus_idx += 1
-            else:
-                pool, cur = triumphant_pool, tri_idx
-                tri_idx += 1
-            track = pool[cur % len(pool)]
-            track_path = SFX_DIR / track
-            if not track_path.is_file():
-                continue
-            seg = temp_dir / f"music_seg_{int(start*1000)}.wav"
-            subprocess.run(
-                ["ffmpeg", "-y", "-v", "error", "-i", str(track_path),
-                 "-t", f"{d:.2f}", "-af",
-                 f"afade=t=in:st=0:d=0.4,afade=t=out:st={max(d-0.5,0):.2f}:d=0.5,volume={MUSIC_DB}dB",
-                 "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(seg)],
-                capture_output=True, text=True, timeout=60)
-            if seg.is_file() and os.path.getsize(seg) > 1000:
-                music_segments.append((seg, start))
-        print(f"  [AUDIO] Music: suspense x{sus_idx} (0-{section_cut:.0f}s) / "
-              f"triumphant x{tri_idx} ({section_cut:.0f}s-end), -{abs(MUSIC_DB):.0f}dB, cycling")
+        # -- Music bed: ONE continuous track, suspense 0-65% of the timeline
+        #    crossfading into triumphant 65%-end. No per-shot cuts, no per-shot
+        #    fades, no track cycling - the music runs uninterrupted under the
+        #    whole episode and SFX sit on top (user: 'music running continuously').
+        music_segments = []  # fallback path only
         music_path = None
-        if music_segments:
-            mlist = temp_dir / "music_list.txt"
-            with open(mlist, "w") as f:
-                for seg, start in music_segments:
-                    f.write(f"file '{str(seg.resolve())}'\n")
-            music_raw = temp_dir / "music_raw.wav"
-            subprocess.run(
-                ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
-                 "-i", str(mlist), "-c:a", "pcm_s16le", str(music_raw)],
-                capture_output=True, text=True, timeout=120)
-            if music_raw.is_file() and os.path.getsize(music_raw) > 1000:
-                music_path = str(music_raw)
+        try:
+            suspense_pool = MUSIC_LIBRARY["suspense"]
+            triumphant_pool = MUSIC_LIBRARY["triumphant"]
+            section_cut = total_dur * 0.65
+            xf = 2.0  # crossfade seconds at the suspense->triumphant boundary
+
+            def _pool_track(pool, idx):
+                t = pool[idx % len(pool)]
+                p = SFX_DIR / t
+                return p if p.is_file() else None
+
+            sus_src = _pool_track(suspense_pool, 0)
+            tri_src = _pool_track(triumphant_pool, 0)
+            if sus_src and tri_src and section_cut > 6 and (total_dur - section_cut) > 6:
+                sus_raw = temp_dir / "music_sus_raw.wav"
+                tri_raw = temp_dir / "music_tri_raw.wav"
+                music_raw = temp_dir / "music_cont.wav"
+                # stream_loop=-1 loops the source, -t trims to the section length
+                ok1 = subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-stream_loop", "-1",
+                     "-i", str(sus_src), "-t", f"{section_cut:.2f}",
+                     "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(sus_raw)],
+                    capture_output=True, text=True, timeout=180).returncode == 0
+                ok2 = subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-stream_loop", "-1",
+                     "-i", str(tri_src), "-t", f"{total_dur - section_cut:.2f}",
+                     "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(tri_raw)],
+                    capture_output=True, text=True, timeout=180).returncode == 0
+                if ok1 and ok2 and sus_raw.is_file() and tri_raw.is_file():
+                    r = subprocess.run(
+                        ["ffmpeg", "-y", "-v", "error",
+                         "-i", str(sus_raw), "-i", str(tri_raw),
+                         "-filter_complex",
+                         f"[0:a]atrim=0:{section_cut:.2f},"
+                         f"afade=t=out:st={section_cut - xf:.2f}:d={xf:.2f}[a];"
+                         f"[1:a]atrim=0:{total_dur - section_cut:.2f},asetpts=PTS-STARTPTS,"
+                         f"afade=t=in:st=0:d={xf:.2f}[b];"
+                         f"[a][b]amix=inputs=2:duration=longest:normalize=0,"
+                         f"afade=t=in:st=0:d=0.5,"
+                         f"afade=t=out:st={max(total_dur - 0.6, 0):.2f}:d=0.5,"
+                         f"volume={MUSIC_DB}dB[out]",
+                         "-map", "[out]", "-c:a", "pcm_s16le",
+                         "-ar", "24000", "-ac", "1", str(music_raw)],
+                        capture_output=True, text=True, timeout=300)
+                    if r.returncode == 0 and music_raw.is_file() and music_raw.stat().st_size > 1000:
+                        music_path = str(music_raw)
+                        print(f"  [AUDIO] Music: ONE continuous bed - suspense "
+                              f"0-{section_cut:.0f}s, {xf:.0f}s crossfade into triumphant "
+                              f"to {total_dur:.0f}s, -{abs(MUSIC_DB):.0f}dB, no per-shot cuts")
+        except Exception as e:
+            print(f"  [AUDIO] Continuous music bed failed ({e}) - using fallback")
+
+        # FALLBACK (continuous failed): old per-shot cycling bed
+        if music_path is None:
+            sus_idx, tri_idx = 0, 0
+            suspense_pool = MUSIC_LIBRARY["suspense"]
+            triumphant_pool = MUSIC_LIBRARY["triumphant"]
+            section_cut = total_dur * 0.65
+            for shot, start in zip(valid, clip_starts):
+                d = _get_audio_duration(shot["tts_path"]) + 0.3
+                if start < section_cut:
+                    pool, cur = suspense_pool, sus_idx
+                    sus_idx += 1
+                else:
+                    pool, cur = triumphant_pool, tri_idx
+                    tri_idx += 1
+                track = pool[cur % len(pool)]
+                track_path = SFX_DIR / track
+                if not track_path.is_file():
+                    continue
+                seg = temp_dir / f"music_seg_{int(start*1000)}.wav"
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", str(track_path),
+                     "-t", f"{d:.2f}", "-af",
+                     f"afade=t=in:st=0:d=0.4,afade=t=out:st={max(d-0.5,0):.2f}:d=0.5,volume={MUSIC_DB}dB",
+                     "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(seg)],
+                    capture_output=True, text=True, timeout=60)
+                if seg.is_file() and os.path.getsize(seg) > 1000:
+                    music_segments.append((seg, start))
+            print(f"  [AUDIO] Music (FALLBACK): suspense x{sus_idx} / triumphant x{tri_idx}, "
+                  f"per-shot segments")
+            if music_segments:
+                mlist = temp_dir / "music_list.txt"
+                with open(mlist, "w") as f:
+                    for seg, start in music_segments:
+                        f.write(f"file '{str(seg.resolve())}'\n")
+                music_raw = temp_dir / "music_raw.wav"
+                subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+                     "-i", str(mlist), "-c:a", "pcm_s16le", str(music_raw)],
+                    capture_output=True, text=True, timeout=120)
+                if music_raw.is_file() and os.path.getsize(music_raw) > 1000:
+                    music_path = str(music_raw)
 
         # -- SFX placements: (src, target_time, max_dur) -- hit lands at target --
         placements = []
@@ -2102,7 +2652,7 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                 deduped.append((src, target, max_dur))
         placements = deduped
         # 5) Resolve placements -> delays/trims
-        sfx_inputs, sfx_delays, sfx_trims, sfx_durs = [], [], [], []
+        sfx_inputs, sfx_delays, sfx_trims, sfx_durs, sfx_dbs = [], [], [], [], []
         for src, target, max_dur in placements:
             name = os.path.basename(src)
             meta = SFX_LIBRARY.get(name)
@@ -2120,6 +2670,7 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             sfx_delays.append(delay_ms)
             sfx_trims.append(skip_s)
             sfx_durs.append(max_dur or 0.0)
+            sfx_dbs.append(SHUTTER_DB if name == TITLE_SFX["shutter"] else SFX_DB)
             print(f"  [AUDIO] SFX {name}: hit@{target:.1f}s (file hit={hit}s) -> "
                   f"{'crop ' + f'{skip_s:.2f}s' if skip_s else f'delay {delay_ms}ms'}"
                   f"{f' (max {max_dur}s)' if max_dur else ''}")
@@ -2148,31 +2699,85 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             print("  [AUDIO] No audio inputs")
             return None, None, clip_starts
 
-        # Collect processed labels in input order
-        labels = []
-        li = 0
-        if voice_path and os.path.isfile(voice_path):
-            labels.append(f"[v{li}]")
-            li += 1
-        if music_path:
-            labels.append(f"[m{li}]")
-            li += 1
-        for j in range(len(sfx_inputs)):
-            labels.append(f"[s{li}]")
-            li += 1
+        n_sfx = len(sfx_inputs)
 
-        amix_in = "".join(labels)
-        n_inputs = len(labels)
-        filter_complex = ";".join(filter_parts) + (
-            f";{amix_in}amix=inputs={n_inputs}:duration=first:normalize=0,"
-            f"alimiter=limit=0.95,atrim=0:{total_dur:.2f}[out]"
-        )
-
+        # Windows cmdline limit (WinError 206): one ffmpeg invocation with
+        # every SFX input + its filter exceeds 32767 chars on long episodes
+        # (hundreds of title SFX). Mix SFX in batches of BATCH into short
+        # intermediate WAVs (filter graph written to a script file, never
+        # the cmdline), then run one tiny final mix.
         final_wav = str(RENDERED_AUDIO / f"ep{episode_num:03d}_mix.wav")
+        work = RENDERED_AUDIO / f"ep{episode_num:03d}_mixwork"
+        work.mkdir(parents=True, exist_ok=True)
+        batch_files = []
+        BATCH = 40
+        for b in range(0, n_sfx, BATCH):
+            chunk = list(range(b, min(b + BATCH, n_sfx)))
+            fparts, bin_labels = [], []
+            for k, j in enumerate(chunk):
+                s, d, sk, md = (sfx_inputs[j], sfx_delays[j],
+                                sfx_trims[j], sfx_durs[j])
+                pre = f"atrim=start={sk:.3f},asetpts=PTS-STARTPTS," if sk > 0 else ""
+                # Duration cap MUST trim the SOURCE before adelay: atrim
+                # after adelay keeps the first md seconds of the delayed
+                # stream, which is pure silence for any real delay (verified
+                # -91dB). Trimming first keeps the hit at `target` and caps
+                # the ring-out at max_dur.
+                durcap = f"atrim=0:{md:.2f}," if md > 0 else ""
+                # NOTE: k (local index within this batch's ffmpeg invocation)
+                # is the correct input label - this command feeds ONLY the
+                # chunk's files, so [N:a] must be local, not global.
+                fparts.append(
+                    f"[{k}:a]aresample=44100,"
+                    f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+                    f"{pre}{durcap}adelay={d}|{d},"
+                    f"volume={sfx_dbs[j]}dB[b{k}]")
+                bin_labels.append(f"[b{k}]")
+            bfilter = (";".join(fparts) + ";" + "".join(bin_labels) +
+                       f"amix=inputs={len(chunk)}:duration=longest:normalize=0[bmix]")
+            fscript = work / f"sfx_batch_{b // BATCH:02d}.txt"
+            fscript.write_text(bfilter, encoding="utf-8")
+            bfile = work / f"sfx_batch_{b // BATCH:02d}.wav"
+            bcmd = ["ffmpeg", "-y", "-v", "error"]
+            for j in chunk:
+                bcmd += ["-i", sfx_inputs[j]]
+            bcmd += ["-filter_complex_script", str(fscript), "-map", "[bmix]",
+                     "-c:a", "pcm_s16le", "-ar", "44100", str(bfile)]
+            r = subprocess.run(bcmd, capture_output=True, text=True, timeout=300)
+            if r.returncode != 0 or not bfile.is_file() or bfile.stat().st_size < 1000:
+                print(f"  [AUDIO] SFX batch {b // BATCH:02d} failed: {r.stderr[-300:]}")
+                return None, None, clip_starts
+            batch_files.append(str(bfile))
+            print(f"  [AUDIO] SFX batch {b // BATCH:02d}: {len(chunk)} sounds -> {bfile.name}")
+
+        # Final mix: voice + music + SFX batch tracks (tiny, safe cmdline).
+        fin_inputs, fin_parts = [], []
+        if voice_path and os.path.isfile(voice_path):
+            fin_inputs.append(str(voice_path))
+            fin_parts.append(f"[{len(fin_inputs)-1}:a]aresample=44100,"
+                             f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+                             f"[f{len(fin_inputs)-1}]")
+        if music_path:
+            fin_inputs.append(music_path)
+            fin_parts.append(f"[{len(fin_inputs)-1}:a]aresample=44100,"
+                             f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+                             f"[f{len(fin_inputs)-1}]")
+        for bf in batch_files:
+            fin_inputs.append(bf)
+            fin_parts.append(f"[{len(fin_inputs)-1}:a]aresample=44100,"
+                             f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
+                             f"[f{len(fin_inputs)-1}]")
+        n_fin = len(fin_inputs)
+        fin_labels = "".join(f"[f{i}]" for i in range(n_fin))
+        fscript = work / "final_mix.txt"
+        fscript.write_text(";".join(fin_parts) + ";" + fin_labels +
+                           f"amix=inputs={n_fin}:duration=first:normalize=0,"
+                           f"alimiter=limit=0.95,atrim=0:{total_dur:.2f}[out]",
+                           encoding="utf-8")
         cmd = ["ffmpeg", "-y", "-v", "error"]
-        for inp in inputs:
+        for inp in fin_inputs:
             cmd += ["-i", inp]
-        cmd += ["-filter_complex", filter_complex, "-map", "[out]",
+        cmd += ["-filter_complex_script", str(fscript), "-map", "[out]",
                 "-c:a", "pcm_s16le", "-ar", "44100", final_wav]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if r.returncode != 0 or not os.path.isfile(final_wav) or os.path.getsize(final_wav) < 1000:
@@ -2183,6 +2788,10 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
         return final_wav, voice_out, clip_starts
     finally:
         shutil.rmtree(str(temp_dir), ignore_errors=True)
+        try:
+            shutil.rmtree(str(work), ignore_errors=True)
+        except Exception:
+            pass
 
 # -- Whisper title pass (faster-whisper word timings) -----------------
 
@@ -2434,6 +3043,40 @@ def _camera_shutter_paras(shots: list[dict], title_events: Optional[list] = None
     return out
 
 
+def _safe_replace(src: str, dst: str, tries: int = 6) -> bool:
+    """Windows-safe os.replace. WinError 5 (Access denied) fires when the
+    destination is briefly locked - Defender real-time scan or Explorer
+    preview/indexing right after a large file is written - or has the
+    read-only attribute. Clear read-only, retry with backoff, then fall
+    back to copy+delete. Returns True on success."""
+    import stat as _stat
+    last_err = None
+    for attempt in range(tries):
+        try:
+            os.chmod(dst, _stat.S_IWRITE)
+        except OSError:
+            pass
+        try:
+            os.replace(src, dst)
+            return True
+        except (PermissionError, OSError) as e:
+            last_err = e
+            if attempt < tries - 1:
+                time.sleep(1.0 + attempt)  # 1s, 2s, 3s, 4s, 5s backoff
+    try:
+        os.chmod(dst, _stat.S_IWRITE)
+        shutil.copy2(src, dst)
+        try:
+            os.remove(src)
+        except OSError:
+            pass
+        return True
+    except OSError as e:
+        print(f"  [WARN] replace failed {src} -> {dst}: {e} "
+              f"(last: {last_err}) - is the file open in a player?")
+        return False
+
+
 def _render_video(shots: list[dict], episode_num: int,
                   title_events: Optional[list] = None) -> str:
     """Render all shots into one 1080p video with full audio mix.
@@ -2552,7 +3195,7 @@ def _render_video(shots: list[dict], episode_num: int,
             ]
             r2 = subprocess.run(mux_cmd, capture_output=True, text=True, timeout=300)
             if r2.returncode == 0 and os.path.isfile(final_path) and os.path.getsize(final_path) > 1000:
-                os.replace(final_path, output_path)
+                _safe_replace(final_path, output_path)
 
         dur = _get_audio_duration(output_path)
         size_mb = os.path.getsize(output_path) / 1024 / 1024
@@ -2570,7 +3213,7 @@ def _render_video(shots: list[dict], episode_num: int,
                     split_node_titles.build_title_ass(title_events, ass_path)
                     print(f"  [TITLES] pass 2: burning {len(title_events)} title events...")
                     if split_node_titles.burn_titles(output_path, ass_path, burned, timeout=2400):
-                        os.replace(burned, output_path)
+                        _safe_replace(burned, output_path)
                         Path(marker).write_text("1")
                         print("  [TITLES] burned OK (animated glowing titles)")
                 except Exception as e:
@@ -3150,7 +3793,7 @@ def _load_resume_state() -> Optional[dict]:
         return None
     try:
         state = json.loads(RESUME_FILE.read_text())
-        if state.get("version") != 1:
+        if state.get("version") not in (1, 2):
             return None
         return state
     except Exception:
@@ -3207,6 +3850,16 @@ def _resume_episode(state: dict) -> None:
     if missing_img:
         print(f"\n[IMAGES] Regenerating {len(missing_img)} missing shots...")
         for shot in missing_img:
+            # B-roll cache: no-character shots reuse image-assets/ when the
+            # scene keywords match (same logic as the fresh-run path).
+            if shot.get("character", "NONE") == "NONE":
+                cached = _lookup_broll_asset(shot.get("scene", ""))
+                if cached:
+                    shot["seed"] = 0
+                    shot["image_path"] = cached
+                    print(f"  [SHOT] B-ROLL CACHE reuse "
+                          f"{os.path.basename(cached)} (char=NONE)")
+                    continue
             seed = shot.get("seed") or (10000 + random.randint(0, 999))
             prompt = _build_shot_prompt(shot, character_sheets)
             path = _runpod_generate(prompt, seed, out_dir=ep_shot_dir)
@@ -3214,6 +3867,9 @@ def _resume_episode(state: dict) -> None:
             shot["image_path"] = path
             print(f"  [SHOT] {'image ready' if path else 'IMAGE FAILED - fallback'} "
                   f"(char={shot.get('character', 'NONE')})")
+            # Freshly generated b-roll goes INTO the cache for next time
+            if path and shot.get("character", "NONE") == "NONE":
+                shot["image_path"] = _cache_broll_asset(path, shot.get("scene", ""))
             time.sleep(1)
         _save("images")
     else:
