@@ -251,8 +251,50 @@ SCENE_STYLE = (
 
 # B-roll image cache: no-character shots (server farms, hacker screens, graphs,
 # money, etc.) reuse pre-generated images from image-assets/ instead of being
-# regenerated every episode. Lookup is keyword-overlap on the scene description.
+# regenerated every episode. Lookup is keyword-overlap on the scene description,
+# backed by a JSON index (assets.json) so reuse is fast and topic-agnostic.
 IMAGE_ASSETS_DIR = PROJECT_DIR / "image-assets"
+_ASSETS_INDEX = IMAGE_ASSETS_DIR / "assets.json"
+# Channel-wide style plate: reference image(s) defining the uniform Split
+# Node look (Arcane-style sheets from style_sheets/). Fed as the SCENE ref
+# in identity mode (image 1) alongside character faces / location / props
+# (images 2+) so every shot inherits the same style. STYLE_REF=0 disables.
+# Prefer the merged sheet (build_style_sheet.py), fall back to the single
+# generated plate.
+STYLE_REF_IMG = PROJECT_DIR / "style_sheets" / "style_sheet.png"
+if not STYLE_REF_IMG.is_file():
+    STYLE_REF_IMG = PROJECT_DIR / "style_refs" / "split_node_style.png"
+
+# Dedicated style sheets for ASSETS (Joe, 2026-08-04): the people-style
+# plate (style_sheet.png) contains FACES which bled into location/prop
+# panels. Location sheets and prop assets now reference their OWN clean
+# style sheets (composed from Joe-approved face-free panels) so they pick
+# up the render style WITHOUT copying people. STYLE_REF=0 disables all.
+LOCATION_STYLE_REF = PROJECT_DIR / "style_sheets" / "location_style_sheet.png"
+if not LOCATION_STYLE_REF.is_file():
+    LOCATION_STYLE_REF = STYLE_REF_IMG
+PROP_STYLE_REF = PROJECT_DIR / "style_sheets" / "prop_style_sheet.png"
+if not PROP_STYLE_REF.is_file():
+    PROP_STYLE_REF = STYLE_REF_IMG
+
+
+def _load_asset_index() -> dict:
+    if _ASSETS_INDEX.is_file():
+        try:
+            return json.loads(_ASSETS_INDEX.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _save_asset_index(idx: dict) -> None:
+    try:
+        IMAGE_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+        _ASSETS_INDEX.write_text(json.dumps(idx, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+
+
 _ASSET_STOP = {
     "the", "a", "an", "of", "in", "on", "at", "with", "and", "or", "but", "his",
     "her", "their", "its", "is", "are", "was", "were", "be", "been", "to", "from",
@@ -276,6 +318,14 @@ def _lookup_broll_asset(scene: str) -> Optional[str]:
     kw = _scene_keywords(scene)
     if not kw:
         return None
+    # JSON index first: exact keyword-set matches across any past episode
+    idx = _load_asset_index()
+    for key, path in idx.items():
+        if not path or not os.path.isfile(path):
+            continue
+        key_set = set(key.split("_"))
+        if kw and all(t in key_set for t in kw[:2]):
+            return str(path)
     best, best_score = None, 0
     for f in IMAGE_ASSETS_DIR.glob("*.png"):
         name_kw = set(f.stem.lower().split("_"))
@@ -287,7 +337,8 @@ def _lookup_broll_asset(scene: str) -> Optional[str]:
 
 def _cache_broll_asset(image_path: str, scene: str) -> str:
     """Copy a freshly generated no-character image into image-assets/ (keyword
-    filename) so future episodes reuse it instead of regenerating."""
+    filename + assets.json entry) so future episodes reuse it instead of
+    regenerating. Pipeline rule: every cached image is upscaled to 1920x1080."""
     try:
         if not image_path or not os.path.isfile(image_path):
             return image_path
@@ -300,35 +351,62 @@ def _cache_broll_asset(image_path: str, scene: str) -> str:
             return str(dst)
         import shutil as _sh
         _sh.copy2(image_path, dst)
-        # Pipeline rule: every image in image-assets/ must be 1920x1080.
-        # GPU-accelerated upscale (scale_cuda lanczos) in place.
         try:
-            _upscale_to_1080p(str(dst))
+            from PIL import Image as _PILImg
+            w, h = _PILImg.open(dst).size
         except Exception:
-            pass
+            w = h = 0
+        if (w, h) != (1920, 1080):
+            # only re-upscale sources that aren't already 1080p (Krea shots
+            # come out of the in-graph FaceUpDAT upscale at 1920x1080)
+            try:
+                _upscale_to_1080p(str(dst))
+            except Exception:
+                pass
+        idx = _load_asset_index()
+        idx["_".join(kw)] = str(dst)
+        _save_asset_index(idx)
         return str(dst)
     except Exception:
         return image_path
 
 def _upscale_to_1080p(image_path: str) -> None:
-    """Upscale an image to exactly 1920x1080 in place using 4x_NMKD-Siax_200k.
+    """Upscale an image to exactly 1920x1080 in place using 4x-FaceUpDAT.
 
-    Pipeline rule: all images that enter the workflow (b-roll cache, RunPod
-    shots, FAL GPT Image 2 downloads) are upscaled to 1080p with the ComfyUI
-    model BEFORE FFmpeg touches them - so the zoompan render never upscales a
-    soft 608p source and output stays crisp at hevc_nvenc 1080p.
+    Pipeline rule: all images that enter the workflow (b-roll cache, Krea 2
+    shots) are upscaled to 1080p with the ComfyUI model BEFORE FFmpeg touches
+    them - so the zoompan render never upscales a soft source and output stays
+    crisp at hevc_nvenc 1080p.
+
+    After upscaling, a uniform grade (style-card look: +contrast, -saturation,
+    slight lift) is applied so every shot shares the same locked look.
     """
     script = PROJECT_DIR / "upscale_model.py"
     if not script.is_file():
         return
-    model = r"F:\ComfyUI_windows_portable\ComfyUI\models\upscale_models\4x_NMKD-Siax_200k.pth"
+    model = r"F:\ComfyUI_windows_portable\ComfyUI\models\upscale_models\4xFaceUpDAT.safetensors"
     comfy_py = r"F:\ComfyUI_windows_portable\python_embeded\python.exe"
     if not os.path.isfile(model) or not os.path.isfile(comfy_py):
         return
     try:
         import subprocess as _sp
         _sp.run([comfy_py, str(script), model, image_path, image_path],
-                capture_output=True, text=True, timeout=180)
+                capture_output=True, text=True, timeout=240)
+        _apply_grade(image_path)
+    except Exception:
+        pass
+
+
+def _apply_grade(image_path: str) -> None:
+    """Style-card grade: uniform look across every shot (contrast, saturation,
+    brightness). In-place. Best-effort; never raises."""
+    try:
+        from PIL import Image, ImageEnhance
+        img = Image.open(image_path).convert("RGB")
+        img = ImageEnhance.Contrast(img).enhance(1.06)
+        img = ImageEnhance.Color(img).enhance(0.92)
+        img = ImageEnhance.Brightness(img).enhance(0.99)
+        img.save(image_path)
     except Exception:
         pass
 
@@ -428,21 +506,14 @@ def _sfx_llm_choices() -> str:
 # placeholder clips + centered glowing chapter cards.
 CHAPTER_RE = re.compile(r"^\s*chapter\s+(\d{1,2})\s*[-–:.]?\s*(.+)$", re.IGNORECASE)
 
-# Timeline anchors: dates/locations the narrator reads aloud, which become
-# bottom-left typewriter titles (GREEN = timeline, RED = location).
-MONTHS = r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
-TIMELINE_PATTERNS = [
-    re.compile(rf"{MONTHS}\s+\d{{1,2}}(?:st|nd|rd|th)?[,\s]+\d{{4}}", re.IGNORECASE),   # March 2010 / March 12th, 2012
-    re.compile(rf"\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTHS}\s+\d{{4}}", re.IGNORECASE),       # 12th March 2012
-    re.compile(rf"{MONTHS}\s+\d{{4}}", re.IGNORECASE),                                   # March 2010 (no day)
-    re.compile(rf"(?:Late|Early|Mid)\s+\d{{4}}", re.IGNORECASE),                         # Late 2016
-    re.compile(rf"\b20\d{{2}}\b"),                                                       # bare year (accepted only at para start)
-]
+# Location anchors: places the narrator reads aloud, which become bottom-left
+# typewriter titles (RED = location). Timeline/date titles were removed from
+# the pipeline (Aug 2026) - dates no longer appear in scripts or titles.
 LOCATION_PATTERNS = [
     # "Goulburn, New South Wales" / "Queen Square, Sydney" (comma pairs)
     re.compile(r"([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2}),\s+([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2})"),
     # "in Sydney" / "at the kitchen table of his flat" (in/at + place)
-    re.compile(rf"\b(?:in|at|from)\s+(?:(?:the|a|an)\s+)?({MONTHS}|[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){{0,2}})\b"),
+    re.compile(r"\b(?:in|at|from)\s+(?:(?:the|a|an)\s+)?([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+){0,2})\b"),
 ]
 # Words too generic to be a location title (single-word in/at anchors)
 LOCATION_STOPWORDS = {
@@ -1031,31 +1102,52 @@ NARRATION_SYSTEM_PROMPT = (
     "Your writing style is the Black Files / FERN true-crime documentary style.\n\n"
     "STYLE RULES (follow ALL of them):\n"
     "1. COLD OPEN: the very first paragraph must drop the viewer into a specific, "
-    "visceral scene - exact date, exact place, one dramatic image after another - "
-    "escalate the stakes, then end with a twist tease ('Except this story doesn't "
-    "end there...') and the question the whole episode answers.\n"
-    "2. PRESENT TENSE, CINEMATIC. Short punchy sentences and fragments for impact "
-    "('Case closed.' 'Declined. One word on a screen.').\n"
-    "3. EXACT NUMBERS, never vague. Dollar amounts, dates, durations, counts "
+    "visceral scene - exact place, one dramatic image after another - escalate the "
+    "stakes, then end with a twist tease ('Except this story doesn't end there...') "
+    "and the question the whole episode answers.\n"
+    "2. SURFACE PROBLEM AND DEEPER PROBLEM: every episode has a surface problem (the "
+    "mechanics - the hack, the scheme, the loophole) AND a deeper emotional struggle "
+    "underneath (greed, desperation, revenge, the need to prove something, injustice). "
+    "Plant the deeper problem early and pay it off at the end - the viewer should feel "
+    "it subconsciously even when the story is about numbers and systems.\n"
+    "3. TRANSFORMATION ARC: the protagonist must CHANGE by the end. Establish where "
+    "they start (their life before) and where they end (who they became, the price "
+    "paid, the person they turned into). The final paragraph should echo the opening "
+    "with the transformation visible.\n"
+    "4. HERO'S JOURNEY BEATS: structure the story in stages - status quo, call to "
+    "adventure (the opportunity or threat that starts it), trials (the attempts, the "
+    "mistakes, the close calls), crisis (the lowest point where everything nearly "
+    "collapses), reward (the win), return (what happened after). Chapters follow this "
+    "arc.\n"
+    "5. CAUSE-AND-EFFECT CHAIN: events flow as 'this happens, but this happens, "
+    "therefore this happens' - never 'and then, and then'. Every paragraph is caused "
+    "by the one before it.\n"
+    "6. SENTENCE RHYTHM: vary sentence length aggressively - a one-word fragment "
+    "('Case closed.') next to a long flowing sentence. Monotone sentence length is "
+    "death. Write to be read aloud.\n"
+    "7. CONTEXT FIRST, THEN ESCALATE: open simple enough for someone who knows "
+    "nothing about the topic, then raise complexity beat by beat. Never open with the "
+    "most advanced concept.\n"
+    "8. EXACT NUMBERS, never vague. Dollar amounts, durations, counts "
     "('$449 a fortnight', '$2.1 million', '29 months', 'a $9 fee', 'five taps of $4,999'). "
     "Never write 'a lot of money' - write the exact figure from the article.\n"
-    "4. TIME AND PLACE ANCHORS: every time the scene shifts, START the new paragraph "
-    "with a standalone date and/or location sentence ('December 12th, 2012. Goulburn, "
-    "New South Wales.' / 'March 2010.' / 'Late 2016, Queen Square, Sydney.'). The "
-    "viewer must always know where and when the story is. Use REAL place names from "
-    "the article.\n"
-    "5. METAPHOR AND SENSORY DETAIL: concrete images ('the account died mid-transaction "
-    "like a heart stopping between beats', 'a paper monument to a number nobody at the "
-    "bank appears to be reading').\n"
-    "6. RHETORICAL QUESTIONS as pivots between beats ('Who is watching this account? "
-    "'How do you take $2.1 million from a bank without breaking a single law?')\n"
-    "7. IRONY AND REVERSAL: set up the obvious reading, then flip it ('The law has a "
+    "9. PLACE ANCHORS: every time the scene shifts, START the new paragraph "
+    "with a standalone location sentence ('Goulburn, New South Wales.' / "
+    "'Queen Square, Sydney.'). The viewer must always know where the story is. "
+    "Use REAL place names from the article. Do NOT use dates.\n"
+    "10. METAPHOR AND SENSORY DETAIL: concrete images ('the account died mid-"
+    "transaction like a heart stopping between beats', 'a paper monument to a number "
+    "nobody at the bank appears to be reading').\n"
+    "11. RHETORICAL QUESTIONS as pivots between beats - and 2-3 times per episode, "
+    "ask the viewer to figure something out themselves instead of telling them "
+    "('Who is watching this account?') then pay it off a few paragraphs later.\n"
+    "12. IRONY AND REVERSAL: set up the obvious reading, then flip it ('The law has a "
     "name for that arrangement, and it isn't fraud. It's a loan.')\n"
-    "8. DIRECT ADDRESS 1-2 times per episode ('Be honest. If some part of you would "
+    "13. DIRECT ADDRESS 1-2 times per episode ('Be honest. If some part of you would "
     "have typed that first $4,999 too...')\n"
-    "9. NEVER invent facts that contradict the article. Expand with cinematic framing, "
+    "14. NEVER invent facts that contradict the article. Expand with cinematic framing, "
     "sensory detail and dramatic tension only.\n"
-    "10. OUTPUT CONTRACT: say NOTHING except the narration itself. Never write meta "
+    "15. OUTPUT CONTRACT: say NOTHING except the narration itself. Never write meta "
     "text or labels - no 'Here are exactly 5 narration paragraphs', no 'Paragraph 1:', "
     "no 'Narration:', no 'Sure, here are...', no 'I've written...', no numbering, no "
     "headers, no stage directions, no intros, no summaries, no signposting of any kind. "
@@ -1269,27 +1361,17 @@ def _insert_chapter_markers(narration_paras: list[str]) -> tuple[list[str], list
 
 
 def _extract_anchor_events(narration_paras: list[str]) -> list[dict]:
-    """Find location (red) and timeline (green) anchors in paragraph leads.
+    """Find location (red) anchors in paragraph leads.
 
-    Each event: {kind: 'location'|'timeline', text, para_idx, anchor_words}.
+    Each event: {kind: 'location', text, para_idx, anchor_words}.
     anchor_words are the whisper search words used to pin the exact read time.
+    Timeline/date anchors were removed from the pipeline (Aug 2026).
     """
     events = []
     for i, para in enumerate(narration_paras):
         if CHAPTER_RE.match(para):
             continue
         lead = para[:TITLE_ANCHOR_MAX_CHARS]
-        # --- timeline: prefer the most specific date pattern in the lead ---
-        timeline = None
-        for pat in TIMELINE_PATTERNS:
-            m = pat.search(lead)
-            if m:
-                timeline = m.group(0).strip()
-                # bare-year matches must sit in the first 30 chars (scene anchor)
-                if re.fullmatch(r"20\d{2}", timeline) and m.start() > 30:
-                    timeline = None
-                    continue
-                break
         # --- location: comma-pair first, then in/at + place ---
         location = None
         m_loc = LOCATION_PATTERNS[0].search(lead)
@@ -1301,14 +1383,6 @@ def _extract_anchor_events(narration_paras: list[str]) -> list[dict]:
                 place = m_in.group(1)
                 if place.lower() not in LOCATION_STOPWORDS and len(place) >= 3:
                     location = place.strip()
-        # A location lead often carries a timeline too ("Goulburn, NSW, March 2010") —
-        # both events fire together at the paragraph start; no filtering needed.
-        if timeline:
-            words = re.findall(r"[A-Za-z0-9]+", timeline.lower())
-            events.append({
-                "kind": "timeline", "text": timeline, "para_idx": i,
-                "anchor_words": words[:2] if words else [timeline.lower()],
-            })
         if location:
             words = re.findall(r"[A-Za-z']+", location.lower())
             events.append({
@@ -1409,6 +1483,221 @@ def _resolve_anchor_times(events: list[dict], words: list[dict],
         ev["start"] = round(t, 3)
         resolved.append(ev)
     return resolved
+
+# -- Director's bible, scene board, episode context, templates ----------
+# (Added Aug 2026: pre-visual planning stages so the pipeline works for ANY
+# topic/environment/location and every episode gets a locked story + look.)
+
+VOICE_MAP_FILE = PROJECT_DIR / "voice_map.json"
+TEMPLATES_DIR = PROJECT_DIR / "templates"
+EPISODE_TEMPLATE_FILE = TEMPLATES_DIR / "last_episode.json"
+
+
+def _load_voice_map() -> dict:
+    if VOICE_MAP_FILE.is_file():
+        try:
+            return json.loads(VOICE_MAP_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {}
+
+
+def _lookup_voice(character: str) -> Optional[str]:
+    """voice_map.json: canonical character name -> clone wav (relative to the
+    project). Falls back to the narrator voice when no clone exists."""
+    if not character or character == "NONE":
+        return None
+    vm = _load_voice_map()
+    for k, v in vm.items():
+        if k.lower() == character.lower():
+            p = Path(v)
+            if not p.is_absolute():
+                p = PROJECT_DIR / p
+            return str(p) if p.is_file() else None
+    return None
+
+
+def _llm_json(messages: list[dict], max_tokens: int = 1200, temp: float = 0.5) -> dict:
+    """LLM call returning a JSON object (tolerant of code fences / prose)."""
+    text = _llm_chat(messages, max_tokens=max_tokens, temp=temp)
+    text = re.sub(r"```(?:json)?", "", text).strip()
+    m = re.search(r"\{.*\}", text, re.S)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except Exception:
+            pass
+    return {}
+
+
+def _build_episode_context(topic: str, paragraphs: list[str]) -> dict:
+    """One LLM pass: the story's world (era, places, environments, props).
+    Injected into the shot list so scenes fit ANY topic - a rainforest story
+    gets rainforest scenes, not city streets."""
+    sample = " ".join(paragraphs[:10])[:2800]
+    ctx = _llm_json([
+        {"role": "system", "content":
+            "You are a documentary production researcher. From the article "
+            "excerpt, extract the story's world as STRICT JSON only: "
+            '{"era": "one era descriptor", "places": ["3-5 real places"], '
+            '"environments": ["3-5 environments/settings where scenes happen"], '
+            '"props": ["4-8 objects central to the story"], '
+            '"time_of_day": "when most scenes happen"}. '
+            "Say NOTHING outside the JSON."},
+        {"role": "user", "content": f"TOPIC: {topic}\n\nARTICLE:\n{sample}"}
+    ], max_tokens=700, temp=0.3)
+    defaults = {"era": "modern", "places": [], "environments": [],
+                "props": [], "time_of_day": "night"}
+    for k in defaults:
+        v = ctx.get(k)
+        if isinstance(v, list):
+            defaults[k] = [str(x) for x in v[:8]]
+        elif isinstance(v, str) and v.strip():
+            defaults[k] = v.strip()
+    print("  [CONTEXT] era=%s | %d places | %d environments | %d props"
+          % (defaults["era"], len(defaults["places"]),
+             len(defaults["environments"]), len(defaults["props"])))
+    return defaults
+
+
+def _build_directors_bible(topic: str, narration_paras: list[str]) -> dict:
+    """Director's bible: per-chapter mood, hero moments (paragraph indices to
+    magnify with ECU + riser), deeper problem, transformation arc. Written
+    BEFORE any image generation - the plan the whole episode obeys."""
+    chaps = [p for p in narration_paras if CHAPTER_RE.match(p)]
+    chap_lines = " | ".join(chaps[:14]) or "none"
+    sample = "\n".join(f"{i+1}. {p[:140]}" for i, p in enumerate(narration_paras[:40]))
+    bible = _llm_json([
+        {"role": "system", "content":
+            "You are the director of a documentary. From the narration outline, "
+            "produce the episode plan as STRICT JSON only: "
+            '{"deeper_problem": "the emotional struggle under the mechanics", '
+            '"transformation": "how the protagonist changes from start to end", '
+            '"chapters": [{"n": 1, "title": "...", "mood": "suspense|triumphant|neutral"}], '
+            '"hero_paras": [list of 3-6 paragraph numbers that deserve extreme '
+            'close-ups / magnification], "arc": "status quo -> call -> trials -> '
+            'crisis -> reward -> return" in one line}. '
+            "Say NOTHING outside the JSON."},
+        {"role": "user", "content":
+            f"TOPIC: {topic}\nCHAPTERS: {chap_lines}\n\nNARRATION BEATS:\n{sample}"}
+    ], max_tokens=900, temp=0.4)
+    heroes = []
+    for h in bible.get("hero_paras", []):
+        try:
+            n = int(h)
+            if 1 <= n <= len(narration_paras):
+                heroes.append(n)
+        except Exception:
+            pass
+    bible["hero_paras"] = sorted(set(heroes))[:6]
+    print("  [BIBLE] deeper: %s" % str(bible.get("deeper_problem", "?"))[:80])
+    print("  [BIBLE] hero paragraphs: %s" % (bible["hero_paras"] or "none"))
+    return bible
+
+
+def _build_scene_board(narration_paras: list[str], topic: str,
+                       episode_num: int) -> list[dict]:
+    """Scene cards: one card per narration paragraph (beat, location,
+    characters, mood). Saved to the episode folder as scene_board.json so the
+    whole storyboard is reviewable before any image is generated."""
+    cards = []
+    for i in range(0, len(narration_paras), 20):
+        chunk = narration_paras[i:i + 20]
+        chunk_txt = "\n".join(f"{j+1}. {p[:120]}" for j, p in enumerate(chunk))
+        res = _llm_json([
+            {"role": "system", "content":
+                "You are a storyboard artist. For each numbered narration beat "
+                "produce STRICT JSON only: "
+                '{"cards": [{"idx": 1, "beat": "one-line action beat", '
+                '"location": "setting", "characters": ["names or []"], '
+                '"mood": "suspense|triumphant|neutral"}]}. '
+                "Match idx to the input numbers exactly. Say NOTHING else."},
+            {"role": "user", "content": f"TOPIC: {topic}\n{chunk_txt}"}
+        ], max_tokens=1200, temp=0.3)
+        for c in res.get("cards", []):
+            try:
+                cards.append({
+                    "idx": int(c.get("idx", i + 1)),
+                    "beat": str(c.get("beat", ""))[:160],
+                    "location": str(c.get("location", ""))[:80],
+                    "characters": [str(x) for x in c.get("characters", [])][:4],
+                    "mood": c.get("mood", "neutral"),
+                })
+            except Exception:
+                continue
+    if cards:
+        ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+        ep_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            (ep_dir / "scene_board.json").write_text(
+                json.dumps(cards, indent=1), encoding="utf-8")
+        except Exception:
+            pass
+    print(f"  [BOARD] {len(cards)} scene cards -> shots/ep{episode_num:03d}/scene_board.json")
+    return cards
+
+
+def _plan_durations(narration_paras: list[str]) -> None:
+    """Duration planning: per-chapter estimated runtimes + total vs target.
+    Print-only - chapter placement already used word-count estimates."""
+    rows = []
+    cur_chap, cur_start = None, 0
+    for i, para in enumerate(narration_paras):
+        m = CHAPTER_RE.match(para)
+        if m:
+            if cur_chap is not None:
+                d = sum(_estimate_para_duration(p)
+                        for p in narration_paras[cur_start:i])
+                rows.append((cur_chap, d))
+            cur_chap, cur_start = int(m.group(1)), i
+    if cur_chap is not None:
+        rows.append((cur_chap, sum(_estimate_para_duration(p)
+                                   for p in narration_paras[cur_start:])))
+    total = sum(_estimate_para_duration(p) for p in narration_paras)
+    print(f"\n  [DURATION] total est {total/60:.1f} min ({len(narration_paras)} paras)")
+    for n, d in rows:
+        print(f"    Chapter {n:2d}: ~{d/60:.1f} min")
+
+
+def _save_episode_template(topic: str, episode_num: int, bible: dict,
+                           context: dict, roster_ids: list[str]) -> None:
+    """Reusable episode template: the winning formula of the last episode is
+    loaded next run so the next episode starts from it, not from scratch."""
+    try:
+        TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+        EPISODE_TEMPLATE_FILE.write_text(json.dumps({
+            "episode": episode_num, "topic": topic[:120],
+            "deeper_problem": bible.get("deeper_problem", ""),
+            "transformation": bible.get("transformation", ""),
+            "arc": bible.get("arc", ""),
+            "chapter_moods": bible.get("chapters", []),
+            "era": context.get("era", ""),
+            "environments": context.get("environments", []),
+            "props": context.get("props", []),
+            "roster_ids": roster_ids,
+        }, indent=1), encoding="utf-8")
+        print(f"  [TEMPLATE] saved ep{episode_num} formula -> templates/last_episode.json")
+    except Exception:
+        pass
+
+
+def _load_episode_template() -> Optional[dict]:
+    if EPISODE_TEMPLATE_FILE.is_file():
+        try:
+            return json.loads(EPISODE_TEMPLATE_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return None
+
+
+def _gate(label: str) -> bool:
+    """Human review gate. Y/n (default Y) - never blocks unattended runs."""
+    try:
+        resp = input(f"\n  {label} [Y/n]: ").strip().lower()
+    except Exception:
+        resp = ""
+    return resp not in ("n", "no")
+
 
 # -- Stage 2: Shot list ----------------------------------------------
 
@@ -1517,14 +1806,29 @@ def _parse_shot_response(text: str) -> dict:
     }
 
 
-def _build_shot_list(narration_paras: list[str]) -> list[dict]:
+def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
+                     context: Optional[dict] = None) -> list[dict]:
     """Stage 2: for each narration paragraph, generate a shot entry.
 
-    Chapter paragraphs ("Chapter N - Title") get a direct black-card shot
-    (no LLM call, no image generation - the render pass shows a black
-    placeholder where the glowing chapter title is burned in pass 2).
+    Injects the episode context (era/places/environments/props) and the
+    director's bible (hero paragraphs) so the shot list fits ANY topic and
+    magnifies the right moments. Hero beats get ECU framing + a riser SFX.
+    Chapter paragraphs get a direct black-card shot (no LLM call, no image
+    generation - the render pass shows a black placeholder where the glowing
+    chapter title is burned in pass 2).
     """
     print("\n[LLM] Stage 2: building shot list from narration...")
+    context = context or {}
+    hero_set = set(bible.get("hero_paras", []) or []) if bible else set()
+    ctx_line = ""
+    if context:
+        ctx_line = (
+            f"\nEPISODE WORLD: era={context.get('era', '')}; "
+            f"places={', '.join(context.get('places', []))}; "
+            f"environments={', '.join(context.get('environments', []))}; "
+            f"props={', '.join(context.get('props', []))}. "
+            "Scenes MUST be set in this world - use these real places, "
+            "environments and props.\n")
     shots = []
     for i, para in enumerate(narration_paras):
         if len(shots) >= 120:
@@ -1550,7 +1854,7 @@ def _build_shot_list(narration_paras: list[str]) -> list[dict]:
         text = _llm_chat([
             {"role": "system", "content": SHOT_SYSTEM_PROMPT},
             {"role": "user", "content": (
-                f"NARRATION PARAGRAPH {i+1} of {len(narration_paras)}:\n{para[:1200]}\n\n"
+                f"{ctx_line}NARRATION PARAGRAPH {i+1} of {len(narration_paras)}:\n{para[:1200]}\n\n"
                 f"Create the shot for this paragraph."
             )}
         ], max_tokens=400, temp=0.8)
@@ -1597,6 +1901,13 @@ def _build_shot_list(narration_paras: list[str]) -> list[dict]:
             "sfx": sfx,
             "tone": tone,
         })
+        # Director's bible: hero beats get ECU magnification + a riser SFX
+        if (i + 1) in hero_set:
+            shots[-1]["hero"] = True
+            if shots[-1]["shot_type"] not in ("ECU", "CU"):
+                shots[-1]["shot_type"] = "ECU"
+            if shots[-1]["sfx"] == "NONE":
+                shots[-1]["sfx"] = "mixkit-cinematic-trailer-riser-790.wav"
         print(f"  [LLM] Shot {len(shots)}: [{shot_type}|{angle}] char={character} {scene[:50]}... (sfx={sfx}, tone={tone})")
         time.sleep(0.3)
 
@@ -2187,21 +2498,883 @@ def _black_placeholder(episode_num: int) -> str:
     return out
 
 
+def _krea_generate(prompt: str, seed: int, out_path: str,
+                   ref_images: Optional[list] = None, denoise: float = 0.55,
+                   upscale: bool = True, timeout: int = 1800,
+                   steps: int = 8, cfg: float = 1.0,
+                   width: int = 1280, height: int = 720,
+                   ref_mode: str = "img2img",
+                   ref_method: str = "index_timestep_zero",
+                   ref_boost: float = 4.0, grounding_px: int = 1024,
+                   ref_images_b: Optional[list] = None) -> bool:
+    """Generate one image via local ComfyUI Krea 2 Turbo.
+
+    ref_images: 0+ reference images (character sheets, props, location).
+    upscale=True: in-graph 4x-FaceUpDAT -> 1920x1080 (shot images).
+    upscale=False: raw generation (character-sheet panels).
+    steps: 8 = turbo fast (shots); 10 = identity edit (sheets).
+    ref_mode: "img2img" (composition from ref), "reference" (Krea Kontext
+      identity, pose from prompt), or "identity" (krea2edit trained path -
+      krea2_identity_edit LoRA + grounded Qwen3-VL encode, ONE tight ref).
+    ref_boost/grounding_px: identity mode only (default 4.0/1024).
+    ref_images_b: identity mode only - optional SECOND ref = style plate
+      (scene first, subject second, training order).
+    """
+    try:
+        import krea2_splitnode as _krea
+    except Exception as e:
+        print(f"  [KREA] krea2_splitnode import failed: {e}")
+        return False
+    try:
+        return _krea.generate(prompt, seed, out_path, ref_images, denoise,
+                              upscale, timeout=timeout, steps=steps, cfg=cfg,
+                              width=width, height=height, ref_mode=ref_mode,
+                              ref_method=ref_method, ref_boost=ref_boost,
+                              grounding_px=grounding_px,
+                              ref_images_b=ref_images_b)
+    except Exception as e:
+        print(f"  [KREA] {str(e)[:140]}")
+        return False
+
+
+def _vision_available() -> bool:
+    """LM Studio vision model loaded? (gemma vision). Never loads it here."""
+    try:
+        req = urllib.request.Request("http://localhost:1234/v1/models", method="GET")
+        with urllib.request.urlopen(req, timeout=4) as r:
+            data = json.loads(r.read().decode())
+        ids = [m.get("id", "") for m in data.get("data", [])]
+        return any(("gemma" in m and "vision" in m) or "gemma-4-e4b" in m
+                   for m in ids)
+    except Exception:
+        return False
+
+
+def _audit_real_photo(image_path: str, char_name: str, role: str) -> bool:
+    """Ask the local vision LLM (gemma-4-e4b, same as script gen) to audit a
+    real-person photo candidate:
+      - does it actually show the person?
+      - is it clean of text / logos / watermarks?
+    Reply format: PERSON:YES/NO TEXT:YES/NO (TEXT:YES = text/logo/watermark
+    PRESENT -> reject). Returns True only when the photo passes BOTH checks.
+    When the vision model isn't loaded, accept best effort (True) - the audit
+    activates automatically once LM Studio serves the gemma model."""
+    try:
+        import base64
+        b64 = base64.b64encode(Path(image_path).read_bytes()).decode()
+        body = json.dumps({
+            "model": "gemma-4-e4b-uncensored-hauhaucs-aggressive",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text":
+                    "Audit this photograph for a documentary cast reference. "
+                    "Answer with exactly two lines:\n"
+                    f"PERSON: YES or NO - is this a real photograph of "
+                    f"{char_name} ({role or 'the person in the story'})?\n"
+                    "TEXT: YES or NO - is there ANY text, logo, watermark, "
+                    "caption, channel badge or overlay visible in the image?"},
+                {"type": "image_url", "image_url": {"url":
+                    f"data:image/jpeg;base64,{b64}"}},
+            ]}],
+            "max_tokens": 12, "temperature": 0,
+        }).encode()
+        req = urllib.request.Request(
+            "http://localhost:1234/v1/chat/completions", data=body,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            out = json.loads(r.read().decode())
+        ans = out["choices"][0]["message"]["content"].strip()
+        person = re.search(r"PERSON:\s*(YES|NO)", ans, re.I)
+        text = re.search(r"TEXT:\s*(YES|NO)", ans, re.I)
+        person_ok = bool(person and person.group(1).upper() == "YES")
+        text_ok = bool(text and text.group(1).upper() == "NO")
+        print(f"  [REALREF] audit: person={person.group(1) if person else '?'} "
+              f"text/logo/watermark={'PRESENT' if text and text.group(1).upper()=='YES' else 'clean'}")
+        return person_ok and text_ok
+    except Exception:
+        return True
+
+
+REAL_REFS_DIR = PROJECT_DIR / "cast_refs" / "real"
+
+
+def _serpapi_key() -> str:
+    """SerpAPI key: env -> project .env -> AdsDoctorCRM/.env.local."""
+    k = os.environ.get("SERPAPI_API_KEY", "").strip()
+    if k:
+        return k
+    for p in (PROJECT_DIR / ".env",
+              Path(os.path.expanduser("~")) / "AdsDoctorCRM" / ".env.local"):
+        if p.is_file():
+            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.startswith("SERPAPI_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
+
+
+def _google_images_candidates(char_name: str, role: str) -> list[str]:
+    """Google Images search via SerpAPI (Joe's key, ~$0.01/query).
+    Returns image URLs (original full-size preferred, thumbnail fallback)."""
+    key = _serpapi_key()
+    if not key:
+        print("  [REALREF] no SERPAPI_API_KEY - using Openverse fallback")
+        return []
+    import urllib.parse as _up
+    q = _up.quote(f"{char_name} {role}".strip() or char_name)
+    try:
+        url = (f"https://serpapi.com/search.json?engine=google_images&q={q}"
+               f"&api_key={key}&ijn=0&num=6")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode())
+        out: list[str] = []
+        for res in data.get("images_results", []):
+            if res.get("original"):
+                out.append(res["original"])
+            elif res.get("thumbnail"):
+                out.append(res["thumbnail"])
+        if out:
+            print(f"  [REALREF] google images: {len(out)} candidates for {char_name}")
+        return out
+    except Exception as e:
+        print(f"  [REALREF] serpapi failed ({str(e)[:70]})")
+        return []
+
+
+def _openverse_candidates(char_name: str, role: str) -> list[str]:
+    import urllib.parse as _up
+    queries = [char_name]
+    if role and role.lower() not in char_name.lower():
+        queries.append(f"{char_name} {role}")
+    urls: list[str] = []
+    for q in queries:
+        qq = _up.quote(q)
+        try:
+            req = urllib.request.Request(
+                f"https://api.openverse.org/v1/images/?q={qq}&page_size=6"
+                f"&license_type=all",
+                headers={"User-Agent": "splitnode-doc-pipeline/1.0"})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                data = json.loads(r.read().decode())
+            hits = [res.get("url") or res.get("thumbnail")
+                    for res in data.get("results", []) if res]
+            urls += hits
+            if hits:
+                break
+        except Exception as e:
+            print(f"  [REALREF] openverse search '{q}' failed ({str(e)[:70]})")
+    return urls
+
+
+def _find_real_reference(char_name: str, role: str) -> Optional[str]:
+    """Search GOOGLE IMAGES (SerpAPI, Openverse fallback) for a photo of the
+    REAL person from the story and cache it to cast_refs/real/. Returns None
+    when nothing usable is found (the sheet then falls back to txt2img)."""
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
+    out = REAL_REFS_DIR / f"{safe}.jpg"
+    if out.is_file():
+        print(f"  [REALREF] reuse {os.path.basename(out)}")
+        return str(out)
+    urls = _google_images_candidates(char_name, role)
+    if not urls:
+        urls = _openverse_candidates(char_name, role)
+    for u in urls:
+        if not u:
+            continue
+        for attempt in (1, 2):
+            try:
+                req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=25) as r:
+                    blob = r.read()
+                if len(blob) < 5000:
+                    break
+                REAL_REFS_DIR.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(blob)
+                # Audit the photo (person match + no text/logo/watermark)
+                # when the local vision model is loaded; else accept best effort.
+                if _vision_available() and not _audit_real_photo(
+                        str(out), char_name, role):
+                    print(f"  [REALREF] rejected (person/text/watermark): {u[:50]}")
+                    try:
+                        out.unlink()
+                    except Exception:
+                        pass
+                    break
+                print(f"  [REALREF] {char_name} <- {u[:70]}")
+                return str(out)
+            except Exception as e:
+                if attempt == 2:
+                    print(f"  [REALREF] download failed {u[:50]} ({str(e)[:50]})")
+    return None
+
+
+# -- Location sheets + prop assets (Joe, Aug 2026) -------------------------
+# Every unique location gets a 6-panel stylized sheet (3x2 grid, same layout
+# as the character sheet). Every prop gets a front+back asset. Both are
+# generated through the SAME identity mode as character sheets but with the
+# style plate as their ONLY ref ([style_plate] alone) - they are ASSETS, so
+# the style sheet styles them, and then shots are composed ONLY from the
+# already-styled assets (no style plate in the shot itself).
+#
+# Props: text-to-image by default (refs=[style_plate] so they match the
+# channel style). "Specific props" (brands, models, named real objects -
+# anything a prompt can't describe) get a SerpAPI real image + style plate,
+# then generate a stylized prop asset reference from those two refs.
+
+PROP_REAL_DIR = PROJECT_DIR / "cast_refs" / "props"
+
+
+def _needs_real_prop(prop: str) -> bool:
+    """Does this prop need a real image reference instead of pure T2I?
+
+    True when the prop names a SPECIFIC real-world object a text prompt
+    can't describe: brand/model names, digits (years, model numbers),
+    ALL-CAPS or mid-string capitalized words (e.g. 'Powerball machine',
+    '1969 Camaro', 'Apple II'). Generic props (briefcase, calculator,
+    spreadsheet) stay text-to-image. PROP_REAL_FORCE=1 forces real for all.
+    """
+    if os.environ.get("PROP_REAL_FORCE", "0") == "1":
+        return True
+    if os.environ.get("PROP_REAL_FORCE", "0") == "2":
+        return False
+    p = (prop or "").strip()
+    if not p:
+        return False
+    # digit clusters (model years, version numbers)
+    if re.search(r"\d", p):
+        return True
+    # a capitalized word NOT at the start = proper noun / brand / model
+    words = p.split()
+    for i, w in enumerate(words):
+        if i > 0 and w[:1].isupper() and len(w) > 1:
+            return True
+    # ALL-CAPS word anywhere (IBM, FBI, CAMRY...)
+    if any(w.isupper() and len(w) > 1 for w in words):
+        return True
+    return False
+
+
+def _find_prop_reference(prop: str) -> Optional[str]:
+    """SerpAPI Google-Images (Openverse fallback) for a SPECIFIC prop's real
+    photo, cached to cast_refs/props/. Returns None if nothing usable."""
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", prop.lower()).strip("_") or "prop"
+    out = PROP_REAL_DIR / f"{safe}.jpg"
+    if out.is_file():
+        print(f"  [PROPREF] reuse {os.path.basename(out)}")
+        return str(out)
+    urls = _google_images_candidates(prop, "object")
+    if not urls:
+        urls = _openverse_candidates(prop, "object")
+    for u in urls:
+        if not u:
+            continue
+        for attempt in (1, 2):
+            try:
+                req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=25) as r:
+                    blob = r.read()
+                if len(blob) < 5000:
+                    break
+                PROP_REAL_DIR.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(blob)
+                print(f"  [PROPREF] {prop} <- {u[:70]}")
+                return str(out)
+            except Exception as e:
+                if attempt == 2:
+                    print(f"  [PROPREF] download failed {u[:50]} ({str(e)[:50]})")
+    return None
+
+
+LOCATION_VIEWS = [
+    ("establishing",
+     "A wide establishing shot of THIS EXACT LOCATION, entire setting visible. "
+     "Use ONLY the painting and render style from the reference artwork - "
+     "bold animated style, strong stylized brushwork, painterly shading, "
+     "saturated colors, dramatic rim lighting, dark moody atmosphere. The "
+     "reference images show DIFFERENT scenes - the setting in this panel is "
+     "this exact location and NOTHING else. STRICTLY NO people, no humans, "
+     "no faces, no characters, no figures, no silhouettes, no body parts, "
+     "no hands, no persons of any kind anywhere in frame. Plain composition, "
+     "one location only."),
+    ("front_left",
+     "A medium shot of THIS EXACT LOCATION seen from the front-left angle. "
+     "Use ONLY the painting and render style from the reference artwork - "
+     "bold animated style, strong stylized brushwork, painterly shading, "
+     "saturated colors, dramatic rim lighting, dark moody atmosphere. The "
+     "reference images show DIFFERENT scenes - the setting in this panel is "
+     "this exact location and NOTHING else. STRICTLY NO people, no humans, "
+     "no faces, no characters, no figures, no silhouettes, no body parts, "
+     "no hands, no persons of any kind anywhere in frame. One location only."),
+    ("front_right",
+     "A medium shot of THIS EXACT LOCATION seen from the front-right angle. "
+     "Use ONLY the painting and render style from the reference artwork - "
+     "bold animated style, strong stylized brushwork, painterly shading, "
+     "saturated colors, dramatic rim lighting, dark moody atmosphere. The "
+     "reference images show DIFFERENT scenes - the setting in this panel is "
+     "this exact location and NOTHING else. STRICTLY NO people, no humans, "
+     "no faces, no characters, no figures, no silhouettes, no body parts, "
+     "no hands, no persons of any kind anywhere in frame. One location only."),
+    ("interior",
+     "A view inside THIS EXACT LOCATION, interior space, furniture and details "
+     "visible. Use ONLY the painting and render style from the reference "
+     "artwork - bold animated style, strong stylized brushwork, painterly "
+     "shading, saturated colors, dramatic rim lighting, dark moody atmosphere. "
+     "The reference images show DIFFERENT scenes - the setting in this panel "
+     "is this exact location and NOTHING else. STRICTLY NO people, no humans, "
+     "no faces, no characters, no figures, no silhouettes, no body parts, no "
+     "hands, no persons of any kind anywhere in frame. One location only."),
+    ("detail",
+     "A close-up detail shot of a distinctive feature of THIS EXACT LOCATION "
+     "(a sign, a doorway, a key object). Use ONLY the painting and render "
+     "style from the reference artwork - bold animated style, strong stylized "
+     "brushwork, painterly shading, saturated colors, dramatic rim lighting, "
+     "dark moody atmosphere. The reference images show DIFFERENT scenes - the "
+     "setting in this panel is this exact location and NOTHING else. STRICTLY "
+     "NO people, no humans, no faces, no characters, no figures, no "
+     "silhouettes, no body parts, no hands, no persons of any kind anywhere "
+     "in frame. One location only."),
+    ("overhead",
+     "An overhead elevated shot of THIS EXACT LOCATION from above, layout "
+     "visible. Use ONLY the painting and render style from the reference "
+     "artwork - bold animated style, strong stylized brushwork, painterly "
+     "shading, saturated colors, dramatic rim lighting, dark moody atmosphere. "
+     "The reference images show DIFFERENT scenes - the setting in this panel "
+     "is this exact location and NOTHING else. STRICTLY NO people, no humans, "
+     "no faces, no characters, no figures, no silhouettes, no body parts, no "
+     "hands, no persons of any kind anywhere in frame. One location only."),
+]
+
+
+def _generate_location_sheet(location: str, seed: int, out_dir: Path) -> Optional[str]:
+    """6-panel stylized location sheet (3x2 grid, 1920x1080). Refs = the
+    style plate ONLY (an asset, not a shot). Panels render at 640x540 and are
+    composed exactly like the character sheet. Cached per location name."""
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", location.lower()).strip("_") or "loc"
+    out = out_dir / f"{safe}_sheet.png"
+    if out.is_file():
+        print(f"  [LOCATION] reuse {os.path.basename(out)}")
+        return str(out)
+    style_ref = str(LOCATION_STYLE_REF)
+    have_style = (os.environ.get("STYLE_REF", "1") != "0"
+                  and os.path.isfile(style_ref))
+    if not have_style:
+        print(f"  [LOCATION] no style plate - skipping sheet for '{location}'")
+        return None
+    panels: dict[str, str] = {}
+    for view, prompt_txt in LOCATION_VIEWS:
+        pan = out_dir / f"{safe}_{view}.png"
+        if pan.is_file():
+            panels[view] = str(pan)
+            continue
+        p = (f"{prompt_txt} The location is: {location}. 3D environment "
+             f"reference panel - 640x540 portrait frame")
+        # ref_boost 2.0 + grounding 768: the style ref contains painted
+        # scenes - boost 4.0 / grounding 1024 made faces/objects bleed into
+        # the location panels (verified 2026-08-04, user report). The hard
+        # NO-people/faces negation in the prompt reinforces it.
+        print(f"  [LOCATION] '{location}' panel {view} (identity, refs=1, "
+              f"boost=2.0, grounding=768)...")
+        ok = _krea_generate(p, seed + 111 * len(view), str(pan),
+                            ref_images=[style_ref], denoise=1.0, upscale=False,
+                            steps=10, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
+                            ref_mode="identity", ref_boost=2.0,
+                            grounding_px=768)
+        if ok:
+            panels[view] = str(pan)
+    if len(panels) < 3:
+        print(f"  [LOCATION] '{location}' only {len(panels)}/6 panels - skip sheet")
+        return None
+    try:
+        from PIL import Image, ImageDraw
+        grid = Image.new("RGB", (SHEET_GRID_W, SHEET_GRID_H), (10, 10, 12))
+        draw = ImageDraw.Draw(grid)
+        for i, view in enumerate([v for v, _ in LOCATION_VIEWS]):
+            if view not in panels:
+                continue
+            im = Image.open(panels[view]).convert("RGB")
+            im = im.resize((SHEET_PANEL_W, SHEET_PANEL_H), Image.LANCZOS)
+            col, row = i % SHEET_COLS, i // SHEET_COLS
+            grid.paste(im, (col * SHEET_PANEL_W, row * SHEET_PANEL_H))
+            draw.rectangle([col * SHEET_PANEL_W, row * SHEET_PANEL_H,
+                            col * SHEET_PANEL_W + SHEET_PANEL_W - 1,
+                            row * SHEET_PANEL_H + SHEET_PANEL_H - 1],
+                           outline=(120, 120, 130), width=4)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        grid.save(out)
+        print(f"  [LOCATION] '{location}' locked -> {os.path.basename(out)} "
+              f"({len(panels)}/6 panels)")
+        return str(out)
+    except Exception as e:
+        print(f"  [LOCATION] compose failed: {e}")
+        return None
+
+
+def _generate_prop_asset(prop: str, seed: int, out_dir: Path) -> Optional[str]:
+    """Stylized prop asset: front + back panels composed into one 1280x540
+    sheet. refs = [style_plate] for T2I props, [style_plate, real_photo] for
+    SPECIFIC props (SerpAPI real image). Cached per prop name."""
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", prop.lower()).strip("_") or "prop"
+    out = out_dir / f"{safe}_prop.png"
+    if out.is_file():
+        print(f"  [PROP] reuse {os.path.basename(out)}")
+        return str(out)
+    style_ref = str(PROP_STYLE_REF)
+    have_style = (os.environ.get("STYLE_REF", "1") != "0"
+                  and os.path.isfile(style_ref))
+    use_real = _needs_real_prop(prop)
+    refs: list[str] = []
+    if have_style:
+        refs.append(style_ref)
+    real_photo = None
+    if use_real:
+        real_photo = _find_prop_reference(prop)
+        if real_photo:
+            refs.append(real_photo)
+        else:
+            print(f"  [PROP] no real photo for '{prop}' - falling back to T2I")
+            use_real = False
+    if not refs:
+        print(f"  [PROP] no style plate/ref for '{prop}' - using txt2img")
+        # plain txt2img fallback: front only
+        p = (f"A single {prop}, studio product shot, front view, centered, "
+             f"plain dark background. STRICTLY NO people, no humans, no faces, "
+             f"no characters, no figures, no silhouettes, no body parts, no "
+             f"hands, no text, no persons of any kind anywhere in frame. "
+             f"Painted in a bold animated style, strong stylized brushwork, "
+             f"painterly shading, saturated colors.")
+        ok = _krea_generate(p, seed, str(out), ref_images=None, denoise=1.0,
+                            upscale=False, steps=10,
+                            width=SHEET_PANEL_W, height=SHEET_PANEL_H,
+                            ref_mode="img2img")
+        return str(out) if ok else None
+    views = [
+        ("front",
+         f"Render THIS OBJECT: {prop}, front view, centered, full object "
+         f"visible, plain dark studio background. Use ONLY the painting and "
+         f"render style from the reference artwork - bold animated style, "
+         f"strong stylized brushwork, painterly shading, saturated colors. "
+         f"The reference images show DIFFERENT objects - the object in this "
+         f"panel is {prop} and NOTHING else. STRICTLY NO people, no humans, "
+         f"no faces, no characters, no figures, no silhouettes, no body "
+         f"parts, no hands, no text, no persons of any kind anywhere in "
+         f"frame."),
+        ("back",
+         f"Render THIS OBJECT: {prop}, back view, centered, full object "
+         f"visible, plain dark studio background. Use ONLY the painting and "
+         f"render style from the reference artwork - bold animated style, "
+         f"strong stylized brushwork, painterly shading, saturated colors. "
+         f"The reference images show DIFFERENT objects - the object in this "
+         f"panel is {prop} and NOTHING else. STRICTLY NO people, no humans, "
+         f"no faces, no characters, no figures, no silhouettes, no body "
+         f"parts, no hands, no text, no persons of any kind anywhere in "
+         f"frame."),
+    ]
+    panels: dict[str, str] = {}
+    for view, prompt_txt in views:
+        pan = out_dir / f"{safe}_{view}.png"
+        if pan.is_file():
+            panels[view] = str(pan)
+            continue
+        src = "real+T2I" if use_real else "style-only"
+        # ref_boost 2.0 (not 4.0): the style plate is a 3x2 grid containing
+        # FACES - boost 4.0 makes the model copy them into the prop asset
+        # (verified 2026-08-04, user report). 2.0 keeps the style without
+        # the face bleed; the hard NO-people/faces negation in the prompt
+        # reinforces it.
+        print(f"  [PROP] '{prop}' {view} panel (identity, refs="
+              f"{len(refs)}, boost=2.0, {src})...")
+        ok = _krea_generate(prompt_txt, seed + 111 * len(view), str(pan),
+                            ref_images=refs, denoise=1.0, upscale=False,
+                            steps=10, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
+                            ref_mode="identity", ref_boost=2.0,
+                            grounding_px=768)
+        if ok:
+            panels[view] = str(pan)
+    if not panels:
+        return None
+    try:
+        from PIL import Image, ImageDraw
+        grid = Image.new("RGB", (SHEET_PANEL_W * 2, SHEET_PANEL_H), (10, 10, 12))
+        draw = ImageDraw.Draw(grid)
+        for i, view in enumerate(("front", "back")):
+            if view not in panels:
+                continue
+            im = Image.open(panels[view]).convert("RGB")
+            im = im.resize((SHEET_PANEL_W, SHEET_PANEL_H), Image.LANCZOS)
+            grid.paste(im, (i * SHEET_PANEL_W, 0))
+            draw.rectangle([i * SHEET_PANEL_W, 0,
+                            i * SHEET_PANEL_W + SHEET_PANEL_W - 1,
+                            SHEET_PANEL_H - 1],
+                           outline=(120, 120, 130), width=4)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        grid.save(out)
+        print(f"  [PROP] '{prop}' locked -> {os.path.basename(out)} "
+              f"({len(panels)}/2 panels)")
+        return str(out)
+    except Exception as e:
+        print(f"  [PROP] compose failed: {e}")
+        return None
+
+
+def _match_location_sheet(scene: str, location_sheets: dict) -> Optional[str]:
+    """Best location sheet for a shot scene by keyword overlap."""
+    if not location_sheets:
+        return None
+    kw = set(_scene_keywords(scene))
+    if not kw:
+        return None
+    best, best_score = None, 0
+    for loc, path in location_sheets.items():
+        if not path or not os.path.isfile(path):
+            continue
+        loc_kw = set(re.findall(r"[a-z0-9']+", loc.lower()))
+        score = len(kw & loc_kw)
+        if score > best_score:
+            best, best_score = path, score
+    return best if best_score >= 1 else None
+
+
+def _match_prop_asset(scene: str, prop_assets: dict) -> Optional[str]:
+    """Best prop asset for a shot scene by keyword overlap."""
+    if not prop_assets:
+        return None
+    kw = set(_scene_keywords(scene))
+    if not kw:
+        return None
+    best, best_score = None, 0
+    for prop_name, path in prop_assets.items():
+        if not path or not os.path.isfile(path):
+            continue
+        prop_kw = set(re.findall(r"[a-z0-9']+", prop_name.lower()))
+        score = len(kw & prop_kw)
+        if score > best_score:
+            best, best_score = path, score
+    return best if best_score >= 1 else None
+
+
+def _build_location_sheets(context: dict, seed: int, ep_dir: Path) -> dict:
+    """Location sheets for every unique place/environment in the episode world."""
+    if os.environ.get("LOCATION_SHEETS", "1") == "0":
+        return {}
+    names: list[str] = []
+    for k in ("places", "environments"):
+        for v in context.get(k, []) or []:
+            v = str(v).strip()
+            if v and v.lower() not in (n.lower() for n in names):
+                names.append(v)
+    if not names:
+        return {}
+    out_dir = ep_dir / "location_sheets"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    sheets = {}
+    print(f"\n[ASSETS] {len(names)} locations -> stylized sheets...")
+    for i, loc in enumerate(names[:6]):
+        path = _generate_location_sheet(loc, seed + i * 1000, out_dir)
+        if path:
+            sheets[loc] = path
+    return sheets
+
+
+def _build_prop_assets(context: dict, seed: int, ep_dir: Path) -> dict:
+    """Front+back prop assets for the episode's props (T2I or real ref)."""
+    if os.environ.get("PROP_SHEETS", "1") == "0":
+        return {}
+    props = [str(v).strip() for v in (context.get("props", []) or []) if str(v).strip()]
+    if not props:
+        return {}
+    out_dir = ep_dir / "props"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    assets = {}
+    print(f"\n[ASSETS] {len(props)} props -> stylized front/back assets...")
+    for i, prop in enumerate(props[:8]):
+        path = _generate_prop_asset(prop, seed + 500 + i * 1000, out_dir)
+        if path:
+            assets[prop] = path
+    return assets
+
+
+CHAR_SHEETS_DIR_NAME = "char_sheets"
+# 6-panel character sheet spec (Joe, Aug 2026):
+#   face -> face_side -> face_back (face chain, img2img from the previous)
+#   body_front -> body_side -> body_back (body chain, img2img from face /
+#   body_front). Each panel is HARD-LOCKED to contain ONLY what we want.
+# Panels render at 640x540, composed 3x2 -> 1920x1080 sheet.
+SHEET_PANEL_W, SHEET_PANEL_H = 640, 540
+SHEET_COLS, SHEET_ROWS = 3, 2
+# grid = panels at native size, 3x2 -> 1920 long side (no stretch/skew)
+SHEET_GRID_W = SHEET_PANEL_W * SHEET_COLS
+SHEET_GRID_H = SHEET_PANEL_H * SHEET_ROWS
+
+# (view, ref_source, denoise, prompt, method)
+# Identity mode (krea2edit LoRA, APPROVED Aug 2026 on the Elon sheet test):
+#   - face panel: [style_plate, real_photo] (2 refs, ref_boost 4.0)
+#   - ALL other panels (face_side/back, body_front/side/back): chain off the
+#     FACE-FRONT panel ONLY, ref_boost lowered (SHEET_CHAIN_BOOST, default
+#     2.0) so the prompt controls pose/framing - boost 4.0 on a face close-up
+#     forced the giant head into body shots (img2img-style bleed).
+#   - "identity" = krea2edit trained path (euler, ref_boost 4, grounding 1024)
+#   - Fallback when NO real photo exists: old Ostris Kontext path
+#     ("reference" mode; method index_timestep_zero for front views,
+#     uxo/uno for side/back).
+SHEET_PANELS = [
+    ("face", "real", 0.45,
+     "Create a close-up portrait of THIS EXACT MAN's face, head and face only, "
+     "full face centered, both eyes looking at camera, hair styled as in the "
+     "reference, expression neutral. NOTHING else in frame - no shoulders, no "
+     "neck, no body. Use ONLY the painting and render style from the "
+     "reference artwork - bold animated style, strong stylized brushwork, "
+     "painterly shading, saturated colors on the skin and hair; the person "
+     "shown is THIS EXACT MAN and no one else. Plain light grey "
+     "studio background, flat even neutral lighting, no dramatic lighting, "
+     "no coloured lighting, no rim light, one person only.",
+     "index_timestep_zero"),
+    ("face_side", "face", 0.5,
+     "Show THIS EXACT MAN in left side profile, head only, same hair, same "
+     "face, no body, no shoulders. EXACTLY ONE single person, absolutely no "
+     "second figure, no duplicate, no mirror image. Use ONLY the painting and "
+     "render style from the reference artwork - bold animated style, strong "
+     "stylized brushwork, painterly shading, saturated colors. Plain light "
+     "grey studio background, flat even neutral lighting, no dramatic "
+     "lighting, no coloured lighting, one person only.",
+     "uxo/uno"),
+    ("face_back", "face", 0.5,
+     "Show the back of THIS EXACT MAN's head, rear view, hair as in the "
+     "reference, no face visible, no body. EXACTLY ONE single person, "
+     "absolutely no second figure, no duplicate, no mirror image. Use ONLY "
+     "the painting and render style from the reference artwork - bold "
+     "animated style, strong stylized brushwork, painterly shading. Plain "
+     "light grey studio background, flat even neutral lighting, no dramatic "
+     "lighting, no coloured lighting, one person only.",
+     "uxo/uno"),
+    ("body_front", "face", 0.55,
+     "Show THIS EXACT MAN full body standing facing the camera, complete "
+     "outfit as in the reference, face identical, entire body head to feet, "
+     "both feet on the ground, arms relaxed at sides. EXACTLY ONE single "
+     "person, absolutely no second figure, no duplicate, no mirror image. "
+     "Use ONLY the painting and render style from the reference artwork - "
+     "bold animated style, strong stylized brushwork, painterly shading, "
+     "saturated colors. Plain light grey studio background, flat even "
+     "neutral lighting, no dramatic lighting, no coloured lighting.",
+     "index_timestep_zero"),
+    ("body_side", "body_front", 0.5,
+     "Show THIS EXACT MAN full body side profile view facing left, same "
+     "outfit, same face, same build, entire body head to feet. EXACTLY ONE "
+     "single person, absolutely no second figure, no duplicate, no mirror "
+     "image, no shadow clone, no extra person anywhere in frame. Use ONLY "
+     "the painting and render style from the reference artwork - bold "
+     "animated style, strong stylized brushwork, painterly shading. Plain "
+     "light grey studio background, flat even neutral lighting, no dramatic "
+     "lighting, no coloured lighting.",
+     "uxo/uno"),
+    ("body_back", "body_front", 0.5,
+     "Show THIS EXACT MAN full body rear view, back of head and full outfit "
+     "visible, standing, entire body head to feet. EXACTLY ONE single "
+     "person, absolutely no second figure, no duplicate, no mirror image. "
+     "Use ONLY the painting and render style from the reference artwork - "
+     "bold animated style, strong stylized brushwork, painterly shading. "
+     "Plain light grey studio background, flat even neutral lighting, no "
+     "dramatic lighting, no coloured lighting.",
+     "uxo/uno"),
+]
+
+
+def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
+                              sheets_dir: Path) -> Optional[str]:
+    """Character sheet (1920x1080, 3x2 grid): face / face side / face back /
+    body front / body side / body back.
+
+    Identity mode (krea2edit LoRA + real photo):
+      face      = [style_plate, real_photo] (2 refs, ref_boost 4.0)
+      all other = [face-front] ONLY (ref_boost 2.0 - prompt controls pose,
+                  low boost stops the face ref bleeding into the body shot)
+    The sheet is then used as the image reference for every shot the
+    character appears in. Real photo comes from Google Images (SerpAPI).
+    Panels that fail are skipped; if the face panel fails the sheet falls
+    back to txt2img.
+    """
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
+    out = sheets_dir / f"{safe}_sheet.png"
+    if out.is_file():
+        print(f"  [SHEET] reuse {os.path.basename(out)}")
+        return str(out)
+    ref_photo = _find_real_reference(char_name, sheet.get("role", ""))
+    char_block = _character_prompt_block(sheet, "eye-level")
+    # Identity mode (krea2edit LoRA, approved on the Elon test) when a real
+    # photo exists: panels chain off ONE tight ref at a time (real photo ->
+    # face -> face_side/back/body_front -> body_side/back), euler, boost 4.
+    use_identity = ref_photo is not None
+    if use_identity:
+        print(f"  [SHEET] {char_name}: identity mode (krea2edit LoRA, real ref)")
+    else:
+        print(f"  [SHEET] {char_name}: Kontext reference mode (no real photo)")
+    panels: dict[str, str] = {}
+    for view, ref_src, denoise, view_desc, ref_method in SHEET_PANELS:
+        pan = sheets_dir / f"{safe}_{view}.png"
+        if pan.is_file():
+            panels[view] = str(pan)
+            continue
+        if use_identity:
+            # Identity mode prompt = view_desc ONLY (no RENDER_STYLE, no
+            # char_block, no "reference panel" suffix). VERIFIED 2026-08-04:
+            # prepending the long RENDER_STYLE block to an identity panel
+            # prompt flips the model into img2img copy mode - the body panels
+            # reproduced the face ref (giant head at 345x345, same pixel
+            # position). The style comes from the refs (face panel / style
+            # plate), the text only controls pose + framing. Short prompts
+            # = clean full bodies (71px face at top of frame).
+            p = view_desc
+        else:
+            # Kontext fallback (no real photo): full descriptive prompt.
+            p = (f"{RENDER_STYLE}. {char_block}. {view_desc}. 3D character "
+                 f"reference panel - 640x540 portrait frame")
+        if use_identity:
+            # Face panel: [style_plate, real_photo] - 2 refs, strong identity
+            # + style lock (ref_boost 4.0). ALL other panels (face_side/back,
+            # body_front/side/back): chain off the FACE-FRONT panel ONLY, with
+            # a LOWER ref_boost (SHEET_CHAIN_BOOST, default 2.0) so the prompt
+            # fully controls pose/framing - ref_boost 4.0 on a face close-up
+            # forced the giant head into body shots (img2img-style bleed).
+            # STYLE_REF=0 disables the style plate (face = [real_photo] only).
+            if view == "face":
+                refs_full = [ref_photo] if ref_photo else []
+                style_ref = str(STYLE_REF_IMG)
+                if (os.environ.get("STYLE_REF", "1") != "0"
+                        and os.path.isfile(style_ref)
+                        and style_ref not in refs_full):
+                    refs_full.insert(0, style_ref)
+                boost = 4.0
+                g_px = 1024
+            else:
+                if "face" not in panels:
+                    print(f"  [SHEET] skip {view} (face panel missing)")
+                    continue
+                refs_full = [panels["face"]]
+                boost = float(os.environ.get("SHEET_CHAIN_BOOST", "2.0"))
+                # grounding_px 768 for chained panels: 1024 causes SPLIT/
+                # DUPLICATED compositions (documented krea2edit advisory) -
+                # verified 2026-08-04: body_side at 1024 rendered 2 Elons
+                # (2 body columns), at 768 it renders ONE clean figure.
+                g_px = int(os.environ.get("SHEET_CHAIN_GROUNDING", "768"))
+            print(f"  [SHEET] {view} panel for {char_name} "
+                  f"(identity, refs={len(refs_full)}, boost={boost}, "
+                  f"grounding={g_px})...")
+            ok = _krea_generate(p, seed + 111 * len(view), str(pan),
+                                ref_images=refs_full, denoise=denoise, upscale=False,
+                                steps=10, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
+                                ref_mode="identity", ref_boost=boost,
+                                grounding_px=g_px)
+        else:
+            # Kontext fallback (no real photo): strict build order - every
+            # panel needs its ref source ready first.
+            if view == "face":
+                ref = None
+            elif ref_src == "face":
+                if "face" not in panels:
+                    print(f"  [SHEET] skip {view} (face panel missing)")
+                    continue
+                ref = [panels["face"]]
+            else:  # body_front -> body_side / body_back
+                if "body_front" not in panels:
+                    print(f"  [SHEET] skip {view} (body_front missing)")
+                    continue
+                ref = [panels["body_front"]]
+            if ref and not os.path.isfile(ref[0]):
+                print(f"  [SHEET] ref vanished ({ref[0]}) - skipping {view}")
+                continue
+            print(f"  [SHEET] {view} panel for {char_name} "
+                  f"(ref={ref_src}, kontext={ref_method})...")
+            ok = _krea_generate(p, seed + 111 * len(view), str(pan),
+                                ref_images=ref, denoise=denoise, upscale=False,
+                                steps=14, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
+                                ref_mode="reference", ref_method=ref_method)
+        if ok:
+            panels[view] = str(pan)
+    if "face" not in panels:
+        return None
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        grid = Image.new("RGB", (SHEET_GRID_W, SHEET_GRID_H), (10, 10, 12))
+        draw = ImageDraw.Draw(grid)
+        order = ["face", "face_side", "face_back",
+                 "body_front", "body_side", "body_back"]
+        for i, view in enumerate(order):
+            if view not in panels:
+                continue
+            im = Image.open(panels[view]).convert("RGB")
+            im = im.resize((SHEET_PANEL_W, SHEET_PANEL_H), Image.LANCZOS)
+            col, row = i % 3, i // 3
+            grid.paste(im, (col * SHEET_PANEL_W, row * SHEET_PANEL_H))
+            draw.rectangle([col * SHEET_PANEL_W, row * SHEET_PANEL_H,
+                            col * SHEET_PANEL_W + SHEET_PANEL_W - 1,
+                            row * SHEET_PANEL_H + SHEET_PANEL_H - 1],
+                           outline=(120, 120, 130), width=4)
+        try:
+            font = ImageFont.truetype("arial.ttf", 26)
+        except Exception:
+            font = None
+        # NO text on the sheet (Joe, Aug 2026): the grid is used as a pure
+        # image reference - text would bleed into identity conditioning.
+        sheets_dir.mkdir(parents=True, exist_ok=True)
+        grid.save(out)
+        print(f"  [SHEET] {char_name} locked -> {os.path.basename(out)} "
+              f"(1920x1080, {len(panels)}/6 panels)")
+        return str(out)
+    except Exception as e:
+        print(f"  [SHEET] compose failed: {e}")
+        return None
+
+
 def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = None,
-                        episode_num: int = 0) -> list[dict]:
+                        episode_num: int = 0,
+                        context: Optional[dict] = None,
+                        location_sheets: Optional[dict] = None,
+                        prop_assets: Optional[dict] = None) -> list[dict]:
+    """Generate ALL images locally with Krea 2 Turbo (ComfyUI) at 1280x720,
+    then upscale to 1920x1080 with 4x-FaceUpDAT + style-card grade.
+
+    - Chapter shots: black placeholder (no generation).
+    - No-character shots: reuse image-assets/ cache when keywords match.
+    - Character shots: ONE locked portrait per character, then every shot of
+      that character is img2img-conditioned on the portrait (denoise 0.55) so
+      the face stays consistent. Set FACE_LOCK=0 to disable.
+    - Resume-safe: shots with an existing image file are skipped; failed shots
+      are retried once with a fresh seed.
+    """
     character_sheets = character_sheets or {}
     ep_dir = SHOTS_DIR / f"ep{episode_num:03d}" if episode_num else None
     black = _black_placeholder(episode_num) if episode_num else None
-    print(f"\n[IMAGES] Generating {len(shots)} 3D shots via RunPod Z-Image-Turbo...")
+    face_lock = os.environ.get("FACE_LOCK", "1") != "0"
+    sheets_dir = (ep_dir / CHAR_SHEETS_DIR_NAME) if ep_dir else None
+    if sheets_dir:
+        sheets_dir.mkdir(parents=True, exist_ok=True)
+    # Location sheets + prop assets for this episode's world (built once,
+    # before the shot loop). STYLE chain: style plate styles the ASSETS, the
+    # shots are composed ONLY from the already-styled asset refs.
+    if location_sheets is None and context:
+        location_sheets = _build_location_sheets(context, 42000 + episode_num * 7,
+                                                 ep_dir or SHOTS_DIR)
+    if prop_assets is None and context:
+        prop_assets = _build_prop_assets(context, 43000 + episode_num * 7,
+                                         ep_dir or SHOTS_DIR)
+    location_sheets = location_sheets or {}
+    prop_assets = prop_assets or {}
+    print(f"\n[IMAGES] Generating {len(shots)} 3D shots via local Krea 2 Turbo "
+          f"(1280x720 -> in-graph FaceUpDAT 1920x1080)...")
+    sheets: dict[str, Optional[str]] = {}
     for idx, shot in enumerate(shots):
         if shot.get("is_chapter"):
             shot["seed"] = 0
             shot["image_path"] = black
             print(f"  [SHOT {idx+1}/{len(shots)}] chapter placeholder (no image)")
             continue
+        if shot.get("image_path") and os.path.isfile(shot["image_path"]):
+            print(f"  [SHOT {idx+1}/{len(shots)}] resume: keep "
+                  f"{os.path.basename(shot['image_path'])}")
+            continue
+        char_name = shot.get("character", "NONE")
         # B-roll cache: no-character shots reuse image-assets/ when the scene
-        # keywords match - skips regeneration entirely (and the cost).
-        if shot.get("character", "NONE") == "NONE":
+        # keywords match - skips regeneration entirely.
+        cached = None
+        if char_name == "NONE":
             cached = _lookup_broll_asset(shot.get("scene", ""))
             if cached:
                 shot["seed"] = 0
@@ -2211,31 +3384,117 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                 continue
         seed = 10000 + idx * 137 + random.randint(0, 999)
         prompt = _build_shot_prompt(shot, character_sheets)
-        path = _runpod_generate(prompt, seed, out_dir=ep_dir)
-        shot["seed"] = seed
-        shot["image_path"] = path
-        if path:
-            print(f"  [SHOT {idx+1}/{len(shots)}] image ready (char={shot.get('character','NONE')})")
-            # Freshly generated b-roll goes INTO the cache for next time
-            if shot.get("character", "NONE") == "NONE":
-                shot["image_path"] = _cache_broll_asset(path, shot.get("scene", ""))
+        # ---- Reference composition (real krea2edit references, NOT img2img) ----
+        # Ordered list, training order: image 1 = SCENE/style plate, image 2+ =
+        # subjects (character face panels), then location/prop refs. All refs
+        # become RoPE frames in the identity LoRA's in-context path - the
+        # prompt fully controls pose/composition while the refs lock style,
+        # identity and environment. STYLE_REF=0 disables the style plate.
+        refs: list[str] = []
+        use_identity = False
+        style_ref = str(STYLE_REF_IMG)
+        style_enabled = (os.environ.get("STYLE_REF", "1") != "0"
+                         and os.path.isfile(style_ref))
+        identity_ref: Optional[str] = None
+        if face_lock and char_name != "NONE":
+            sheet_img = sheets.get(char_name)
+            if sheet_img is None:
+                sheet_obj = None
+                for k, v in character_sheets.items():
+                    if k.lower() == char_name.lower():
+                        sheet_obj = v
+                        break
+                sheet_img = _generate_character_sheet(char_name, sheet_obj or {},
+                                                      seed, sheets_dir)
+                sheets[char_name] = sheet_img or ""
+            if sheet_img:
+                # face panel sits next to the sheet: <safe>_face.png
+                face_panel = os.path.join(
+                    os.path.dirname(sheet_img),
+                    os.path.basename(sheet_img).replace("_sheet.png", "_face.png"))
+                if os.path.isfile(face_panel):
+                    identity_ref = face_panel
+                else:
+                    refs.append(sheet_img)
+            if identity_ref:
+                refs.append(identity_ref)   # frame 1: character identity
+                use_identity = True
+        # location/prop refs: stylized asset sheets for THIS episode's world
+        # (next frames) so the environment + props stay consistent across
+        # shots. Falls back to the cached b-roll asset when nothing matches.
+        loc_sheet = _match_location_sheet(shot.get("scene", ""), location_sheets)
+        if loc_sheet and loc_sheet not in refs:
+            refs.append(loc_sheet)
+            use_identity = True
+        prop_sheet = _match_prop_asset(shot.get("scene", ""), prop_assets)
+        if prop_sheet and prop_sheet not in refs:
+            refs.append(prop_sheet)
+            use_identity = True
+        asset = _lookup_broll_asset(shot.get("scene", ""))
+        if asset and asset not in refs:
+            refs.append(asset)
+            use_identity = True
+        # Style chain (Joe's rule): the assets are ALREADY styled - the shot
+        # does NOT need the style plate (verified shot test, no plate). The
+        # plate is only a fallback when a shot has NO styled refs at all
+        # (pure txt2img establishing/object shot with no matching assets).
+        if not refs and style_enabled:
+            refs.append(style_ref)          # last resort: channel style plate
+            use_identity = True
+        out_path = str((ep_dir or SHOTS_DIR) / f"shot_{seed}.png")
+        if use_identity:
+            ok = _krea_generate(prompt, seed, out_path,
+                                ref_images=refs, denoise=1.0,
+                                ref_mode="identity", ref_boost=4.0,
+                                grounding_px=1024)
         else:
-            print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED - will use fallback")
-        time.sleep(1)
+            ok = _krea_generate(prompt, seed, out_path,
+                                ref_images=None, denoise=0.55)
+        if not ok:
+            # one retry with a fresh seed
+            seed2 = seed + 31337
+            out2 = str((ep_dir or SHOTS_DIR) / f"shot_{seed2}.png")
+            print(f"  [SHOT {idx+1}/{len(shots)}] retrying with new seed...")
+            if use_identity:
+                ok = _krea_generate(prompt, seed2, out2,
+                                    ref_images=refs, denoise=1.0,
+                                    ref_mode="identity", ref_boost=4.0,
+                                    grounding_px=1024)
+            else:
+                ok = _krea_generate(prompt, seed2, out2,
+                                    ref_images=None, denoise=0.55)
+            if ok:
+                seed, out_path = seed2, out2
+        shot["seed"] = seed
+        shot["image_path"] = out_path if ok else None
+        if ok:
+            # Shot images come out 1920x1080 from the in-graph FaceUpDAT
+            # upscale - just apply the style-card grade.
+            _apply_grade(out_path)
+            if char_name == "NONE":
+                # Freshly generated b-roll goes INTO the cache for next time
+                shot["image_path"] = _cache_broll_asset(out_path, shot.get("scene", ""))
+            print(f"  [SHOT {idx+1}/{len(shots)}] image ready (char={char_name})")
+        else:
+            print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED after retry")
     ok = sum(1 for s in shots if s.get("image_path"))
     print(f"  [IMAGES] {ok}/{len(shots)} images generated")
     return shots
 
 # -- TTS (PocketTTS built-in male voice, 0dB normalized) -------------
 
-def _pocket_tts_generate(text: str, output_path: str, timeout: int = 180) -> bool:
-    """Generate TTS via PocketTTS HTTP API using built-in catalog voice (alba)."""
+def _pocket_tts_generate(text: str, output_path: str, timeout: int = 180,
+                         voice: Optional[str] = None) -> bool:
+    """Generate TTS via PocketTTS HTTP API. voice = clone WAV path; defaults
+    to the episode narrator (TTS_VOICE). Per-character quote voices route via
+    voice_map.json (see _lookup_voice)."""
     # TTS gate: strip LLM meta-commentary before it is spoken (belt-and-
     # suspenders on top of the parse-time strip + prompt rule 10).
     text = _strip_narration_meta(text)
     if not text.strip():
         print("  [TTS skip] narration meta only, nothing to speak")
         return False
+    voice = voice or TTS_VOICE
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     import urllib.request as _ur
     boundary = "----splitnode" + str(int(time.time() * 1000))
@@ -2243,17 +3502,17 @@ def _pocket_tts_generate(text: str, output_path: str, timeout: int = 180) -> boo
         return (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n"
                 f"{value}\r\n").encode()
     body = _field("text", text)
-    if os.path.isfile(TTS_VOICE):
+    if os.path.isfile(voice):
         # Custom cloned voice: upload the reference WAV as voice_wav
-        with open(TTS_VOICE, "rb") as vf:
+        with open(voice, "rb") as vf:
             ref_data = vf.read()
         body += (f"--{boundary}\r\n"
                  f"Content-Disposition: form-data; name=\"voice_wav\"; "
-                 f"filename=\"{os.path.basename(TTS_VOICE)}\"\r\n"
+                 f"filename=\"{os.path.basename(voice)}\"\r\n"
                  f"Content-Type: audio/wav\r\n\r\n").encode() + ref_data + b"\r\n"
     else:
         # Built-in catalog voice
-        body += _field("voice_url", TTS_VOICE)
+        body += _field("voice_url", voice)
     body += f"--{boundary}--\r\n".encode()
     req = _ur.Request(POCKET_TTS_URL + "/tts", data=body, method="POST", headers={
         "Content-Type": f"multipart/form-data; boundary={boundary}"
@@ -2277,6 +3536,7 @@ def _pocket_tts_generate(text: str, output_path: str, timeout: int = 180) -> boo
     except Exception as e:
         print(f"  [TTS error] {e}")
         return False
+
 
 def _normalize_voice_0db(wav_path: str) -> str:
     """Peak-normalize a voice clip to 0 dB. Returns path (in place)."""
@@ -2353,6 +3613,14 @@ def _finalize_tts(shots: list[dict], results: dict, episode_num: int) -> None:
         if shot.get("is_chapter"):
             shot["tts_path"] = str(ep_dir / f"narration_{nidx:02d}.wav")
             continue
+        # Per-character clone voices (voice_map.json) override the narrator
+        voice = _lookup_voice(shot.get("character", "NONE"))
+        if voice:
+            out_v = str(ep_dir / f"narration_{nidx:02d}_char.wav")
+            if _pocket_tts_generate(shot["narration"], out_v, voice=voice):
+                _normalize_voice_0db(out_v)
+                shot["tts_path"] = out_v
+                continue
         path = results.get(nidx)
         if path and os.path.isfile(path):
             shot["tts_path"] = path
@@ -2372,7 +3640,8 @@ def _generate_all_tts(shots: list[dict], episode_num: int) -> None:
     for idx, shot in enumerate(shots):
         nidx = shot.get("narration_idx", idx)
         out = str(ep_dir / f"narration_{nidx:02d}.wav")
-        ok = _pocket_tts_generate(shot["narration"], out)
+        ok = _pocket_tts_generate(shot["narration"], out,
+                                  voice=_lookup_voice(shot.get("character", "NONE")))
         if ok:
             _normalize_voice_0db(out)
             dur = _get_audio_duration(out)
@@ -2391,7 +3660,7 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
     New SFX in this version:
       - mixkit glitchy suspense hit at t=0 (every video opens with it)
       - camera shutter at every new-character / new-location switch
-      - typewriter clicks at each location/timeline title start (1.5s)
+      - typewriter clicks at each location/person title start (1.5s)
       - glitch-off at each title start + 5.5s (0.5s)
 
     Returns (mix_wav_path, voice_wav_path, clip_starts):
@@ -2607,7 +3876,10 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                         print(f"  [AUDIO] {('Whoosh' if is_new_char else 'Sweep')} "
                               f"'{wkey}' @{start + 0.15:.1f}s")
         # 3b) Deterministic SFX: every chapter card gets a riser that builds
-        #     INTO the card pop + a hit landing exactly on it.
+        #     INTO the card pop + a BOOM (Kick-Hit) landing exactly on it.
+        #     Boom is Joe's pick (Aug 2026) - it punches through the mix.
+        BOOM_NAME = "hit-kick"
+        boom_path = _sfx_path(BOOM_NAME) if BOOM_NAME in SFX_LIBRARY else None
         for ev in title_events or []:
             if ev.get("kind") != "chapter":
                 continue
@@ -2620,17 +3892,21 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                 placements.append((str(_sfx_path(riser)), ct - 0.15,
                                    rm.get("hit", 2.0) + 0.6))
                 print(f"  [AUDIO] Chapter riser '{riser}' -> {ct:.1f}s")
-            hit = _pick_sfx("hit-")
-            if hit == "hit-shell-shock-high-ring-not-nice-for-ears":
-                hit = None  # ear-bleeding ring never goes on a chapter card
-            if hit:
-                hm = SFX_LIBRARY[hit]
-                placements.append((str(_sfx_path(hit)), ct,
-                                   hm.get("hit", 0.1) + 1.2))
-                print(f"  [AUDIO] Chapter hit '{hit}' @{ct:.1f}s")
-        # 4) Typewriter clicks + glitch-off for every location/timeline/person title
+            if boom_path:
+                placements.append((str(boom_path), ct, 2.5))
+                print(f"  [AUDIO] Chapter BOOM (Kick-Hit) @{ct:.1f}s")
+            else:
+                hit = _pick_sfx("hit-")
+                if hit == "hit-shell-shock-high-ring-not-nice-for-ears":
+                    hit = None  # ear-bleeding ring never goes on a chapter card
+                if hit:
+                    hm = SFX_LIBRARY[hit]
+                    placements.append((str(_sfx_path(hit)), ct,
+                                       hm.get("hit", 0.1) + 1.2))
+                    print(f"  [AUDIO] Chapter hit '{hit}' @{ct:.1f}s")
+        # 4) Typewriter clicks + glitch-off for every location/person title
         for ev in title_events or []:
-            if ev.get("kind") not in ("location", "timeline", "person"):
+            if ev.get("kind") not in ("location", "person"):
                 continue
             st = ev.get("start", 0.0)
             tw = SFX_DIR / TITLE_SFX["typewriter"]
@@ -3212,7 +4488,10 @@ def _render_video(shots: list[dict], episode_num: int,
                 try:
                     split_node_titles.build_title_ass(title_events, ass_path)
                     print(f"  [TITLES] pass 2: burning {len(title_events)} title events...")
-                    if split_node_titles.burn_titles(output_path, ass_path, burned, timeout=2400):
+                    # Kicker + title are both inside the ASS now (Bahnschrift),
+                    # no pre-rendered chapter clips needed.
+                    if split_node_titles.burn_titles(
+                            output_path, ass_path, burned, timeout=2400):
                         _safe_replace(burned, output_path)
                         Path(marker).write_text("1")
                         print("  [TITLES] burned OK (animated glowing titles)")
@@ -3259,10 +4538,12 @@ def _generate_thumbnail(topic: str, output_path: str) -> bool:
     print(f"  [THUMB] GPT Image 2 thumbnail for: {topic[:60]}...")
     headline = _thumbnail_headline(topic)
     prompt = (
-        "YouTube documentary thumbnail, realistic 3D render style (Unreal Engine 5 / "
-        "Metahuman quality, photorealistic character with perfect anatomy), dramatic "
-        f"cinematic scene related to: {topic[:120]}. Moody lighting, dark color grade, "
-        "high contrast, bold and clickable composition, 16:9 landscape. "
+        "YouTube documentary thumbnail, bold animated animation style "
+        "(painted look: strong stylized brushwork, saturated "
+        "colors, dramatic rim lighting, cinematic painterly shading), "
+        f"dramatic cinematic scene related to: {topic[:120]}. Moody lighting, "
+        "dark color grade, high contrast, bold and clickable composition, "
+        "16:9 landscape. "
         "Large bold uppercase text 'SPLIT NODE' in the top-left corner. "
         f"Large bold uppercase clickbait headline text '{headline}' centered in the "
         "lower third. Crisp legible text, high-impact YouTube thumbnail, FERN "
@@ -3759,16 +5040,20 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
                        tags: Optional[list] = None, thumb_path: str = "",
                        video_path: str = "", video_id: str = "",
                        chapter_events: Optional[list] = None,
-                       anchor_events: Optional[list] = None) -> None:
+                       anchor_events: Optional[list] = None,
+                       location_sheets: Optional[dict] = None,
+                       prop_assets: Optional[dict] = None) -> None:
     """Save episode state so it can be resumed if interrupted."""
     state = {
-        "version": 2,
+        "version": 3,
         "stage": stage,
         "episode_num": episode_num,
         "article_url": article_url,
         "topic": topic,
         "shots": shots or [],
         "character_sheets": character_sheets or {},
+        "location_sheets": location_sheets or {},
+        "prop_assets": prop_assets or {},
         "titles": titles or [],
         "description": description,
         "tags": tags or [],
@@ -3793,7 +5078,7 @@ def _load_resume_state() -> Optional[dict]:
         return None
     try:
         state = json.loads(RESUME_FILE.read_text())
-        if state.get("version") not in (1, 2):
+        if state.get("version") not in (1, 2, 3):
             return None
         return state
     except Exception:
@@ -3822,6 +5107,8 @@ def _resume_episode(state: dict) -> None:
     article_url = state.get("article_url", "")
     shots = state.get("shots", [])
     character_sheets = state.get("character_sheets", {})
+    location_sheets = state.get("location_sheets", {})
+    prop_assets = state.get("prop_assets", {})
     titles = state.get("titles", [])
     description = state.get("description", "")
     tags = state.get("tags", [])
@@ -3840,7 +5127,8 @@ def _resume_episode(state: dict) -> None:
         _save_resume_state(stg, episode_num, article_url, topic, shots,
                            character_sheets, titles, description, tags,
                            thumb_path, video_path, video_id,
-                           chapter_events, anchor_events)
+                           chapter_events, anchor_events,
+                           location_sheets, prop_assets)
 
     # 1. Images: regenerate only the missing ones (same seeds -> same look)
     ep_shot_dir = SHOTS_DIR / f"ep{episode_num:03d}"
@@ -3862,14 +5150,59 @@ def _resume_episode(state: dict) -> None:
                     continue
             seed = shot.get("seed") or (10000 + random.randint(0, 999))
             prompt = _build_shot_prompt(shot, character_sheets)
-            path = _runpod_generate(prompt, seed, out_dir=ep_shot_dir)
+            # Same local Krea identity path as the fresh run: face panel +
+            # location sheet + prop asset refs (all pre-styled; the style
+            # plate is only a fallback when the shot has no styled refs).
+            refs: list[str] = []
+            use_identity = False
+            style_ref = str(STYLE_REF_IMG)
+            style_enabled = (os.environ.get("STYLE_REF", "1") != "0"
+                             and os.path.isfile(style_ref))
+            char_name = shot.get("character", "NONE")
+            if char_name != "NONE" and character_sheets:
+                sheet_img = None
+                for k, v in character_sheets.items():
+                    if k.lower() == char_name.lower():
+                        sheet_img = v
+                        break
+                if sheet_img and os.path.isfile(str(sheet_img)):
+                    face_panel = os.path.join(
+                        os.path.dirname(str(sheet_img)),
+                        os.path.basename(str(sheet_img)).replace("_sheet.png", "_face.png"))
+                    if os.path.isfile(face_panel):
+                        refs.append(face_panel)
+                        use_identity = True
+            loc_sheet = _match_location_sheet(shot.get("scene", ""), location_sheets)
+            if loc_sheet and loc_sheet not in refs:
+                refs.append(loc_sheet)
+                use_identity = True
+            prop_sheet = _match_prop_asset(shot.get("scene", ""), prop_assets)
+            if prop_sheet and prop_sheet not in refs:
+                refs.append(prop_sheet)
+                use_identity = True
+            asset = _lookup_broll_asset(shot.get("scene", ""))
+            if asset and asset not in refs:
+                refs.append(asset)
+                use_identity = True
+            if not refs and style_enabled:
+                refs.append(style_ref)
+                use_identity = True
+            out_path = str(ep_shot_dir / f"shot_{seed}.png")
+            if use_identity:
+                ok = _krea_generate(prompt, seed, out_path,
+                                    ref_images=refs, denoise=1.0,
+                                    ref_mode="identity", ref_boost=4.0,
+                                    grounding_px=1024)
+            else:
+                ok = _krea_generate(prompt, seed, out_path,
+                                    ref_images=None, denoise=0.55)
             shot["seed"] = seed
-            shot["image_path"] = path
-            print(f"  [SHOT] {'image ready' if path else 'IMAGE FAILED - fallback'} "
-                  f"(char={shot.get('character', 'NONE')})")
+            shot["image_path"] = out_path if ok else None
+            print(f"  [SHOT] {'image ready' if ok else 'IMAGE FAILED - fallback'} "
+                  f"(char={char_name})")
             # Freshly generated b-roll goes INTO the cache for next time
-            if path and shot.get("character", "NONE") == "NONE":
-                shot["image_path"] = _cache_broll_asset(path, shot.get("scene", ""))
+            if ok and char_name == "NONE":
+                shot["image_path"] = _cache_broll_asset(out_path, shot.get("scene", ""))
             time.sleep(1)
         _save("images")
     else:
@@ -4007,6 +5340,12 @@ def main():
         episode_num = default_ep
     print(f"\n  Episode #{episode_num:03d}")
 
+    # Reusable episode template: load the last episode's winning formula
+    tpl = _load_episode_template()
+    if tpl:
+        print(f"  [TEMPLATE] reuse ep{tpl.get('episode')} formula: "
+              f"{tpl.get('topic', '')[:70]}")
+
     # 1. Find a story
     article_url, article_title = _pick_story()
     if not article_url:
@@ -4042,32 +5381,81 @@ def main():
     anchor_events = _extract_anchor_events(narration)
 
     # 3e. START TTS IN PARALLEL: queue ALL narration into PocketTTS in a
-    # background thread, while the main thread builds shots, character sheets
+    # background thread, while the main thread builds the bible, scene board
     # and images. TTS and image gen run at the same time.
     tts_thread, tts_results, tts_stop = _start_tts_worker(narration, episode_num)
 
-    # 4. Stage 2: shot list from narration (chapter paras become black cards)
-    shots = _build_shot_list(narration)
+    # 3f. Episode world (works for ANY topic/environment/location)
+    context = _build_episode_context(article_title, paragraphs)
+
+    # 3g. Director's bible: deeper problem, transformation, chapter moods,
+    #     hero paragraphs (ECU magnification) - the plan before any image.
+    bible = _build_directors_bible(article_title, narration)
+
+    # 3h. Scene board: one storyboard card per narration beat, saved to the
+    #     episode folder for review before image generation.
+    _build_scene_board(narration, article_title, episode_num)
+
+    # 3i. Duration planning: per-chapter runtime estimates vs target length.
+    _plan_durations(narration)
+
+    # 3j. Style test frame (Krea 2 Turbo local) + human review gate.
+    style_test = str(SHOTS_DIR / f"ep{episode_num:03d}" / "style_test.png")
+    st_env = ", ".join(context.get("environments", [])) or "the primary setting"
+    print("\n[STYLE] generating style test frame (Krea 2 Turbo local)...")
+    _krea_generate(
+        f"{RENDER_STYLE}. A moody establishing frame of the episode's main "
+        f"environment: {st_env}. 16:9 widescreen cinematic documentary frame",
+        4242 + episode_num, style_test)
+    if os.path.isfile(style_test):
+        print(f"  [STYLE] test frame: {style_test}")
+        if not _gate("Approve style + director's bible? (n = rebuild bible)"):
+            print("  [BIBLE] rebuilding with a fresh perspective...")
+            bible = _build_directors_bible(article_title, narration)
+    else:
+        print("  [STYLE] test frame failed (ComfyUI not running?) - continuing")
+
+    # 4. Stage 2: shot list from narration (bible + episode world injected;
+    #    chapter paras become black cards)
+    shots = _build_shot_list(narration, bible=bible, context=context)
 
     # 4b. Stage 2b: character sheets for every named character
     character_sheets = _build_character_sheets(shots, narration)
+    # 4c. Stage 2c: stylized location sheets (6-grid per location) + prop
+    #     assets (front/back each) from the episode world - the STYLE chain:
+    #     style plate styles these ASSETS, shots then use ONLY the styled
+    #     assets as refs (no style plate in the shot).
+    location_sheets = _build_location_sheets(
+        context, 42000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}")
+    prop_assets = _build_prop_assets(
+        context, 43000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}")
     _save_resume_state("story", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
-                       anchor_events=anchor_events)
+                       anchor_events=anchor_events,
+                       location_sheets=location_sheets, prop_assets=prop_assets)
 
-    # 5. Generate images (character sheet prepended, angle-matched view) -
-    #    runs while the TTS worker keeps generating in the background.
-    shots = _generate_all_shots(shots, character_sheets, episode_num=episode_num)
+    # 5. Generate images (Krea 2 Turbo local, character sheet prepended,
+    #    angle-matched view, face-lock portraits) - runs while the TTS worker
+    #    keeps generating in the background.
+    shots = _generate_all_shots(shots, character_sheets, episode_num=episode_num,
+                                context=context,
+                                location_sheets=location_sheets,
+                                prop_assets=prop_assets)
     _save_resume_state("images", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
-                       anchor_events=anchor_events)
+                       anchor_events=anchor_events,
+                       location_sheets=location_sheets, prop_assets=prop_assets)
+    # Reusable episode template: this episode's winning formula for next time
+    _save_episode_template(article_title, episode_num, bible, context,
+                           roster_ids=list(character_sheets.keys())[:8])
 
     # 6. Join the TTS worker: all narration clips should be ready now
     tts_thread.join(timeout=1800)
     _finalize_tts(shots, tts_results, episode_num)
     _save_resume_state("tts", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
-                       anchor_events=anchor_events)
+                       anchor_events=anchor_events,
+                       location_sheets=location_sheets, prop_assets=prop_assets)
 
     # 6b. Title pass: whisper the voice track, resolve exact title times so
     #     the typewriter/glitch/shutter SFX + title cards match the narration.
@@ -4087,7 +5475,8 @@ def main():
             print(f"    [{ev['kind']}] @{ev['start']:.2f}s '{ev.get('text', ev.get('title', ''))}'")
         _save_resume_state("titles", episode_num, article_url, topic, shots,
                            character_sheets, chapter_events=chapter_events,
-                           anchor_events=anchor_events)
+                           anchor_events=anchor_events,
+                           location_sheets=location_sheets, prop_assets=prop_assets)
 
     # 7. Render 1080p with full audio mix (voice+music+SFX+title SFX), black
     #    chapter placeholders, shutter black frames, then burn the titles.
@@ -4099,7 +5488,8 @@ def main():
     _save_resume_state("video", episode_num, article_url, topic, shots,
                        character_sheets, titles=[], description="",
                        tags=[], video_path=video_path,
-                       chapter_events=chapter_events, anchor_events=anchor_events)
+                       chapter_events=chapter_events, anchor_events=anchor_events,
+                       location_sheets=location_sheets, prop_assets=prop_assets)
 
     # 8. Titles + description (3 titles scored by Google Trends + YouTube
     #    competition, best first)
@@ -4114,7 +5504,8 @@ def main():
     _save_resume_state("metadata", episode_num, article_url, topic, shots,
                        character_sheets, titles=titles, description=description,
                        tags=all_tags, video_path=video_path,
-                       chapter_events=chapter_events, anchor_events=anchor_events)
+                       chapter_events=chapter_events, anchor_events=anchor_events,
+                       location_sheets=location_sheets, prop_assets=prop_assets)
 
     # 9. Thumbnail
     thumb_path = str(THUMBNAILS_DIR / f"ep{episode_num:03d}_thumb.png")
@@ -4122,7 +5513,8 @@ def main():
     _save_resume_state("thumbnail", episode_num, article_url, topic, shots,
                        character_sheets, titles=titles, description=description,
                        tags=all_tags, thumb_path=thumb_path, video_path=video_path,
-                       chapter_events=chapter_events, anchor_events=anchor_events)
+                       chapter_events=chapter_events, anchor_events=anchor_events,
+                       location_sheets=location_sheets, prop_assets=prop_assets)
 
     # 10. Upload to Split Node channel
     if YOUTUBE_UPLOAD_ENABLED:

@@ -49,11 +49,16 @@ def load_model(model_path: str):
     import torch
     from spandrel import ModelLoader
     print(f"[UPSCALE] Model {os.path.basename(model_path)} ...")
-    sd = torch.load(model_path, map_location="cpu", weights_only=False)
-    if "params-ema" in sd:
-        sd = sd["params-ema"]
-    if "params" in sd and isinstance(sd["params"], dict):
-        sd = sd["params"]
+    if model_path.lower().endswith(".safetensors"):
+        # safetensors format (e.g. 4xFaceUpDAT.safetensors) - not a pickle
+        from safetensors.torch import load_file
+        sd = load_file(model_path)
+    else:
+        sd = torch.load(model_path, map_location="cpu", weights_only=False)
+        if "params-ema" in sd:
+            sd = sd["params-ema"]
+        if "params" in sd and isinstance(sd["params"], dict):
+            sd = sd["params"]
     model = ModelLoader().load_from_state_dict(sd).eval()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device)

@@ -8,16 +8,13 @@ Generates an .ass subtitle file with three kinds of animated titles:
 2. LOCATION TITLES — bottom-left, RED glow, per-character typewriter reveal
                      (0.7s), 4s hold, then a 0.5s glitch-off (staggered char
                      exits + RGB-split ghost copies + flicker).
-3. TIMELINE TITLES — bottom-left, GREEN glow, identical typewriter/glitch
-                     behaviour. Only shown at the exact moment the date is
-                     read (whisper-matched times).
-4. PERSON TITLES    — bottom-left, GOLD glow, identical typewriter/glitch
+3. PERSON TITLES    — bottom-left, GOLD glow, identical typewriter/glitch
                      behaviour. Fires the first time a character's name is
                      spoken, scoped to their first on-screen shot.
 
 Timing contract (per event, absolute seconds in the final video):
     chapter : start = when "chapter N" is spoken, end = black clip end
-    loc/time: start = when the anchor phrase is spoken
+    loc/person: start = when the anchor phrase is spoken
               typewriter  start .. start+0.7
               hold        start+0.7 .. start+4.7
               glitch-off  start+4.7 .. start+5.2
@@ -31,6 +28,7 @@ import os
 import random
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 try:
     from PIL import ImageFont
@@ -58,11 +56,10 @@ YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: ChapCore,Arial Black,{chap_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,2,0,1,3,0,5,60,60,60,1
-Style: ChapGlow,Arial Black,{chap_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,2,0,1,0,0,5,60,60,60,1
-Style: ChapKicker,Arial Black,{kicker_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,8,0,1,2,0,5,60,60,60,1
+Style: ChapCore,Bahnschrift,{chap_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,2,0,1,3,0,5,60,60,60,1
+Style: ChapGlow,Bahnschrift,{chap_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,2,0,1,0,0,5,60,60,60,1
+Style: ChapKicker,Bahnschrift,{kicker_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,8,0,1,2,0,5,60,60,60,1
 Style: TypeLoc,Consolas,{type_size},&H000000FF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
-Style: TypeTime,Consolas,{type_size},&H0000FF00,&H0000FF00,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
 Style: TypePerson,Consolas,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
 Style: TypeGhost,Consolas,{type_size},&H0000FF00,&H0000FF00,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
 Style: TypePersonGhost,Consolas,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
@@ -93,6 +90,7 @@ def _font_path(name: str) -> str:
     table = {
         "Consolas": "consola.ttf",
         "Arial Black": "ariblk.ttf",
+        "Bahnschrift": "bahnschrift.ttf",
         "Impact": "impact.ttf",
         "Arial": "arial.ttf",
     }
@@ -126,22 +124,35 @@ def _text_width(fontname: str, size: int, text: str) -> float:
 # ---------------------------------------------------------------------------
 
 def _chapter_events(ev, W, H, fps) -> list[str]:
-    """ev: {kind:'chapter', chapter_num, title, start, end, text}"""
-    cx, cy = W // 2, int(H * 0.46)
+    """ev: {kind:'chapter', chapter_num, title, start, end, text}
+
+    Renders BOTH the "CHAPTER N" kicker (0.30H, 20% ABOVE center) and the
+    title text (0.70H, 20% BELOW center) as ASS dialogs - no pre-rendered
+    clips, everything is one ASS burn pass. Both get the glow-pop treatment.
+    """
     dur = max(ev["end"] - ev["start"], 0.5)
     pop = min(0.5, dur * 0.5)
     lines = []
 
-    kicker = f"CHAPTER {ev['chapter_num']:02d}"
     title = ev["title"]
 
-    # Kicker line (small, spaced, fades in above)
-    k_y = cy - 90
-    lines.append(_dialog(
-        ev["start"], ev["end"], "ChapKicker",
-        f"{{\\an5\\pos({cx},{k_y})\\alpha&HFF&\\t(0,{int(pop*1000)},\\alpha&H00&)}}{kicker}",
-        layer=2))
+    # ---- KICKER "CHAPTER N" at 0.30H (big, Bahnschrift, glow-pop) ----
+    kcx, kcy = W // 2, int(H * 0.30)
+    kicker = f"CHAPTER {int(ev.get('chapter_num', 1)):02d}"
+    kfs = int(H * 0.11)  # ~120px @1080, matching the old pre-rendered clips
+    kglow = (f"{{\\an5\\pos({kcx},{kcy})\\fs{kfs}\\blur(14)\\bord(2)\\1c&H0000D7FF&\\alpha&H70&"
+             f"\\fscx(60)\\fscy(60)\\t(0,{int(pop*1000)},\\fscx(100)\\fscy(100)\\alpha&H55&)"
+             f"\\t({int(pop*1000)},{int(pop*1000)+700},\\bord(12)\\alpha&H40&)"
+             f"\\t({int(pop*1000)+700},{int(pop*1000)+1500},\\bord(3)\\alpha&H60&)}}{kicker}")
+    lines.append(_dialog(ev["start"], ev["end"], "ChapKicker", kglow, layer=1))
+    kcore = (f"{{\\an5\\pos({kcx},{kcy})\\fs{kfs}\\1c&HFFFFFF&\\bord(3)\\3c&H000000&\\shad(0)"
+             f"\\fscx(50)\\fscy(50)\\alpha&HFF&"
+             f"\\t(0,{int(pop*1000)},\\fscx(110)\\fscy(110)\\alpha&H00&)"
+             f"\\t({int(pop*1000)},{int(pop*1000)+350},\\fscx(100)\\fscy(100))}}{kicker}")
+    lines.append(_dialog(ev["start"], ev["end"], "ChapKicker", kcore, layer=3))
 
+    # ---- TITLE TEXT at 0.70H ----
+    cx, cy = W // 2, int(H * 0.70)
     # Glow layer (soft bloom, pulses)
     glow = (f"{{\\an5\\pos({cx},{cy})\\blur(16)\\bord(2)\\1c&H0000D7FF&\\alpha&H70&"
             f"\\fscx(60)\\fscy(60)\\t(0,{int(pop*1000)},\\fscx(100)\\fscy(100)\\alpha&H55&)"
@@ -159,20 +170,20 @@ def _chapter_events(ev, W, H, fps) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Typewriter location / timeline titles
+# Typewriter location / person titles
 # ---------------------------------------------------------------------------
 
 def _typewriter_events(ev, W, H, fps) -> list[str]:
-    """ev: {kind:'location'|'timeline'|'person', text, start, end, display_text}"""
-    style = {"location": "TypeLoc", "timeline": "TypeTime",
-             "person": "TypePerson"}.get(ev["kind"], "TypeTime")
+    """ev: {kind:'location'|'person', text, start, end, display_text}"""
+    style = {"location": "TypeLoc",
+             "person": "TypePerson"}.get(ev["kind"], "TypeLoc")
     ghost_style = "TypePersonGhost" if ev["kind"] == "person" else "TypeGhost"
     fontsize = 56
     char_w = _char_width("Consolas", fontsize)
     margin = 48
-    # Row layout (bottom-left): timeline/person sit on the baseline; a location
+    # Row layout (bottom-left): person titles sit on the baseline; a location
     # (red) fires stacked ABOVE it. A person title that collides with a
-    # timeline moves up one row (then up two if a location is also there).
+    # location moves up one row (then up two if needed).
     base_y = H - 110
     if ev["kind"] == "location":
         base_y -= 74
@@ -243,8 +254,8 @@ def build_title_ass(events: list[dict], out_path: str,
     events: [{kind, start, end?, text, title?, chapter_num?}]
     - chapter: text = full "Chapter N - Title" read by TTS; title + chapter_num
       used for the card.
-    - location/timeline/person: text = display string (already shortened).
-      location = red, timeline = green, person = gold; all bottom-left.
+    - location/person: text = display string (already shortened).
+      location = red, person = gold; all bottom-left.
     """
     chap_size = int(video_h * 0.075)      # ~81px @1080
     kicker_size = int(video_h * 0.037)    # ~40px
@@ -253,15 +264,15 @@ def build_title_ass(events: list[dict], out_path: str,
     body = HEADER.format(W=video_w, H=video_h, chap_size=chap_size,
                          kicker_size=kicker_size, type_size=type_size)
     # Compute row stacking for person titles: how many OTHER typewriter events
-    # (location/timeline/person) fire within 2s - the person card moves up a
+    # (location/person) fire within 2s - the person card moves up a
     # row per collision so cards never overlap on the bottom-left.
     tw_evs = [ev for ev in events
-              if ev.get("kind") in ("location", "timeline", "person")]
+              if ev.get("kind") in ("location", "person")]
     for ev in tw_evs:
         if ev.get("kind") == "person":
             ev["_stack_up"] = sum(
                 1 for o in tw_evs
-                if o is not ev and o.get("kind") in ("location", "timeline")
+                if o is not ev and o.get("kind") in ("location",)
                 and abs(o.get("start", 0) - ev.get("start", 0)) < 2.0)
     parts = []
     for ev in events:
@@ -269,7 +280,7 @@ def build_title_ass(events: list[dict], out_path: str,
         try:
             if kind == "chapter":
                 parts.extend(_chapter_events(ev, video_w, video_h, fps))
-            elif kind in ("location", "timeline", "person"):
+            elif kind in ("location", "person"):
                 parts.extend(_typewriter_events(ev, video_w, video_h, fps))
         except Exception as e:
             print(f"  [TITLES] skip event {kind}: {e}")
@@ -293,6 +304,10 @@ def _probe_duration(path: str) -> float:
 def burn_titles(video_path: str, ass_path: str, out_path: str,
                 timeout: int = 2400) -> bool:
     """Re-encode video with the title .ass burned in (NVENC, faststart).
+
+    Everything (chapter kicker + title, typewriter loc/person cards) is
+    rendered inside the ASS - no pre-rendered chapter clips. The kicker
+    and title text are both ASS dialogs (see _chapter_events).
 
     Streams ffmpeg -progress to a live bar (tqdm when available, otherwise
     plain ASCII) so a 15-25 min burn shows % + ETA instead of dead air.

@@ -29,3 +29,6 @@ test_output/
 
 # Trend toolkit cache
 trend_scan_cache.json
+
+# Real-person likeness photos (privacy/copyright - never commit)
+cast_refs/real/
