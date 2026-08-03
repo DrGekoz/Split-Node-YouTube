@@ -32,3 +32,7 @@ trend_scan_cache.json
 
 # Real-person likeness photos (privacy/copyright - never commit)
 cast_refs/real/
+
+# Brand logos + generated brand assets (cached, re-downloaded on demand)
+cast_refs/logos/
+image-assets/

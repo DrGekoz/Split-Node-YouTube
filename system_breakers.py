@@ -2784,6 +2784,308 @@ def _find_prop_reference(prop: str) -> Optional[str]:
     return None
 
 
+# -- Brand / AI-company logos ------------------------------------------------
+# Curated registry for AI companies & models: display name -> (aliases, logo
+# search query). OTHER real businesses are detected at runtime from the
+# article via LLM extraction (_extract_brands). Every logo caches to
+# cast_refs/logos/ and is reused across episodes. Context decides the render:
+#   - entity/product talk      -> hacker-style computer screen (prop sheet + logo)
+#   - HQ / physical location   -> logo on a building (location sheet + logo)
+#   - location sheet IS a business building -> logo joins the sheet's refs
+BRAND_MANIFEST = PROJECT_DIR / "cast_refs" / "logos" / "brands.json"
+BRAND_LOGO_DIR = PROJECT_DIR / "cast_refs" / "logos"
+BRAND_SCREEN_DIR = PROJECT_DIR / "image-assets" / "brand_screens"
+BRAND_BUILDING_DIR = PROJECT_DIR / "image-assets" / "brand_buildings"
+HQ_WORDS = ("headquarters", "hq", "head office", "offices", "office",
+            "campus", "building", "plant", "factory", "warehouse", "store",
+            "branch", "facility", "laboratory", "lab", "studio", "showroom",
+            "floor", "lobby")
+
+AI_ORGS: dict[str, tuple[list[str], str]] = {
+    "OpenAI":       (["openai", "chatgpt", "gpt-4", "gpt-4o", "gpt-5", "gpt-5o",
+                      "gpt4", "gpt5", "sora", "dall-e", "dalle"], "OpenAI logo"),
+    "Google":       (["google ai", "gemini", "deepmind", "google deepmind",
+                      "bard"], "Google AI logo"),
+    "Anthropic":    (["anthropic", "claude"], "Anthropic logo"),
+    "Meta":         (["meta ai", "llama 3", "llama 4", "llama3", "llama4",
+                      "llama"], "Meta AI logo"),
+    "Microsoft":    (["microsoft", "copilot", "azure ai", "microsoft ai"],
+                     "Microsoft AI logo"),
+    "xAI":          (["xai", "x ai", "grok"], "xAI logo"),
+    "Mistral":      (["mistral"], "Mistral AI logo"),
+    "DeepSeek":     (["deepseek"], "DeepSeek logo"),
+    "Stability AI": (["stability ai", "stable diffusion"], "Stability AI logo"),
+    "Midjourney":   (["midjourney"], "Midjourney logo"),
+    "Runway":       (["runway", "runwayml", "runway ai"], "Runway AI logo"),
+    "Hugging Face": (["hugging face", "huggingface"], "Hugging Face logo"),
+    "ElevenLabs":   (["elevenlabs", "eleven labs"], "ElevenLabs logo"),
+    "Perplexity":   (["perplexity"], "Perplexity logo"),
+    "Apple":        (["apple intelligence", "apple ai", "siri"],
+                     "Apple Intelligence logo"),
+    "Amazon":       (["amazon q", "amazon ai", "alexa"], "Amazon AI logo"),
+    "NVIDIA":       (["nvidia", "cuda"], "NVIDIA logo"),
+    "Adobe":        (["adobe firefly", "firefly ai"], "Adobe Firefly logo"),
+}
+
+# Runtime registry of ALL known brand display names (AI orgs + LLM-extracted
+# businesses this run). Persisted to BRAND_MANIFEST so resume/re-runs can
+# rebuild the asset cache without re-extracting.
+_KNOWN_BRANDS: set[str] = set(AI_ORGS.keys())
+
+
+def _brand_safe(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", name.lower()).strip("_") or "brand"
+
+
+def _load_brand_manifest() -> dict[str, str]:
+    """name -> context ('screen'|'building') persisted from prior runs."""
+    if BRAND_MANIFEST.is_file():
+        try:
+            data = json.loads(BRAND_MANIFEST.read_text(encoding="utf-8"))
+            out = dict(data.get("brands", {}))
+            _KNOWN_BRANDS.update(out)
+            return out
+        except Exception:
+            pass
+    return {}
+
+
+def _save_brand_manifest(brands: dict[str, str]) -> None:
+    try:
+        BRAND_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
+        BRAND_MANIFEST.write_text(
+            json.dumps({"brands": brands}, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _detect_ai_orgs(*texts: str) -> list[str]:
+    """Curated alias scan: AI companies/models mentioned across texts."""
+    blob = " ".join(t for t in texts if t).lower()
+    found: list[str] = []
+    for org, (aliases, _q) in AI_ORGS.items():
+        for a in aliases:
+            if re.search(rf"\b{re.escape(a)}\b", blob):
+                found.append(org)
+                break
+    return found
+
+
+BRAND_EXTRACT_PROMPT = (
+    "You extract real-world businesses from a documentary article.\n"
+    "Rules:\n"
+    "1. List ONLY real companies/brands mentioned (e.g. OpenAI, Tesla, Nike, "
+    "Google). Skip generic nouns ('the company', 'the bank'), people, places, "
+    "governments, fictional entities and generic product names.\n"
+    "2. For each business choose ONE context type:\n"
+    "   - 'screen'   if the story is about the company, its product or its "
+    "technology itself\n"
+    "   - 'building' if the story involves its headquarters, offices, campus, "
+    "factory, stores, warehouse or any physical location of that business\n"
+    "3. Output ONLY one line per business, exactly:\n"
+    "   NAME|screen\n"
+    "   or\n"
+    "   NAME|building\n"
+    "4. If no real businesses are mentioned, output exactly: NONE\n"
+    "No other text, no numbering, no explanations."
+)
+
+
+def _extract_brands(article_title: str, paragraphs: list[str],
+                    narration: list[str]) -> dict[str, str]:
+    """All brands in this article: curated AI aliases + LLM business
+    extraction. Returns {display name: 'screen'|'building'}."""
+    out: dict[str, str] = {}
+    # 1. Curated AI orgs (works even with no LLM available)
+    for org in _detect_ai_orgs(article_title, *paragraphs, *narration):
+        ctx = _brand_context(org, [article_title, *paragraphs, *narration])
+        out[org] = ctx
+    # 2. LLM extraction for any other real businesses
+    try:
+        excerpt = "\n\n".join([article_title or "", *paragraphs])[:6000]
+        text = _llm_chat([
+            {"role": "system", "content": BRAND_EXTRACT_PROMPT},
+            {"role": "user", "content": f"ARTICLE:\n{excerpt}"},
+        ], max_tokens=800, temp=0.2)
+        for line in text.splitlines():
+            m = re.match(r"^\s*([^|]{1,80})\|(screen|building)\s*$", line)
+            if m:
+                nm = m.group(1).strip().strip('"\'')
+                if nm and nm.lower() != "none" and len(nm) > 1:
+                    out.setdefault(nm, m.group(2))
+    except Exception as e:
+        print(f"  [BRAND] LLM extraction failed ({str(e)[:60]}) - curated AI only")
+    if out:
+        _KNOWN_BRANDS.update(out)
+        _save_brand_manifest(out)
+    return out
+
+
+def _brand_context(name: str, texts: list[str]) -> str:
+    """'building' if the text talks about the brand's HQ/physical location,
+    else 'screen'."""
+    low_name = name.lower()
+    for t in texts:
+        low = (t or "").lower()
+        if low_name in low and any(w in low for w in HQ_WORDS):
+            return "building"
+    return "screen"
+
+
+def _find_logo(brand: str) -> Optional[str]:
+    """Official-ish logo for a brand, cached to cast_refs/logos/. Cache-first;
+    SerpAPI (Openverse fallback) only on a miss."""
+    safe = _brand_safe(brand)
+    out = BRAND_LOGO_DIR / f"{safe}.png"
+    if out.is_file():
+        return str(out)
+    query = AI_ORGS.get(brand, ([""], f"{brand} logo"))[1]
+    urls = _google_images_candidates(query, "logo")
+    if not urls:
+        urls = _openverse_candidates(query, "logo")
+    for u in urls:
+        if not u:
+            continue
+        for attempt in (1, 2):
+            try:
+                req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=25) as r:
+                    blob = r.read()
+                if len(blob) < 5000:
+                    break
+                BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(blob)
+                print(f"  [LOGO] {brand} cached <- {u[:70]}")
+                return str(out)
+            except Exception as e:
+                if attempt == 2:
+                    print(f"  [LOGO] download failed {u[:50]} ({str(e)[:50]})")
+    return None
+
+
+def _logo_for_prop(prop: str, brands: Optional[dict] = None) -> Optional[str]:
+    """If a prop/scene names a known brand (AI alias or extracted business),
+    return its cached logo."""
+    low = (prop or "").lower()
+    for org, (aliases, _q) in AI_ORGS.items():
+        for a in aliases:
+            if re.search(rf"\b{re.escape(a)}\b", low):
+                return _find_logo(org)
+    for name in (brands or {}):
+        if name.lower() in low:
+            return _find_logo(name)
+    return None
+
+
+def _generate_brand_asset(brand: str, kind: str, seed: int) -> Optional[str]:
+    """Stylized brand asset, cached per (brand, kind):
+      kind='screen'   -> hacker computer screen with the real logo,
+                         refs = [prop style sheet, logo]
+      kind='building' -> the logo on a building, refs = [location style sheet, logo]
+    """
+    safe = _brand_safe(brand)
+    out_dir = BRAND_SCREEN_DIR if kind == "screen" else BRAND_BUILDING_DIR
+    out = out_dir / f"{safe}.png"
+    if out.is_file():
+        print(f"  [BRAND] reuse {os.path.basename(out)}")
+        return str(out)
+    logo = _find_logo(brand)
+    if not logo:
+        print(f"  [BRAND] no logo for '{brand}' - skipping {kind} asset")
+        return None
+    if kind == "building" and not os.path.isfile(str(LOCATION_STYLE_REF)):
+        print(f"  [BRAND] no location style sheet - skipping building asset")
+        return None
+    if kind == "screen" and not os.path.isfile(str(PROP_STYLE_REF)):
+        print(f"  [BRAND] no prop style sheet - skipping screen asset")
+        return None
+    style_ref = str(PROP_STYLE_REF) if kind == "screen" else str(LOCATION_STYLE_REF)
+    if kind == "screen":
+        prompt = (
+            f"A dark hacker command-center computer screen: a large monitor in a "
+            f"dark room, glowing green terminal code, scrolling data streams, and "
+            f"the official {brand} logo displayed LARGE and centered on the main "
+            f"screen, unmistakable, shape and colors exactly matching the reference "
+            f"logo image. Use ONLY the painting and render style from the reference "
+            f"artwork - bold animated style, strong stylized brushwork, painterly "
+            f"shading, saturated colors, dramatic lighting. The reference images "
+            f"show DIFFERENT scenes/objects - this panel is the {brand} hacker "
+            f"screen and NOTHING else. STRICTLY NO people, no humans, no faces, "
+            f"no characters, no figures, no silhouettes, no body parts, no hands, "
+            f"no persons of any kind anywhere in frame."
+        )
+    else:
+        prompt = (
+            f"A dramatic night shot of a modern corporate building with the "
+            f"official {brand} logo displayed prominently: large glowing sign on "
+            f"the facade, logo on the entrance and reception, brand colors exactly "
+            f"matching the reference logo image. Use ONLY the painting and render "
+            f"style from the reference artwork - bold animated style, strong "
+            f"stylized brushwork, painterly shading, saturated colors, dramatic "
+            f"rim lighting, dark moody atmosphere. The reference images show "
+            f"DIFFERENT scenes - this panel is the {brand} building and NOTHING "
+            f"else. STRICTLY NO people, no humans, no faces, no characters, no "
+            f"figures, no silhouettes, no body parts, no hands, no persons of any "
+            f"kind anywhere in frame."
+        )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  [BRAND] {brand} {kind} asset (refs: {style_ref.split(chr(92))[-1]}, "
+          f"{os.path.basename(logo)})...")
+    ok = _krea_generate(prompt, seed, str(out),
+                        ref_images=[style_ref, logo], denoise=1.0,
+                        upscale=False, steps=10,
+                        width=1280, height=720,
+                        ref_mode="identity", ref_boost=2.0,
+                        grounding_px=768)
+    return str(out) if ok else None
+
+
+def _scan_brand_assets() -> dict[str, dict[str, str]]:
+    """Rebuild {brand: {'screen': path, 'building': path}} from the on-disk
+    caches + brand manifest (covers resume runs)."""
+    _load_brand_manifest()
+    out: dict[str, dict[str, str]] = {}
+    for d, kind in ((BRAND_SCREEN_DIR, "screen"),
+                    (BRAND_BUILDING_DIR, "building")):
+        if d.is_dir():
+            for f in sorted(d.glob("*.png")):
+                for name in _KNOWN_BRANDS:
+                    if _brand_safe(name) == f.stem:
+                        out.setdefault(name, {})[kind] = str(f)
+                        break
+    return out
+
+
+def _match_brand_asset(scene: str, brand_assets: dict) -> Optional[str]:
+    """Pick the right brand asset for a shot: scene mentions a brand -> HQ-ish
+    scene text gets the building asset, otherwise the hacker screen."""
+    if not scene or not brand_assets:
+        return None
+    low = scene.lower()
+    for name, assets in brand_assets.items():
+        if name.lower() not in low:
+            continue
+        if any(w in low for w in HQ_WORDS):
+            if assets.get("building"):
+                return assets["building"]
+        if assets.get("screen"):
+            return assets["screen"]
+        if assets.get("building"):
+            return assets["building"]
+    return None
+
+
+def _brand_logo_for(location: str, brands: dict) -> Optional[str]:
+    """Logo ref when a location IS a business building (e.g. 'OpenAI
+    headquarters', 'Tesla factory floor') - gets baked into that location
+    sheet's panels so the logo appears inside the building."""
+    low = location.lower()
+    for name in (brands or {}):
+        if name.lower() in low:
+            return _find_logo(name)
+    return None
+
+
 LOCATION_VIEWS = [
     ("establishing",
      "A wide establishing shot of THIS EXACT LOCATION, entire setting visible. "
@@ -2844,10 +3146,13 @@ LOCATION_VIEWS = [
 ]
 
 
-def _generate_location_sheet(location: str, seed: int, out_dir: Path) -> Optional[str]:
+def _generate_location_sheet(location: str, seed: int, out_dir: Path,
+                             logo_ref: Optional[str] = None) -> Optional[str]:
     """6-panel stylized location sheet (3x2 grid, 1920x1080). Refs = the
     style plate ONLY (an asset, not a shot). Panels render at 640x540 and are
-    composed exactly like the character sheet. Cached per location name."""
+    composed exactly like the character sheet. Cached per location name.
+    When the location IS a business building, its logo joins the refs so the
+    logo appears inside the generated location (signage, lobby, facade)."""
     safe = re.sub(r"[^A-Za-z0-9]+", "_", location.lower()).strip("_") or "loc"
     out = out_dir / f"{safe}_sheet.png"
     if out.is_file():
@@ -2859,6 +3164,11 @@ def _generate_location_sheet(location: str, seed: int, out_dir: Path) -> Optiona
     if not have_style:
         print(f"  [LOCATION] no style plate - skipping sheet for '{location}'")
         return None
+    refs = [style_ref]
+    if logo_ref and os.path.isfile(logo_ref):
+        refs.append(logo_ref)
+        print(f"  [LOCATION] '{location}' -> business logo ref baked in: "
+              f"{os.path.basename(logo_ref)}")
     panels: dict[str, str] = {}
     for view, prompt_txt in LOCATION_VIEWS:
         pan = out_dir / f"{safe}_{view}.png"
@@ -2871,10 +3181,10 @@ def _generate_location_sheet(location: str, seed: int, out_dir: Path) -> Optiona
         # scenes - boost 4.0 / grounding 1024 made faces/objects bleed into
         # the location panels (verified 2026-08-04, user report). The hard
         # NO-people/faces negation in the prompt reinforces it.
-        print(f"  [LOCATION] '{location}' panel {view} (identity, refs=1, "
-              f"boost=2.0, grounding=768)...")
+        print(f"  [LOCATION] '{location}' panel {view} (identity, refs="
+              f"{len(refs)}, boost=2.0, grounding=768)...")
         ok = _krea_generate(p, seed + 111 * len(view), str(pan),
-                            ref_images=[style_ref], denoise=1.0, upscale=False,
+                            ref_images=refs, denoise=1.0, upscale=False,
                             steps=10, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
                             ref_mode="identity", ref_boost=2.0,
                             grounding_px=768)
@@ -2908,10 +3218,12 @@ def _generate_location_sheet(location: str, seed: int, out_dir: Path) -> Optiona
         return None
 
 
-def _generate_prop_asset(prop: str, seed: int, out_dir: Path) -> Optional[str]:
+def _generate_prop_asset(prop: str, seed: int, out_dir: Path,
+                         brands: Optional[dict] = None) -> Optional[str]:
     """Stylized prop asset: front + back panels composed into one 1280x540
     sheet. refs = [style_plate] for T2I props, [style_plate, real_photo] for
-    SPECIFIC props (SerpAPI real image). Cached per prop name."""
+    SPECIFIC props (SerpAPI real image). Props naming a known brand use the
+    brand's cached logo as the real photo. Cached per prop name."""
     safe = re.sub(r"[^A-Za-z0-9]+", "_", prop.lower()).strip("_") or "prop"
     out = out_dir / f"{safe}_prop.png"
     if out.is_file():
@@ -2926,7 +3238,13 @@ def _generate_prop_asset(prop: str, seed: int, out_dir: Path) -> Optional[str]:
         refs.append(style_ref)
     real_photo = None
     if use_real:
-        real_photo = _find_prop_reference(prop)
+        logo = _logo_for_prop(prop, brands)
+        if logo:
+            real_photo = logo
+            print(f"  [PROP] '{prop}' matched brand logo "
+                  f"({os.path.basename(logo)})")
+        else:
+            real_photo = _find_prop_reference(prop)
         if real_photo:
             refs.append(real_photo)
         else:
@@ -3051,8 +3369,11 @@ def _match_prop_asset(scene: str, prop_assets: dict) -> Optional[str]:
     return best if best_score >= 1 else None
 
 
-def _build_location_sheets(context: dict, seed: int, ep_dir: Path) -> dict:
-    """Location sheets for every unique place/environment in the episode world."""
+def _build_location_sheets(context: dict, seed: int, ep_dir: Path,
+                           brands: Optional[dict] = None) -> dict:
+    """Location sheets for every unique place/environment in the episode world.
+    A location that IS a business building (e.g. 'OpenAI headquarters') gets
+    that business's logo baked into its sheet as an extra ref."""
     if os.environ.get("LOCATION_SHEETS", "1") == "0":
         return {}
     names: list[str] = []
@@ -3068,14 +3389,19 @@ def _build_location_sheets(context: dict, seed: int, ep_dir: Path) -> dict:
     sheets = {}
     print(f"\n[ASSETS] {len(names)} locations -> stylized sheets...")
     for i, loc in enumerate(names[:6]):
-        path = _generate_location_sheet(loc, seed + i * 1000, out_dir)
+        logo_ref = _brand_logo_for(loc, brands)
+        path = _generate_location_sheet(loc, seed + i * 1000, out_dir,
+                                        logo_ref=logo_ref)
         if path:
             sheets[loc] = path
     return sheets
 
 
-def _build_prop_assets(context: dict, seed: int, ep_dir: Path) -> dict:
-    """Front+back prop assets for the episode's props (T2I or real ref)."""
+def _build_prop_assets(context: dict, seed: int, ep_dir: Path,
+                       brands: Optional[dict] = None) -> dict:
+    """Front+back prop assets for the episode's props (T2I or real ref).
+    Props that name a known brand (AI org or extracted business) use the
+    brand's cached logo as the real reference."""
     if os.environ.get("PROP_SHEETS", "1") == "0":
         return {}
     props = [str(v).strip() for v in (context.get("props", []) or []) if str(v).strip()]
@@ -3086,7 +3412,8 @@ def _build_prop_assets(context: dict, seed: int, ep_dir: Path) -> dict:
     assets = {}
     print(f"\n[ASSETS] {len(props)} props -> stylized front/back assets...")
     for i, prop in enumerate(props[:8]):
-        path = _generate_prop_asset(prop, seed + 500 + i * 1000, out_dir)
+        path = _generate_prop_asset(prop, seed + 500 + i * 1000, out_dir,
+                                    brands=brands)
         if path:
             assets[prop] = path
     return assets
@@ -3327,7 +3654,8 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                         episode_num: int = 0,
                         context: Optional[dict] = None,
                         location_sheets: Optional[dict] = None,
-                        prop_assets: Optional[dict] = None) -> list[dict]:
+                        prop_assets: Optional[dict] = None,
+                        brand_assets: Optional[dict] = None) -> list[dict]:
     """Generate ALL images locally with Krea 2 Turbo (ComfyUI) at 1280x720,
     then upscale to 1920x1080 with 4x-FaceUpDAT + style-card grade.
 
@@ -3343,6 +3671,10 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
     ep_dir = SHOTS_DIR / f"ep{episode_num:03d}" if episode_num else None
     black = _black_placeholder(episode_num) if episode_num else None
     face_lock = os.environ.get("FACE_LOCK", "1") != "0"
+    # Brand assets (hacker screens / logo-on-building) may be empty on resume
+    # runs - rebuild the lookup from the on-disk caches.
+    if not brand_assets:
+        brand_assets = _scan_brand_assets()
     sheets_dir = (ep_dir / CHAR_SHEETS_DIR_NAME) if ep_dir else None
     if sheets_dir:
         sheets_dir.mkdir(parents=True, exist_ok=True)
@@ -3429,6 +3761,12 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         prop_sheet = _match_prop_asset(shot.get("scene", ""), prop_assets)
         if prop_sheet and prop_sheet not in refs:
             refs.append(prop_sheet)
+            use_identity = True
+        # Brand asset: scene talks about a business/AI company -> the hacker
+        # screen (entity talk) or logo-on-building (HQ talk) joins the refs.
+        brand_asset = _match_brand_asset(shot.get("scene", ""), brand_assets)
+        if brand_asset and brand_asset not in refs:
+            refs.append(brand_asset)
             use_identity = True
         asset = _lookup_broll_asset(shot.get("scene", ""))
         if asset and asset not in refs:
@@ -5180,6 +5518,11 @@ def _resume_episode(state: dict) -> None:
             if prop_sheet and prop_sheet not in refs:
                 refs.append(prop_sheet)
                 use_identity = True
+            brand_asset = _match_brand_asset(shot.get("scene", ""),
+                                             _scan_brand_assets())
+            if brand_asset and brand_asset not in refs:
+                refs.append(brand_asset)
+                use_identity = True
             asset = _lookup_broll_asset(shot.get("scene", ""))
             if asset and asset not in refs:
                 refs.append(asset)
@@ -5315,6 +5658,17 @@ def _resume_episode(state: dict) -> None:
 
 
 def main():
+    if "--cache-logos" in sys.argv:
+        names = [a for a in sys.argv[1:] if not a.startswith("-")]
+        if not names:
+            print("Known AI orgs: " + ", ".join(AI_ORGS))
+            print("Usage: python system_breakers.py --cache-logos OpenAI Claude Tesla")
+            return
+        for n in names:
+            org = next((k for k in AI_ORGS if k.lower() == n.lower()), n)
+            p = _find_logo(org)
+            print(f"  {org}: {p or 'FAILED (no SERPAPI_API_KEY? see .env)'}")
+        return
     print_banner()
     _preflight()
 
@@ -5421,14 +5775,33 @@ def main():
 
     # 4b. Stage 2b: character sheets for every named character
     character_sheets = _build_character_sheets(shots, narration)
+    # 4c0. Brand logos: detect AI companies/models and real businesses in the
+    #      article, ensure their logos are cached (search -> cache -> reuse),
+    #      and render the context-appropriate asset: hacker computer screen
+    #      (entity/product talk, prop style sheet + logo) or logo on a
+    #      building (HQ talk, location style sheet + logo).
+    brands = _extract_brands(article_title, paragraphs, narration)
+    if brands:
+        print(f"\n  [BRAND] businesses detected: {', '.join(brands)}")
+        for _b, _ctx in brands.items():
+            _logo = _find_logo(_b)
+            if _logo:
+                print(f"  [BRAND] {_b} logo cached: {os.path.basename(_logo)}")
+            _generate_brand_asset(_b, _ctx, random.randint(0, 99999))
+    else:
+        print("\n  [BRAND] no businesses/AI models detected - no brand assets")
+    brand_assets = _scan_brand_assets()
+
     # 4c. Stage 2c: stylized location sheets (6-grid per location) + prop
     #     assets (front/back each) from the episode world - the STYLE chain:
     #     style plate styles these ASSETS, shots then use ONLY the styled
     #     assets as refs (no style plate in the shot).
     location_sheets = _build_location_sheets(
-        context, 42000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}")
+        context, 42000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}",
+        brands=brands)
     prop_assets = _build_prop_assets(
-        context, 43000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}")
+        context, 43000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}",
+        brands=brands)
     _save_resume_state("story", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
                        anchor_events=anchor_events,
@@ -5440,7 +5813,8 @@ def main():
     shots = _generate_all_shots(shots, character_sheets, episode_num=episode_num,
                                 context=context,
                                 location_sheets=location_sheets,
-                                prop_assets=prop_assets)
+                                prop_assets=prop_assets,
+                                brand_assets=brand_assets)
     _save_resume_state("images", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
                        anchor_events=anchor_events,

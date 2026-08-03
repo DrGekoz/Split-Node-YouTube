@@ -7,7 +7,7 @@ echo   ==============================================
 echo         SPLIT NODE
 echo     True stories of ordinary people who
 echo             beat the system.
-echo     3D mannequin documentary, AI generated.
+echo      AI documentary, fully automated.
 echo   ==============================================
 echo.
 
@@ -21,6 +21,16 @@ if %errorlevel% neq 0 (
     exit /b 1
 ) else (
     echo [OK] Python found
+)
+
+echo [CHECK] FFmpeg...
+ffmpeg -version >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [FAIL] FFmpeg not found! Add it to PATH.
+    pause
+    exit /b 1
+) else (
+    echo [OK] FFmpeg found
 )
 
 echo [CHECK] PocketTTS server (port 8769)...
@@ -41,6 +51,17 @@ if %errorlevel% neq 0 (
     pause
 ) else (
     echo [OK] LM Studio ready
+)
+
+echo [CHECK] ComfyUI (port 8188)...
+curl -s -o nul http://127.0.0.1:8188/system_stats 2>nul
+if %errorlevel% neq 0 (
+    echo [WARN] ComfyUI not running on port 8188
+    echo        Krea 2 image generation needs ComfyUI running.
+    echo        Start ComfyUI (run_nvidia_gpu.bat) then re-run this.
+    pause
+) else (
+    echo [OK] ComfyUI ready
 )
 
 echo.

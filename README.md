@@ -10,6 +10,7 @@ AI documentary generator. Turns "beat the system" news stories (hacks, lottery w
 - **Krea 2 identity chains** - 6-panel character sheets (face, face-side, face-back, body-front, body-side, body-back) chained through a reference-image LoRA, so the same character keeps the same face across every shot
 - **Style chain, no training** - reference style sheets define the channel look (style-transfer-only prompts); the style plate styles the assets, and shots reference only the pre-styled assets
 - **Locations & props** - 6-panel location sheets per environment (establishing / front-left / front-right / interior / detail / overhead), front+back prop assets; specific real-world props get a SerpAPI reference photo
+- **Brand & AI logos** - when the article talks about a real business or AI company (OpenAI, ChatGPT, Gemini, Claude...), its logo is searched once, cached and re-used forever; entity talk renders a hacker-style computer screen (prop sheet + logo), HQ talk renders the logo on a building (location sheet + logo), and business-building locations get the logo baked into their sheet
 - **Local rendering** - Krea 2 Turbo in ComfyUI (RTX 3070, --lowvram), PocketTTS cloned narration voice, music beds (suspense crossfading into triumphant), 130+ SFX library with hit-aligned timing
 - **Chapters & titles** - 10 duration-aligned chapter breaks with Bahnschrift chapter cards (glow-pop), typewriter location/person cards
 - **B-roll cache** - reusable no-character shots keyed by scene keywords
@@ -62,23 +63,42 @@ Props are generated front + back. Generic props (katana, pistol, lantern, book, 
 
 ![Prop asset - katana](docs/images/prop_katana.jpg) ![Prop asset - silver pistol](docs/images/prop_pistol.jpg)
 
-### 5. From sheet to screen
+### 5. Brands & AI logos
+
+When the article talks about a real business or AI company, the pipeline notices and does three things:
+
+1. **Detect** - a curated AI registry (OpenAI, ChatGPT, Gemini, Claude, Midjourney, NVIDIA...) plus an LLM pass that extracts any other real businesses from the article, each classified as `screen` (entity/product talk) or `building` (HQ / offices / factory / physical location talk)
+2. **Cache the logo** - SerpAPI image search (Openverse fallback) for the official logo, saved to `cast_refs/logos/`. Cache-first: once downloaded, it is reused on every future episode - zero repeat searches
+3. **Render the context-appropriate asset**:
+   - entity/product talk -> hacker-style computer screen: dark terminal, green code streams, the real logo centered on the monitor (prop style sheet + logo as refs)
+   - HQ / physical location talk -> the logo on a building: glowing facade sign at night (location style sheet + logo as refs)
+   - location sheet IS a business building (e.g. "OpenAI headquarters") -> the logo joins that location sheet's refs so it appears inside the building
+
+Matching shots then reference these pre-styled brand assets, so a story about an AI startup shows its actual logo on screen, and a story about a company's HQ shows the building wearing it.
+
+Pre-cache logos anytime without a full run:
+
+```
+python system_breakers.py --cache-logos OpenAI Claude Tesla
+```
+
+### 6. From sheet to screen
 
 Shots reference the pre-styled assets only - face panel, location sheet, prop asset, b-roll - angle-matched and face-locked. This is the pipeline's core promise: one character sheet, one location sheet, any number of consistent shots:
 
 ![Shot generated from character + location sheets](docs/images/shot_from_sheet.jpg)
 
-### 6. Voice, music & SFX
+### 7. Voice, music & SFX
 
 - **Voice** - cloned narration voice via PocketTTS (0dB normalized), generated in parallel with image generation
 - **Music** - one continuous bed: suspense for the first 65%, crossfading (2s) into triumphant, mixed at -18dB
 - **SFX** - 130+ cinematic sounds pre-analyzed for build / hit / decay times, hit-aligned at -14dB; camera shutter at -4dB; every video opens with a glitchy suspense hit
 
-### 7. Render & titles
+### 8. Render & titles
 
 1080p hevc_nvenc with stream-copy concat and +faststart. Chapter cards ("CHAPTER N" kicker + title, Bahnschrift with glow-pop) and typewriter location/person cards (Consolas) are burned in via the ASS title engine.
 
-### 8. Upload
+### 9. Upload
 
 YouTube upload (native scheduling, per-channel credentials) + Discord announcement with description, hype wrap and link.
 
@@ -108,6 +128,7 @@ YouTube upload (native scheduling, per-channel credentials) + Discord announceme
 | `trend_scorer.py` | Score topic ideas (demand / room / trajectory) |
 | `upscale_4k.py` | SPAN 4x upscaler |
 | `mini_test.py` | End-to-end pipeline test |
+| `--cache-logos OpenAI Claude` | Pre-cache brand logos without a full run |
 | `oauth_split_node.py` | YouTube OAuth authorization |
 
 ## Project layout
@@ -117,7 +138,8 @@ YouTube upload (native scheduling, per-channel credentials) + Discord announceme
 | `shots/` `rendered_audio/` `rendered_video/` `thumbnails/` | Stage outputs (gitignored) |
 | `cinematic_sounds/` | SFX library |
 | `style_sheets/` `style_refs/` | Krea 2 style reference assets |
-| `cast_refs/` | Cast likeness images (`cast_refs/real/` holds real-person photos - gitignored) |
+| `cast_refs/` | Cast likeness images (`cast_refs/real/` + `cast_refs/logos/` gitignored) |
+| `image-assets/` | Generated caches: b-roll, brand screens, brand buildings (gitignored) |
 | `docs/images/` | README showcase images |
 | `voice_refs/` | TTS narration voice clone reference |
 | `.env` | API keys (gitignored - never commit) |
