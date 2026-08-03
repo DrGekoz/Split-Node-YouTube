@@ -10,7 +10,7 @@ AI documentary generator. Turns "beat the system" news stories (hacks, lottery w
 - **Krea 2 identity chains** - 6-panel character sheets (face, face-side, face-back, body-front, body-side, body-back) chained through a reference-image LoRA, so the same character keeps the same face across every shot
 - **Style chain, no training** - reference style sheets define the channel look (style-transfer-only prompts); the style plate styles the assets, and shots reference only the pre-styled assets
 - **Locations & props** - 6-panel location sheets per environment (establishing / front-left / front-right / interior / detail / overhead), front+back prop assets; specific real-world props get a SerpAPI reference photo
-- **Brand & AI logos** - when the article talks about a real business or AI company (OpenAI, ChatGPT, Gemini, Claude...), its logo is searched once, cached and re-used forever; entity talk renders a hacker-style computer screen (prop sheet + logo), HQ talk renders the logo on a building (location sheet + logo), and business-building locations get the logo baked into their sheet
+- **Brand & AI logos** - when the article talks about a real business or AI company (OpenAI, ChatGPT, Gemini, Claude...), its logo is fetched from the official source (Wikimedia Commons, 36 brands pre-mapped) with SerpAPI as fallback, cached and re-used forever; entity talk renders a hacker-style computer screen (prop sheet + logo), HQ talk renders the logo on a building (location sheet + logo), and business-building locations get the logo baked into their sheet
 - **Local rendering** - Krea 2 Turbo in ComfyUI (RTX 3070, --lowvram), PocketTTS cloned narration voice, music beds (suspense crossfading into triumphant), 130+ SFX library with hit-aligned timing
 - **Chapters & titles** - 10 duration-aligned chapter breaks with Bahnschrift chapter cards (glow-pop), typewriter location/person cards
 - **B-roll cache** - reusable no-character shots keyed by scene keywords
@@ -68,7 +68,7 @@ Props are generated front + back. Generic props (katana, pistol, lantern, book, 
 When the article talks about a real business or AI company, the pipeline notices and does three things:
 
 1. **Detect** - a curated AI registry (OpenAI, ChatGPT, Gemini, Claude, Midjourney, NVIDIA...) plus an LLM pass that extracts any other real businesses from the article, each classified as `screen` (entity/product talk) or `building` (HQ / offices / factory / physical location talk)
-2. **Cache the logo** - SerpAPI image search (Openverse fallback) for the official logo, saved to `cast_refs/logos/`. Cache-first: once downloaded, it is reused on every future episode - zero repeat searches
+2. **Cache the official logo** - official source first: 36 brands are pre-mapped to their Wikimedia Commons logo (rasterized PNG, so it is always the real mark), SerpAPI image search (Openverse fallback) only covers brands not in that registry. Cache-first: once downloaded, it is reused on every future episode - zero repeat searches
 3. **Render the context-appropriate asset**:
    - entity/product talk -> hacker-style computer screen: dark terminal, green code streams, the real logo centered on the monitor (prop style sheet + logo as refs)
    - HQ / physical location talk -> the logo on a building: glowing facade sign at night (location style sheet + logo as refs)

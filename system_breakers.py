@@ -2832,6 +2832,84 @@ AI_ORGS: dict[str, tuple[list[str], str]] = {
 # rebuild the asset cache without re-extracting.
 _KNOWN_BRANDS: set[str] = set(AI_ORGS.keys())
 
+# Official logos: display name -> Wikimedia Commons file title. Resolved via
+# the Commons API (rasterized to a 512px PNG thumb). SerpAPI image search is
+# ONLY a fallback for brands not in this registry.
+OFFICIAL_LOGOS: dict[str, str] = {
+    # AI companies / models
+    "OpenAI":       "File:OpenAI Logo.svg",
+    "Google":       "File:Google 2015 logo.svg",
+    "Gemini":       "File:Google Gemini logo.svg",
+    "Anthropic":    "File:Anthropic logo.svg",
+    "Meta":         "File:Meta AI logo.png",
+    "Microsoft":    "File:Microsoft logo (2012).svg",
+    "Copilot":      "File:Microsoft Copilot wordmark.svg",
+    "xAI":          "File:Logo Grok AI (xAI) 2025.png",
+    "Grok":         "File:Grok logo.svg",
+    "Mistral":      "File:Mistral AI logo (2025\u2013).svg",
+    "DeepSeek":     "File:DeepSeek logo.svg",
+    "Stability AI": "File:Stability Ai \u2014 wordmark.png",
+    "Midjourney":   "File:Midjourney Emblem (in-colour).png",
+    "Runway":       "File:Runway Logo.png",
+    "Hugging Face": "File:Hf-logo-with-title.svg",
+    "ElevenLabs":   "File:ElevenLabs Logo 03.svg",
+    "Perplexity":   "File:Perplexity AI logo.svg",
+    "Adobe":        "File:Adobe logo and wordmark (2017).svg",
+    "Firefly":      "File:Adobe Firefly Logo.svg",
+    # Big tech / frequently mentioned businesses
+    "Apple":        "File:Apple logo black.svg",
+    "Amazon":       "File:Amazon logo.svg",
+    "NVIDIA":       "File:NVIDIA logo.svg",
+    "IBM":          "File:IBM logo.svg",
+    "Tesla":        "File:Tesla Motors Logo - White.svg",
+    "Netflix":      "File:Netflix logo.svg",
+    "Spotify":      "File:Spotify logo without text.svg",
+    "LinkedIn":     "File:LinkedIn icon.svg",
+    "Oracle":       "File:Oracle logo.svg",
+    "Sony":         "File:Sony logo.svg",
+    "Ford":         "File:Ford logo.svg",
+    "Toyota":       "File:Toyota logo.svg",
+    "Coca-Cola":    "File:Coca-Cola logo.svg",
+    "X":            "File:X logo 2023.svg",
+    "Salesforce":   "File:Salesforce.com logo.svg",
+    "Nike":         "File:Logo NIKE.svg",
+}
+
+
+def _commons_logo_bytes(brand: str) -> Optional[bytes]:
+    """Official logo from Wikimedia Commons, rasterized to a 512px PNG thumb.
+    Returns raw image bytes, or None if unavailable (caller falls back to
+    SerpAPI image search)."""
+    title = OFFICIAL_LOGOS.get(brand)
+    if not title:
+        return None
+    import urllib.parse as _up
+    api = ("https://commons.wikimedia.org/w/api.php?action=query&titles="
+           + _up.quote(title) + "&prop=imageinfo&iiprop=url&iiurlwidth=512"
+           "&format=json")
+    try:
+        req = urllib.request.Request(
+            api, headers={"User-Agent": "SplitNode/1.1 (ads.doctor.melbourne@gmail.com)"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.loads(r.read().decode())
+        pages = data.get("query", {}).get("pages", {})
+        if not pages:
+            return None
+        ii = next(iter(pages.values())).get("imageinfo")
+        if not ii:
+            return None
+        thumb = ii[0].get("thumburl") or ii[0].get("url")
+        if not thumb:
+            return None
+        req2 = urllib.request.Request(
+            thumb, headers={"User-Agent": "SplitNode/1.1 (ads.doctor.melbourne@gmail.com)"})
+        with urllib.request.urlopen(req2, timeout=30) as r2:
+            blob = r2.read()
+        return blob if len(blob) >= 2000 else None
+    except Exception as e:
+        print(f"  [LOGO] Wikimedia fetch failed for {brand} ({str(e)[:60]})")
+        return None
+
 
 def _brand_safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", name.lower()).strip("_") or "brand"
@@ -2933,12 +3011,24 @@ def _brand_context(name: str, texts: list[str]) -> str:
 
 
 def _find_logo(brand: str) -> Optional[str]:
-    """Official-ish logo for a brand, cached to cast_refs/logos/. Cache-first;
-    SerpAPI (Openverse fallback) only on a miss."""
+    """Logo for a brand, cached to cast_refs/logos/. Cache-first, then the
+    OFFICIAL Wikimedia Commons source, and ONLY then SerpAPI image search
+    (Openverse fallback) for brands not in the official registry."""
     safe = _brand_safe(brand)
     out = BRAND_LOGO_DIR / f"{safe}.png"
     if out.is_file():
         return str(out)
+    # 1. Official source: Wikimedia Commons (rasterized PNG thumb)
+    if brand in OFFICIAL_LOGOS:
+        blob = _commons_logo_bytes(brand)
+        if blob:
+            BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(blob)
+            print(f"  [LOGO] {brand} cached (official Wikimedia)")
+            return str(out)
+        print(f"  [LOGO] {brand} unavailable on Wikimedia - falling back to "
+              f"image search")
+    # 2. Fallback: SerpAPI image search (Openverse fallback)
     query = AI_ORGS.get(brand, ([""], f"{brand} logo"))[1]
     urls = _google_images_candidates(query, "logo")
     if not urls:
