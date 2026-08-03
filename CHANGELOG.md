@@ -2,6 +2,15 @@
 
 All notable changes to Split Node.
 
+## [1.1.1] - 2026-08-04
+
+### Fix: SystemBreakers.bat crash
+
+- Fixed bat crash: unescaped parenthesis in the ComfyUI warning echo ("Start ComfyUI (run_nvidia_gpu.bat)...") terminated the parenthesized IF block early, aborting the batch with "then was unexpected at this time" at the ComfyUI check
+- Removed `setlocal enabledelayedexpansion` (it was unused) - exclamation marks in echo text were being swallowed as delayed-expansion references
+- Rewritten with CRLF line endings (cmd.exe parses multi-line parenthesized blocks reliably with CRLF)
+- Verified end-to-end through cmd.exe: all checks, warn paths and the launch flow complete without errors
+
 ## [1.1.0] - 2026-08-04
 
 ### Brand & AI logos - official sources first
