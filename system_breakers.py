@@ -3267,16 +3267,19 @@ def _generate_location_sheet(location: str, seed: int, out_dir: Path,
             continue
         p = (f"{prompt_txt} The location is: {location}. 3D environment "
              f"reference panel - 640x540 portrait frame")
-        # ref_boost 2.0 + grounding 768: the style ref contains painted
-        # scenes - boost 4.0 / grounding 1024 made faces/objects bleed into
-        # the location panels (verified 2026-08-04, user report). The hard
-        # NO-people/faces negation in the prompt reinforces it.
-        print(f"  [LOCATION] '{location}' panel {view} (identity, refs="
-              f"{len(refs)}, boost=2.0, grounding=768)...")
+        # Style-transfer panels: with ONE style ref (the plate) use the
+        # NON-patched reference pipeline (Joe 2026-08-04). The krea2edit
+        # identity patch is a reference-COPY channel - with a single style
+        # plate it just reproduces the ref image and forces its own latent
+        # AR instead of honoring the prompt + 640x540 panel. The patch is
+        # only needed when a 2nd ref joins (business logo baked in).
+        mode = "identity" if len(refs) >= 2 else "reference"
+        print(f"  [LOCATION] '{location}' panel {view} ({mode}, refs="
+              f"{len(refs)}, 720p->1080p)...")
         ok = _krea_generate(p, seed + 111 * len(view), str(pan),
-                            ref_images=refs, denoise=1.0, upscale=False,
-                            steps=10, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
-                            ref_mode="identity", ref_boost=2.0,
+                            ref_images=refs, denoise=1.0, upscale=True,
+                            steps=10, width=1280, height=720,
+                            ref_mode=mode, ref_boost=2.0,
                             grounding_px=768)
         if ok:
             panels[view] = str(pan)
@@ -3350,8 +3353,8 @@ def _generate_prop_asset(prop: str, seed: int, out_dir: Path,
              f"Painted in a bold animated style, strong stylized brushwork, "
              f"painterly shading, saturated colors.")
         ok = _krea_generate(p, seed, str(out), ref_images=None, denoise=1.0,
-                            upscale=False, steps=10,
-                            width=SHEET_PANEL_W, height=SHEET_PANEL_H,
+                            upscale=True, steps=10,
+                            width=1280, height=720,
                             ref_mode="img2img")
         return str(out) if ok else None
     views = [
@@ -3383,17 +3386,20 @@ def _generate_prop_asset(prop: str, seed: int, out_dir: Path,
             panels[view] = str(pan)
             continue
         src = "real+T2I" if use_real else "style-only"
-        # ref_boost 2.0 (not 4.0): the style plate is a 3x2 grid containing
-        # FACES - boost 4.0 makes the model copy them into the prop asset
-        # (verified 2026-08-04, user report). 2.0 keeps the style without
-        # the face bleed; the hard NO-people/faces negation in the prompt
-        # reinforces it.
-        print(f"  [PROP] '{prop}' {view} panel (identity, refs="
-              f"{len(refs)}, boost=2.0, {src})...")
+        # Same rule as location panels (Joe 2026-08-04): ONE style ref (the
+        # plate) -> NON-patched reference pipeline. The krea2edit identity
+        # patch copies the ref image and forces its own latent AR instead of
+        # honoring the prompt + 640x540 panel; the patch is only needed when
+        # a real photo / brand logo joins as a 2nd ref.
+        # (boost note: the style plate is a 3x2 grid containing FACES - the
+        # NO-people/faces negation in the prompt reinforces clean panels.)
+        mode = "identity" if len(refs) >= 2 else "reference"
+        print(f"  [PROP] '{prop}' {view} panel ({mode}, refs="
+              f"{len(refs)}, 720p->1080p, {src})...")
         ok = _krea_generate(prompt_txt, seed + 111 * len(view), str(pan),
-                            ref_images=refs, denoise=1.0, upscale=False,
-                            steps=10, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
-                            ref_mode="identity", ref_boost=2.0,
+                            ref_images=refs, denoise=1.0, upscale=True,
+                            steps=10, width=1280, height=720,
+                            ref_mode=mode, ref_boost=2.0,
                             grounding_px=768)
         if ok:
             panels[view] = str(pan)

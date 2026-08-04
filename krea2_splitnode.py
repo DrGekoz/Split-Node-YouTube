@@ -386,8 +386,16 @@ def _generate_once(prompt: str, seed: int, out_path: str,
     else:
         ref_name = None
         if ref_images:
-            strip = _compose_ref_strip(ref_images, out_path)
-            ref_name = _upload_ref(strip, base)
+            if ref_mode == "reference" and len(ref_images) == 1:
+                # Reference conditioning: the sample latent comes from
+                # EmptyLatentImage (width/height), NOT from the ref - so no
+                # strip is needed, and a padded strip actively hurts (the
+                # dark bars bleed into the t=0 ref tokens as layout). Upload
+                # the raw normalized image instead.
+                ref_name = _upload_ref(ref_images[0], base)
+            else:
+                strip = _compose_ref_strip(ref_images, out_path)
+                ref_name = _upload_ref(strip, base)
         api = build_api(prompt, seed, ref_name, denoise, upscale=upscale,
                         prefix=prefix, steps=steps, cfg=cfg,
                         width=width, height=height, ref_mode=ref_mode,
