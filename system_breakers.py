@@ -249,12 +249,88 @@ SCENE_STYLE = (
     "no clothing, no anatomy, absolutely no persons in the frame"
 )
 
-# B-roll image cache: no-character shots (server farms, hacker screens, graphs,
-# money, etc.) reuse pre-generated images from image-assets/ instead of being
-# regenerated every episode. Lookup is keyword-overlap on the scene description,
-# backed by a JSON index (assets.json) so reuse is fast and topic-agnostic.
+# Style PROMPT injection (Joe 2026-08-04): b-roll shots, location sheets and
+# prop sheets generate as pure txt2img with the channel style injected as
+# TEXT instead of image references - faster, and impossible to hit the
+# reference-copy bug. The descriptor is extracted ONCE from the two approved
+# style sheets (prop + location) via the local vision model, then cached.
+STYLE_PROMPT_FILE = PROJECT_DIR / "style_sheets" / "style_prompt.txt"
+STYLE_PROMPT_FALLBACK = (
+    "bold animated style, strong stylized brushwork, painterly shading, "
+    "saturated colors, dramatic rim lighting, dark moody atmosphere, "
+    "high detail, cinematic documentary recreation"
+)
+
+
+def _describe_style_from_sheets() -> str:
+    """Vision model: describe ONLY the shared visual painting/render style of
+    the two approved style sheets (prop_style_sheet.png + location_style_sheet.
+    png) - never the subjects. Returns a plain-text style descriptor."""
+    import base64
+    imgs = [str(PROP_STYLE_REF), str(LOCATION_STYLE_REF)]
+    imgs = [p for p in imgs if p and os.path.isfile(p)]
+    if not imgs:
+        return ""
+    try:
+        content = [{"type": "text", "text":
+            "Describe ONLY the visual PAINTING/RENDER STYLE shared by these "
+            "two reference artworks - brushwork, linework, color palette, "
+            "lighting, shading, rendering technique, texture and mood. Say "
+            "NOTHING about the subjects, objects, people or scenes depicted. "
+            "Reply with EXACTLY ONE plain sentence, at most 30 words, that a "
+            "text-to-image model can use directly as a style tag. No preamble, "
+            "no commentary, no quotes, no markdown."}]
+        for p in imgs:
+            b64 = base64.b64encode(Path(p).read_bytes()).decode()
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+        body = json.dumps({"model": "gemma-4-e4b-uncensored-hauhaucs-aggressive",
+                           "messages": [{"role": "user", "content": content}],
+                           "max_tokens": 250, "temperature": 0.2}).encode()
+        req = urllib.request.Request("http://localhost:1234/v1/chat/completions",
+                                     data=body,
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            out = json.loads(r.read().decode())
+        ans = out["choices"][0]["message"]["content"].strip()
+        # The roleplay-tuned model adds preamble chatter no matter how strict
+        # the instruction - the actual descriptor is the LAST paragraph.
+        paras = [p.strip() for p in re.split(r"\n\s*\n", ans) if p.strip()]
+        ans = paras[-1] if paras else ans
+        return ans[:400]
+    except Exception as e:
+        print(f"  [STYLE] vision extraction failed: {str(e)[:80]}")
+        return ""
+
+
+def _get_style_prompt(force: bool = False) -> str:
+    """Channel style descriptor for prompt injection (cached once)."""
+    if not force and STYLE_PROMPT_FILE.is_file():
+        txt = STYLE_PROMPT_FILE.read_text(encoding="utf-8").strip()
+        if txt:
+            return txt
+    desc = _describe_style_from_sheets()
+    if not desc:
+        desc = STYLE_PROMPT_FALLBACK
+    try:
+        STYLE_PROMPT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STYLE_PROMPT_FILE.write_text(desc, encoding="utf-8")
+    except Exception:
+        pass
+    return desc
+
+
+def _style_inject() -> str:
+    """'Rendered in the visual style of: ...' - appended to b-roll / location
+    / prop prompts. Text-only style transfer (no image refs)."""
+    return f"Rendered in the visual style of: {_get_style_prompt().rstrip('.')}."
+
+
+# B-roll image cache (DEPRECATED 2026-08-04 - no longer used by the pipeline;
+# kept so the standalone generate_broll_cache.py helper still imports).
 IMAGE_ASSETS_DIR = PROJECT_DIR / "image-assets"
 _ASSETS_INDEX = IMAGE_ASSETS_DIR / "assets.json"
+
 # Channel-wide style plate: reference image(s) defining the uniform Split
 # Node look (Arcane-style sheets from style_sheets/). Fed as the SCENE ref
 # in identity mode (image 1) alongside character faces / location / props
@@ -3255,39 +3331,33 @@ def _generate_location_sheet(location: str, seed: int, out_dir: Path,
     if out.is_file():
         print(f"  [LOCATION] reuse {os.path.basename(out)}")
         return str(out)
-    style_ref = str(LOCATION_STYLE_REF)
-    have_style = (os.environ.get("STYLE_REF", "1") != "0"
-                  and os.path.isfile(style_ref))
-    if not have_style:
-        print(f"  [LOCATION] no style plate - skipping sheet for '{location}'")
-        return None
-    refs = [style_ref]
-    if logo_ref and os.path.isfile(logo_ref):
-        refs.append(logo_ref)
-        print(f"  [LOCATION] '{location}' -> business logo ref baked in: "
-              f"{os.path.basename(logo_ref)}")
+    # txt2img + style PROMPT injection (Joe 2026-08-04): no style-plate refs
+    # - faster, and no reference-copy bug. EXCEPTION: when the location IS a
+    # business building (logo_ref available), the business logo joins as an
+    # image ref (Kontext - prompt controls the building, ref carries the mark).
+    logo = logo_ref if (logo_ref and os.path.isfile(logo_ref)) else None
     panels: dict[str, str] = {}
     for view, prompt_txt in LOCATION_VIEWS:
         pan = out_dir / f"{safe}_{view}.png"
         if pan.is_file():
             panels[view] = str(pan)
             continue
-        p = (f"{prompt_txt} The location is: {location}. 3D environment "
-             f"reference panel - 640x540 portrait frame")
-        # Style-transfer panels: with ONE style ref (the plate) use the
-        # NON-patched reference pipeline (Joe 2026-08-04). The krea2edit
-        # identity patch is a reference-COPY channel - with a single style
-        # plate it just reproduces the ref image and forces its own latent
-        # AR instead of honoring the prompt + 640x540 panel. The patch is
-        # only needed when a 2nd ref joins (business logo baked in).
-        mode = "identity" if len(refs) >= 2 else "reference"
-        print(f"  [LOCATION] '{location}' panel {view} ({mode}, refs="
-              f"{len(refs)}, 720p->1080p)...")
-        ok = _krea_generate(p, seed + 111 * len(view), str(pan),
-                            ref_images=refs, denoise=1.0, upscale=True,
-                            steps=10, width=1280, height=720,
-                            ref_mode=mode, ref_boost=2.0,
-                            grounding_px=768)
+        p = (f"{prompt_txt} The location is: {location}. "
+             f"{_style_inject()}")
+        if logo:
+            print(f"  [LOCATION] '{location}' panel {view} "
+                  f"(logo ref, 720p->1080p)...")
+            ok = _krea_generate(p, seed + 111 * len(view), str(pan),
+                                ref_images=[logo], denoise=1.0, upscale=True,
+                                steps=10, width=1280, height=720,
+                                ref_mode="reference")
+        else:
+            print(f"  [LOCATION] '{location}' panel {view} (txt2img+style, "
+                  f"720p->1080p)...")
+            ok = _krea_generate(p, seed + 111 * len(view), str(pan),
+                                ref_images=None, denoise=1.0, upscale=True,
+                                steps=10, width=1280, height=720,
+                                ref_mode="img2img")
         if ok:
             panels[view] = str(pan)
     if len(panels) < 3:
@@ -3329,62 +3399,22 @@ def _generate_prop_asset(prop: str, seed: int, out_dir: Path,
     if out.is_file():
         print(f"  [PROP] reuse {os.path.basename(out)}")
         return str(out)
-    style_ref = str(PROP_STYLE_REF)
-    have_style = (os.environ.get("STYLE_REF", "1") != "0"
-                  and os.path.isfile(style_ref))
-    use_real = _needs_real_prop(prop)
-    refs: list[str] = []
-    if have_style:
-        refs.append(style_ref)
-    real_photo = None
-    if use_real:
-        logo = _logo_for_prop(prop, brands)
-        if logo:
-            real_photo = logo
-            print(f"  [PROP] '{prop}' matched brand logo "
-                  f"({os.path.basename(logo)})")
-        else:
-            real_photo = _find_prop_reference(prop)
-        if real_photo:
-            refs.append(real_photo)
-        else:
-            print(f"  [PROP] no real photo for '{prop}' - falling back to T2I")
-            use_real = False
-    if not refs:
-        print(f"  [PROP] no style plate/ref for '{prop}' - using txt2img")
-        # plain txt2img fallback: front only
-        p = (f"A single {prop}, studio product shot, front view, centered, "
-             f"plain dark background. STRICTLY NO people, no humans, no faces, "
-             f"no characters, no figures, no silhouettes, no body parts, no "
-             f"hands, no text, no persons of any kind anywhere in frame. "
-             f"Painted in a bold animated style, strong stylized brushwork, "
-             f"painterly shading, saturated colors.")
-        ok = _krea_generate(p, seed, str(out), ref_images=None, denoise=1.0,
-                            upscale=True, steps=10,
-                            width=1280, height=720,
-                            ref_mode="img2img")
-        return str(out) if ok else None
+    # txt2img + style PROMPT injection (Joe 2026-08-04): no image refs, no
+    # real-photo/logo refs - the prop name in the prompt carries the object,
+    # the injection carries the channel look. Faster + no reference-copy bug.
     views = [
         ("front",
          f"Render THIS OBJECT: {prop}, front view, centered, full object "
-         f"visible, plain dark studio background. Use ONLY the painting and "
-         f"render style from the reference artwork - bold animated style, "
-         f"strong stylized brushwork, painterly shading, saturated colors. "
-         f"The reference images show DIFFERENT objects - the object in this "
-         f"panel is {prop} and NOTHING else. STRICTLY NO people, no humans, "
-         f"no faces, no characters, no figures, no silhouettes, no body "
-         f"parts, no hands, no text, no persons of any kind anywhere in "
-         f"frame."),
+         f"visible, plain dark studio background. STRICTLY NO people, no "
+         f"humans, no faces, no characters, no figures, no silhouettes, no "
+         f"body parts, no hands, no text, no persons of any kind anywhere "
+         f"in frame."),
         ("back",
          f"Render THIS OBJECT: {prop}, back view, centered, full object "
-         f"visible, plain dark studio background. Use ONLY the painting and "
-         f"render style from the reference artwork - bold animated style, "
-         f"strong stylized brushwork, painterly shading, saturated colors. "
-         f"The reference images show DIFFERENT objects - the object in this "
-         f"panel is {prop} and NOTHING else. STRICTLY NO people, no humans, "
-         f"no faces, no characters, no figures, no silhouettes, no body "
-         f"parts, no hands, no text, no persons of any kind anywhere in "
-         f"frame."),
+         f"visible, plain dark studio background. STRICTLY NO people, no "
+         f"humans, no faces, no characters, no figures, no silhouettes, no "
+         f"body parts, no hands, no text, no persons of any kind anywhere "
+         f"in frame."),
     ]
     panels: dict[str, str] = {}
     for view, prompt_txt in views:
@@ -3392,22 +3422,13 @@ def _generate_prop_asset(prop: str, seed: int, out_dir: Path,
         if pan.is_file():
             panels[view] = str(pan)
             continue
-        src = "real+T2I" if use_real else "style-only"
-        # Same rule as location panels (Joe 2026-08-04): ONE style ref (the
-        # plate) -> NON-patched reference pipeline. The krea2edit identity
-        # patch copies the ref image and forces its own latent AR instead of
-        # honoring the prompt + 640x540 panel; the patch is only needed when
-        # a real photo / brand logo joins as a 2nd ref.
-        # (boost note: the style plate is a 3x2 grid containing FACES - the
-        # NO-people/faces negation in the prompt reinforces clean panels.)
-        mode = "identity" if len(refs) >= 2 else "reference"
-        print(f"  [PROP] '{prop}' {view} panel ({mode}, refs="
-              f"{len(refs)}, 720p->1080p, {src})...")
-        ok = _krea_generate(prompt_txt, seed + 111 * len(view), str(pan),
-                            ref_images=refs, denoise=1.0, upscale=True,
+        p = f"{prompt_txt} {_style_inject()}"
+        print(f"  [PROP] '{prop}' {view} panel (txt2img+style, "
+              f"720p->1080p)...")
+        ok = _krea_generate(p, seed + 111 * len(view), str(pan),
+                            ref_images=None, denoise=1.0, upscale=True,
                             steps=10, width=1280, height=720,
-                            ref_mode=mode, ref_boost=2.0,
-                            grounding_px=768)
+                            ref_mode="img2img")
         if ok:
             panels[view] = str(pan)
     if not panels:
@@ -3806,18 +3827,33 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                   f"{os.path.basename(shot['image_path'])}")
             continue
         char_name = shot.get("character", "NONE")
-        # B-roll cache: no-character shots reuse image-assets/ when the scene
-        # keywords match - skips regeneration entirely.
-        cached = None
-        if char_name == "NONE":
-            cached = _lookup_broll_asset(shot.get("scene", ""))
-            if cached:
-                shot["seed"] = 0
-                shot["image_path"] = cached
-                print(f"  [SHOT {idx+1}/{len(shots)}] B-ROLL CACHE reuse "
-                      f"{os.path.basename(cached)} (char=NONE)")
-                continue
         seed = 10000 + idx * 137 + random.randint(0, 999)
+        if char_name == "NONE":
+            # B-roll (char=NONE) shots: pure txt2img with the style PROMPT
+            # injection - no image refs, no b-roll cache (Joe 2026-08-04).
+            # Faster, and impossible to hit the reference-copy bug. The scene
+            # text carries the composition, the injection the channel look.
+            prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
+            out_path = str((ep_dir or SHOTS_DIR) / f"shot_{seed}.png")
+            ok = _krea_generate(prompt, seed, out_path,
+                                ref_images=None, denoise=1.0, upscale=True)
+            if not ok:
+                seed2 = seed + 31337
+                out2 = str((ep_dir or SHOTS_DIR) / f"shot_{seed2}.png")
+                print(f"  [SHOT {idx+1}/{len(shots)}] retrying with new seed...")
+                ok = _krea_generate(prompt, seed2, out2,
+                                    ref_images=None, denoise=1.0, upscale=True)
+                if ok:
+                    seed, out_path = seed2, out2
+            shot["seed"] = seed
+            shot["image_path"] = out_path if ok else None
+            if ok:
+                _apply_grade(out_path)
+                print(f"  [SHOT {idx+1}/{len(shots)}] image ready "
+                      f"(char=NONE, txt2img+style)")
+            else:
+                print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED after retry")
+            continue
         prompt = _build_shot_prompt(shot, character_sheets)
         # ---- Reference composition (real krea2edit references, NOT img2img) ----
         # Ordered list, training order: image 1 = SCENE/style plate, image 2+ =
@@ -3871,10 +3907,6 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         if brand_asset and brand_asset not in refs:
             refs.append(brand_asset)
             use_identity = True
-        asset = _lookup_broll_asset(shot.get("scene", ""))
-        if asset and asset not in refs:
-            refs.append(asset)
-            use_identity = True
         # Style chain (Joe's rule): the assets are ALREADY styled - the shot
         # does NOT need the style plate (verified shot test, no plate). The
         # plate is only a fallback when a shot has NO styled refs at all
@@ -3912,9 +3944,6 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             # Shot images come out 1920x1080 from the in-graph FaceUpDAT
             # upscale - just apply the style-card grade.
             _apply_grade(out_path)
-            if char_name == "NONE":
-                # Freshly generated b-roll goes INTO the cache for next time
-                shot["image_path"] = _cache_broll_asset(out_path, shot.get("scene", ""))
             print(f"  [SHOT {idx+1}/{len(shots)}] image ready (char={char_name})")
         else:
             print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED after retry")
@@ -5637,17 +5666,29 @@ def _resume_episode(state: dict) -> None:
                         ctx, 43000 + episode_num * 7, ep_shot_dir) or {}
                     print(f"  [ASSETS] resume: {len(prop_assets)} prop assets")
         for shot in missing_img:
-            # B-roll cache: no-character shots reuse image-assets/ when the
-            # scene keywords match (same logic as the fresh-run path).
-            if shot.get("character", "NONE") == "NONE":
-                cached = _lookup_broll_asset(shot.get("scene", ""))
-                if cached:
-                    shot["seed"] = 0
-                    shot["image_path"] = cached
-                    print(f"  [SHOT] B-ROLL CACHE reuse "
-                          f"{os.path.basename(cached)} (char=NONE)")
-                    continue
+            char_name = shot.get("character", "NONE")
             seed = shot.get("seed") or (10000 + random.randint(0, 999))
+            if char_name == "NONE":
+                # B-roll (char=NONE) shots: pure txt2img with the style PROMPT
+                # injection - no image refs, no b-roll cache (Joe 2026-08-04).
+                prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
+                out_path = str(ep_shot_dir / f"shot_{seed}.png")
+                ok = _krea_generate(prompt, seed, out_path,
+                                    ref_images=None, denoise=1.0, upscale=True)
+                if not ok:
+                    seed2 = seed + 31337
+                    out2 = str(ep_shot_dir / f"shot_{seed2}.png")
+                    print("  [SHOT] retrying with new seed...")
+                    ok = _krea_generate(prompt, seed2, out2,
+                                        ref_images=None, denoise=1.0, upscale=True)
+                    if ok:
+                        seed, out_path = seed2, out2
+                shot["seed"] = seed
+                shot["image_path"] = out_path if ok else None
+                print(f"  [SHOT] {'image ready' if ok else 'IMAGE FAILED - fallback'} "
+                      f"(char=NONE, txt2img+style)")
+                time.sleep(1)
+                continue
             prompt = _build_shot_prompt(shot, character_sheets)
             # Same local Krea identity path as the fresh run: face panel +
             # location sheet + prop asset refs (all pre-styled; the style
@@ -5708,10 +5749,6 @@ def _resume_episode(state: dict) -> None:
             if brand_asset and brand_asset not in refs:
                 refs.append(brand_asset)
                 use_identity = True
-            asset = _lookup_broll_asset(shot.get("scene", ""))
-            if asset and asset not in refs:
-                refs.append(asset)
-                use_identity = True
             if not refs and style_enabled:
                 refs.append(style_ref)
                 use_identity = True
@@ -5728,9 +5765,6 @@ def _resume_episode(state: dict) -> None:
             shot["image_path"] = out_path if ok else None
             print(f"  [SHOT] {'image ready' if ok else 'IMAGE FAILED - fallback'} "
                   f"(char={char_name})")
-            # Freshly generated b-roll goes INTO the cache for next time
-            if ok and char_name == "NONE":
-                shot["image_path"] = _cache_broll_asset(out_path, shot.get("scene", ""))
             time.sleep(1)
         _save("images")
     else:

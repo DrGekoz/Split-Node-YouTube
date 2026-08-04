@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.4.0] - 2026-08-04
+
+### B-roll / location / prop sheets: style PROMPT injection (no image refs)
+
+- B-roll shots (char=NONE), location sheet panels and prop sheet panels now generate as PURE txt2img (1280x720 -> in-graph FaceUpDAT 1920x1080) with the channel style injected as TEXT - faster, and impossible to hit the reference-copy bug
+- The style descriptor is extracted ONCE from the two approved style sheets (prop_style_sheet.png + location_style_sheet.png) via the local vision model and cached to style_sheets/style_prompt.txt (roleplay-preamble stripped - only the last paragraph is kept; falls back to a static descriptor if vision is unavailable)
+- EXCEPTION (Joe): when a location IS a business building (logo_ref available), the business logo still joins as an image ref (Kontext reference mode - prompt controls the building, ref carries the brand mark)
+- B-roll image cache retired: image-assets/ lookup + cache-write calls removed from both the fresh and resume image paths (helpers kept for the standalone generate_broll_cache.py)
+- Character shots + character sheets + brand assets UNCHANGED (identity refs + patch)
+
 ## [1.3.1] - 2026-08-04
 
 ### Resume state backup - the resume prompt can't silently disappear
