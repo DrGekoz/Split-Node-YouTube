@@ -2,6 +2,14 @@
 
 All notable changes to Split Node.
 
+## [1.3.0] - 2026-08-04
+
+### Interactive video-length prompt
+
+- Fresh runs now ask "How many narration paragraphs?" (default 115) right after the episode number, print the estimated video length (~14.3s per paragraph - measured from ep8: 120 clips -> 1712.7s voice timeline incl. 0.3s pads), and loop confirm/change until confirmed (typing a new number re-estimates; clamped 10-400)
+- `_build_narration_script(paragraphs, target_paras)` uses the confirmed count for the per-article-paragraph expansion and the fallback slice (was the fixed TARGET_NARRATION_PARAS=115)
+- The count is persisted to resume state (`target_paras`) - a resumed job sticks with the job-start count and never re-asks (shown in the resume header)
+
 ## [1.2.1] - 2026-08-04
 
 ### Location/prop style panels: non-patched reference pipeline + 720p -> 1080p

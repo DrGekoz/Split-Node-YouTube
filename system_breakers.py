@@ -1093,6 +1093,9 @@ def _llm_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -
 # -- Stage 1: Narration script ---------------------------------------
 
 TARGET_NARRATION_PARAS = 115
+# Measured narration pace for length estimates (ep8: 120 paras -> 1712.7s
+# voice timeline incl. 0.3s pads between clips => ~14.3s per paragraph).
+SECONDS_PER_NARRATION_PARA = 14.3
 
 NARRATION_SYSTEM_PROMPT = (
     "You are a documentary scriptwriter for a YouTube channel called SPLIT NODE. "
@@ -1164,17 +1167,21 @@ NARRATION_SYSTEM_PROMPT = (
     "and drama."
 )
 
-def _build_narration_script(paragraphs: list[str]) -> list[str]:
-    """Stage 1: expand the article into ~TARGET_NARRATION_PARAS narration paragraphs.
+def _build_narration_script(paragraphs: list[str],
+                            target_paras: int = 0) -> list[str]:
+    """Stage 1: expand the article into ~target narration paragraphs.
 
-    Each article paragraph is expanded into X narration paragraphs where
-    X = round(TARGET / len(article_paragraphs)), so the total lands as close
-    to the target as possible even when the article has fewer paragraphs.
+    target_paras comes from the interactive length prompt (default
+    TARGET_NARRATION_PARAS). Each article paragraph is expanded into X
+    narration paragraphs where X = round(target / len(article_paragraphs)),
+    so the total lands as close to the target as possible even when the
+    article has fewer paragraphs.
     """
+    target = target_paras or TARGET_NARRATION_PARAS
     print("\n[LLM] Stage 1: writing documentary narration script...")
     n_art = max(len(paragraphs), 1)
-    per_para = max(2, round(TARGET_NARRATION_PARAS / n_art))
-    print(f"  [LLM] Target {TARGET_NARRATION_PARAS} narration paragraphs "
+    per_para = max(2, round(target / n_art))
+    print(f"  [LLM] Target {target} narration paragraphs "
           f"({per_para} per article paragraph x {n_art} article paragraphs)")
     narration_paras = []
     covered = []  # rolling summary of already-written beats (dedupe guard)
@@ -1213,7 +1220,7 @@ def _build_narration_script(paragraphs: list[str]) -> list[str]:
     if not narration_paras:
         print("  [LLM] Narration failed, using article paragraphs directly")
         narration_paras = [re.sub(r"\s+", " ", p).strip()[:500]
-                           for p in paragraphs[:TARGET_NARRATION_PARAS]]
+                           for p in paragraphs[:target]]
 
     print(f"  [LLM] Narration script: {len(narration_paras)} paragraphs")
     for i, p in enumerate(narration_paras):
@@ -5476,7 +5483,8 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
                        chapter_events: Optional[list] = None,
                        anchor_events: Optional[list] = None,
                        location_sheets: Optional[dict] = None,
-                       prop_assets: Optional[dict] = None) -> None:
+                       prop_assets: Optional[dict] = None,
+                       target_paras: int = 0) -> None:
     """Save episode state so it can be resumed if interrupted."""
     state = {
         "version": 3,
@@ -5488,6 +5496,7 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
         "character_sheets": character_sheets or {},
         "location_sheets": location_sheets or {},
         "prop_assets": prop_assets or {},
+        "target_paras": target_paras,
         "titles": titles or [],
         "description": description,
         "tags": tags or [],
@@ -5539,6 +5548,7 @@ def _resume_episode(state: dict) -> None:
     stage = state.get("stage", "story")
     topic = state.get("topic", "")
     article_url = state.get("article_url", "")
+    target_paras = int(state.get("target_paras", 0) or TARGET_NARRATION_PARAS)
     shots = state.get("shots", [])
     character_sheets = state.get("character_sheets", {})
     location_sheets = state.get("location_sheets", {})
@@ -5555,6 +5565,7 @@ def _resume_episode(state: dict) -> None:
     print(f"\n{'='*60}")
     print(f"  RESUME - Split Node Episode #{episode_num:03d}")
     print(f"  Stage: {stage} | Shots: {len(shots)}")
+    print(f"  Paragraph target: {target_paras} (sticking with the job-start count)")
     print(f"{'='*60}\n")
 
     def _save(stg):
@@ -5562,7 +5573,8 @@ def _resume_episode(state: dict) -> None:
                            character_sheets, titles, description, tags,
                            thumb_path, video_path, video_id,
                            chapter_events, anchor_events,
-                           location_sheets, prop_assets)
+                           location_sheets, prop_assets,
+                           target_paras=target_paras)
 
     # 1. Images: regenerate only the missing ones (same seeds -> same look)
     ep_shot_dir = SHOTS_DIR / f"ep{episode_num:03d}"
@@ -5811,6 +5823,39 @@ def _resume_episode(state: dict) -> None:
     _clear_resume_state()
 
 
+def _ask_paragraph_target() -> int:
+    """Interactive paragraph-count prompt with estimated runtime + confirm.
+
+    Fresh runs ask once; the confirmed count is persisted to resume state so
+    a resumed job sticks with the same target (never re-asks). The estimate
+    uses the measured narration pace (~14.3s per paragraph incl. pads).
+    """
+    n = TARGET_NARRATION_PARAS
+    while True:
+        resp = input(f"  How many narration paragraphs? (enter for {n}): ").strip()
+        if resp:
+            try:
+                n = int(resp)
+            except ValueError:
+                print(f"  [LENGTH] '{resp}' isn't a number")
+                continue
+        n = max(10, min(n, 400))
+        # estimate + confirm/change loop (typing a number here re-estimates)
+        while True:
+            est = n * SECONDS_PER_NARRATION_PARA
+            print(f"  [LENGTH] {n} paragraphs -> estimated video length "
+                  f"~{int(est // 60)}m {int(est % 60)}s")
+            resp2 = input("  Confirm? [Y/n] or type a new number: ").strip().lower()
+            if resp2 in ("", "y", "yes"):
+                return n
+            if resp2 in ("n", "no"):
+                break   # back to the count prompt
+            try:
+                n = max(10, min(int(resp2), 400))
+            except ValueError:
+                continue
+
+
 def main():
     if "--cache-logos" in sys.argv:
         names = [a for a in sys.argv[1:] if not a.startswith("-")]
@@ -5848,6 +5893,12 @@ def main():
         episode_num = default_ep
     print(f"\n  Episode #{episode_num:03d}")
 
+    # 1a. Video length: paragraph target up front, with estimated runtime +
+    #     confirm/change loop. Persisted to resume state so a resumed job
+    #     sticks with the count it started with (never re-asked).
+    target_paras = _ask_paragraph_target()
+    print(f"  [LENGTH] Target {target_paras} narration paragraphs\n")
+
     # Reusable episode template: load the last episode's winning formula
     tpl = _load_episode_template()
     if tpl:
@@ -5874,14 +5925,14 @@ def main():
         return
 
     # 3. Stage 1: narration script (Black Files style, cold open + anchors)
-    narration = _build_narration_script(paragraphs)
+    narration = _build_narration_script(paragraphs, target_paras)
 
     # 3b. Rate each narration segment against the topic, discard <= 4/10
     if narration:
         narration = _rate_paragraph_relevance(article_title, narration)
         if not narration:
             print("  [FILTER] All narration segments off-topic, rebuilding from filtered article...")
-            narration = _build_narration_script(paragraphs)
+            narration = _build_narration_script(paragraphs, target_paras)
 
     # 3c. Chapter pass: insert 'Chapter N - Title' paragraphs (black cards)
     narration, chapter_events = _insert_chapter_markers(narration)
@@ -5959,7 +6010,8 @@ def main():
     _save_resume_state("story", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
                        anchor_events=anchor_events,
-                       location_sheets=location_sheets, prop_assets=prop_assets)
+                       location_sheets=location_sheets, prop_assets=prop_assets,
+                       target_paras=target_paras)
 
     # 5. Generate images (Krea 2 Turbo local, character sheet prepended,
     #    angle-matched view, face-lock portraits) - runs while the TTS worker
@@ -5972,7 +6024,8 @@ def main():
     _save_resume_state("images", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
                        anchor_events=anchor_events,
-                       location_sheets=location_sheets, prop_assets=prop_assets)
+                       location_sheets=location_sheets, prop_assets=prop_assets,
+                       target_paras=target_paras)
     # Reusable episode template: this episode's winning formula for next time
     _save_episode_template(article_title, episode_num, bible, context,
                            roster_ids=list(character_sheets.keys())[:8])
@@ -5983,7 +6036,8 @@ def main():
     _save_resume_state("tts", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
                        anchor_events=anchor_events,
-                       location_sheets=location_sheets, prop_assets=prop_assets)
+                       location_sheets=location_sheets, prop_assets=prop_assets,
+                       target_paras=target_paras)
 
     # 6b. Title pass: whisper the voice track, resolve exact title times so
     #     the typewriter/glitch/shutter SFX + title cards match the narration.
@@ -6004,7 +6058,8 @@ def main():
         _save_resume_state("titles", episode_num, article_url, topic, shots,
                            character_sheets, chapter_events=chapter_events,
                            anchor_events=anchor_events,
-                           location_sheets=location_sheets, prop_assets=prop_assets)
+                           location_sheets=location_sheets, prop_assets=prop_assets,
+                       target_paras=target_paras)
 
     # 7. Render 1080p with full audio mix (voice+music+SFX+title SFX), black
     #    chapter placeholders, shutter black frames, then burn the titles.
@@ -6017,7 +6072,8 @@ def main():
                        character_sheets, titles=[], description="",
                        tags=[], video_path=video_path,
                        chapter_events=chapter_events, anchor_events=anchor_events,
-                       location_sheets=location_sheets, prop_assets=prop_assets)
+                       location_sheets=location_sheets, prop_assets=prop_assets,
+                       target_paras=target_paras)
 
     # 8. Titles + description (3 titles scored by Google Trends + YouTube
     #    competition, best first)
@@ -6033,7 +6089,8 @@ def main():
                        character_sheets, titles=titles, description=description,
                        tags=all_tags, video_path=video_path,
                        chapter_events=chapter_events, anchor_events=anchor_events,
-                       location_sheets=location_sheets, prop_assets=prop_assets)
+                       location_sheets=location_sheets, prop_assets=prop_assets,
+                       target_paras=target_paras)
 
     # 9. Thumbnail
     thumb_path = str(THUMBNAILS_DIR / f"ep{episode_num:03d}_thumb.png")
@@ -6042,7 +6099,8 @@ def main():
                        character_sheets, titles=titles, description=description,
                        tags=all_tags, thumb_path=thumb_path, video_path=video_path,
                        chapter_events=chapter_events, anchor_events=anchor_events,
-                       location_sheets=location_sheets, prop_assets=prop_assets)
+                       location_sheets=location_sheets, prop_assets=prop_assets,
+                       target_paras=target_paras)
 
     # 10. Upload to Split Node channel
     if YOUTUBE_UPLOAD_ENABLED:
