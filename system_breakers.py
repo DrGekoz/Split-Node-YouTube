@@ -5510,29 +5510,48 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
         tmp = RESUME_FILE.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2, default=str))
         tmp.replace(RESUME_FILE)
+        # Backup: keep the previous good state alongside the main file so a
+        # lost/corrupt/overwritten main file can never silently kill the
+        # resume prompt (load falls back to the .bak).
+        try:
+            RESUME_FILE.with_name(RESUME_FILE.name + ".bak").write_text(
+                json.dumps(state, indent=2, default=str))
+        except Exception:
+            pass
         print(f"  [STATE] Saved resume state (stage={stage}, {len(state['shots'])} shots)")
     except Exception as e:
         print(f"  [STATE] Could not save resume state: {e}")
 
 
 def _load_resume_state() -> Optional[dict]:
-    """Load resume state if it exists and is valid."""
-    if not RESUME_FILE.exists():
-        return None
-    try:
-        state = json.loads(RESUME_FILE.read_text())
-        if state.get("version") not in (1, 2, 3):
-            return None
-        return state
-    except Exception:
-        return None
+    """Load resume state if it exists and is valid.
+
+    Falls back to the .bak copy when the main file is missing or corrupt -
+    the resume prompt must never silently disappear because the state file
+    got lost (e.g. wiped mid-run or by external tooling).
+    """
+    for f in (RESUME_FILE, RESUME_FILE.with_name(RESUME_FILE.name + ".bak")):
+        if not f.exists():
+            continue
+        try:
+            state = json.loads(f.read_text())
+            if state.get("version") not in (1, 2, 3):
+                continue
+            if f != RESUME_FILE:
+                print("  [STATE] Main resume state missing/corrupt - "
+                      "restored from backup")
+            return state
+        except Exception:
+            continue
+    return None
 
 
 def _clear_resume_state() -> None:
     try:
-        if RESUME_FILE.exists():
-            RESUME_FILE.unlink()
-            print("  [STATE] Resume state cleared")
+        for f in (RESUME_FILE, RESUME_FILE.with_name(RESUME_FILE.name + ".bak")):
+            if f.exists():
+                f.unlink()
+        print("  [STATE] Resume state cleared")
     except Exception:
         pass
 

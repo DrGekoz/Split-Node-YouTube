@@ -2,6 +2,14 @@
 
 All notable changes to Split Node.
 
+## [1.3.1] - 2026-08-04
+
+### Resume state backup - the resume prompt can't silently disappear
+
+- `_save_resume_state` now writes a `.bak` copy alongside the main state file on every save
+- `_load_resume_state` falls back to the `.bak` when the main file is missing or corrupt (prints "Main resume state missing/corrupt - restored from backup")
+- `_clear_resume_state` removes both files on completion
+
 ## [1.3.0] - 2026-08-04
 
 ### Interactive video-length prompt
