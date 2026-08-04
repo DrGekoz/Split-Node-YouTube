@@ -104,29 +104,57 @@ def _base_graph(prompt: str, seed: int, width: int, height: int,
 
 def _upload_ref(image_path: str, base: str) -> str:
     """Upload a local image into ComfyUI's input dir via /upload/image,
-    return the filename LoadImage should use. Escape-proof multipart."""
+    return the filename LoadImage should use. Escape-proof multipart.
+
+    Every ref is re-encoded as a clean 8-bit RGB PNG (capped at 4096px)
+    before upload: ComfyUI 0.29.0 dies with a native access violation in
+    load_image on odd formats (paletted / 16-bit / CMYK / oversized PNGs),
+    which took the whole server down mid-run on ep8. The re-encode removes
+    that trigger and caps the VAE-encode VRAM cost of huge reference photos.
+    """
     import uuid
     import mimetypes
     boundary = "----krea" + uuid.uuid4().hex[:12]
     fn = os.path.basename(image_path)
     ct = mimetypes.guess_type(image_path)[0] or "image/png"
-    with open(image_path, "rb") as f:
-        data = f.read()
-    _CR = bytes([13])
-    _LF = bytes([10])
-    _CRLF = _CR + _LF
-    head = (
-        "--" + boundary + "\r\n"
-        "Content-Disposition: form-data; name=\"image\"; filename=\"" + fn + "\"\r\n"
-        "Content-Type: " + ct + "\r\n\r\n"
-    ).encode()
-    tail = ("\r\n--" + boundary + "--\r\n").encode()
-    body = head + data + tail
-    req = urllib.request.Request(base + "/upload/image", data=body, method="POST",
-                                 headers={"Content-Type":
-                                          "multipart/form-data; boundary=" + boundary})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        out = json.loads(r.read().decode())
+    tmp = None
+    try:
+        from PIL import Image
+        im = Image.open(image_path)
+        im = im.convert("RGB")
+        if max(im.size) > 4096:
+            im.thumbnail((4096, 4096), Image.LANCZOS)
+        tmp = image_path + ".clean.png"
+        im.save(tmp, "PNG")
+        image_path = tmp
+        fn = os.path.basename(tmp)
+        ct = "image/png"
+    except Exception:
+        tmp = None
+    try:
+        with open(image_path, "rb") as f:
+            data = f.read()
+        _CR = bytes([13])
+        _LF = bytes([10])
+        _CRLF = _CR + _LF
+        head = (
+            "--" + boundary + "\r\n"
+            "Content-Disposition: form-data; name=\"image\"; filename=\"" + fn + "\"\r\n"
+            "Content-Type: " + ct + "\r\n\r\n"
+        ).encode()
+        tail = ("\r\n--" + boundary + "--\r\n").encode()
+        body = head + data + tail
+        req = urllib.request.Request(base + "/upload/image", data=body, method="POST",
+                                     headers={"Content-Type":
+                                              "multipart/form-data; boundary=" + boundary})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            out = json.loads(r.read().decode())
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
     name = out.get("name") or fn
     return name
 
@@ -319,7 +347,7 @@ def build_api(prompt: str, seed: int, ref_images: list[str] | None = None,
     return api
 
 
-def generate(prompt: str, seed: int, out_path: str,
+def _generate_once(prompt: str, seed: int, out_path: str,
              ref_images: list[str] | None = None, denoise: float = 0.55,
              upscale: bool = True, timeout: int = 1800,
              prefix: str = "splitnode", steps: int = 8, cfg: float = 1.0,
@@ -328,7 +356,7 @@ def generate(prompt: str, seed: int, out_path: str,
              ref_method: str = "index_timestep_zero",
              ref_boost: float = 4.0, grounding_px: int = 1024,
              ref_images_b: list[str] | None = None) -> bool:
-    """Generate one image via ComfyUI. Blocks until the queue finishes.
+    """Generate one image via ComfyUI (single attempt). Blocks until the queue finishes.
     Every reference (single or multiple) is normalized to a 640x720 strip
     BEFORE conditioning - a full-res ref (e.g. a 4K photo) would otherwise
     make the KSampler denoise a 4K latent at ~60s/step.
@@ -364,14 +392,31 @@ def generate(prompt: str, seed: int, out_path: str,
                         prefix=prefix, steps=steps, cfg=cfg,
                         width=width, height=height, ref_mode=ref_mode,
                         ref_method=ref_method)
-    queued = _req(base, "/prompt", {"prompt": api}, timeout=60)
+    queued = _req(base, "/prompt", {"prompt": api}, timeout=120)
     pid = queued.get("prompt_id")
     if not pid:
         print(f"  [KREA] submit failed: {str(queued)[:200]}")
         return False
     t0 = time.time()
+    poll_fail = 0
     while time.time() - t0 < timeout:
-        hist = _req(base, f"/history/{pid}", timeout=30)
+        # ComfyUI blocks its HTTP handler while staging the 12.9GB UNET
+        # between jobs (~80s, --lowvram), so a transient timeout here does
+        # NOT mean the job died. Keep polling instead of aborting - aborting
+        # made the retry wrapper re-submit and queue duplicate jobs (each
+        # shot burned an "attempt 1/4: timed out" + a redundant render).
+        # Only bail after ~3 min of HARD consecutive failures (server
+        # crashed/restarted -> our prompt_id is gone forever -> the wrapper
+        # waits for recovery and re-runs the whole job).
+        try:
+            hist = _req(base, f"/history/{pid}", timeout=30)
+        except OSError:
+            poll_fail += 1
+            if poll_fail > 5:
+                raise
+            time.sleep(5)
+            continue
+        poll_fail = 0
         entry = hist.get(pid)
         if entry and entry.get("outputs"):
             imgs = []
@@ -396,6 +441,63 @@ def generate(prompt: str, seed: int, out_path: str,
             return False
         time.sleep(5)
     print(f"  [KREA] timeout after {timeout:.0f}s (job {pid})")
+    return False
+
+
+def _wait_for_comfy(max_wait: float = 240.0) -> str | None:
+    """ComfyUI 0.29.0 intermittently dies with a native access violation in
+    the image loader (Krea2 on 8GB --lowvram) and goes unresponsive for a
+    while - new connections are refused/reset until it recovers or is
+    relaunched. Poll /system_stats until it answers again. Clears the cached
+    URL so port re-detection happens. Returns a fresh base URL or None."""
+    global _COMFY
+    _COMFY = None
+    t0 = time.time()
+    while time.time() - t0 < max_wait:
+        try:
+            return _comfy_url()
+        except Exception:
+            time.sleep(5)
+    return None
+
+
+def generate(prompt: str, seed: int, out_path: str,
+             ref_images: list[str] | None = None, denoise: float = 0.55,
+             upscale: bool = True, timeout: int = 1800,
+             prefix: str = "splitnode", steps: int = 8, cfg: float = 1.0,
+             width: int = WIDTH, height: int = HEIGHT,
+             ref_mode: str = "img2img",
+             ref_method: str = "index_timestep_zero",
+             ref_boost: float = 4.0, grounding_px: int = 1024,
+             ref_images_b: list[str] | None = None) -> bool:
+    """Generate one image via ComfyUI, surviving server crashes/wedges.
+
+    ComfyUI 0.29.0 with Krea2 on 8GB --lowvram intermittently crashes with
+    a native access violation in the image loader and refuses/resets
+    connections until it recovers or is restarted. Instead of marking the
+    image FAILED on the first refused connection (which cascaded into
+    111/120 failed shots on ep8), wait for the server to answer again and
+    re-run the whole job - refs are re-uploaded, a fresh prompt_id is
+    queued. Gives up after max_retries so a permanently-dead server can't
+    stall the run (missing images fall back to dark plates at render).
+    """
+    max_retries = 4
+    for attempt in range(1, max_retries + 1):
+        try:
+            return _generate_once(prompt, seed, out_path, ref_images, denoise,
+                                  upscale, timeout, prefix, steps, cfg, width,
+                                  height, ref_mode, ref_method, ref_boost,
+                                  grounding_px, ref_images_b)
+        except (OSError, RuntimeError) as e:
+            if attempt >= max_retries:
+                print(f"  [KREA] ComfyUI unreachable after {attempt} attempts "
+                      f"({str(e)[:80]}) - giving up on this image")
+                return False
+            print(f"  [KREA] ComfyUI connection lost (attempt {attempt}/{max_retries}): "
+                  f"{str(e)[:80]}. Waiting for it to recover...")
+            if _wait_for_comfy(240.0) is None:
+                print("  [KREA] ComfyUI did not come back within 240s - giving up")
+                return False
     return False
 
 

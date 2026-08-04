@@ -18,6 +18,7 @@ thumbnails/
 # State tracking
 .episode_counter
 .used_articles.json
+.resume_state.json
 
 # Test / debug artifacts
 zoom_frames_*/
