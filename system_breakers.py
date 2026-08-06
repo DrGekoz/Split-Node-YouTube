@@ -1056,10 +1056,18 @@ SHUTTER_DB = -4.0
 
 # Discord announcement bot
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
-DISCORD_ANNOUNCE_CHANNELS = [
-    "1532603687619264512",
-    "1532603486829547680",
-]
+# Announcement channels: set via .env (DISCORD_ANNOUNCE_CHANNELS) as a
+# comma-separated list of channel IDs or #names, or a single DISCORD_CHANNEL.
+# Run `python discord_bot.py --setup` for a guided one-time setup.
+# Fallback keeps older installs (no env set) working with the original IDs.
+_DC = os.environ.get("DISCORD_ANNOUNCE_CHANNELS") or os.environ.get("DISCORD_CHANNEL")
+if _DC:
+    DISCORD_ANNOUNCE_CHANNELS = [c.strip() for c in _DC.split(",") if c.strip()]
+else:
+    DISCORD_ANNOUNCE_CHANNELS = [
+        "1532603687619264512",
+        "1532603486829547680",
+    ]
 
 # -- State helpers ---------------------------------------------------
 
@@ -6468,23 +6476,21 @@ def _post_discord_announcement(topic: str, video_id: str, episode_num: int,
         f"{url}"
     )
     print(f"  [DISCORD] Announcement:\n    {message[:120]}...")
-    for ch_id in DISCORD_ANNOUNCE_CHANNELS:
+    try:
+        import discord_bot
+    except Exception as e:
+        print(f"  [DISCORD] discord_bot import failed: {e}")
+        return
+    for ch in DISCORD_ANNOUNCE_CHANNELS:
         try:
-            data = json.dumps({"content": message}).encode()
-            req = urllib.request.Request(
-                f"https://discord.com/api/v10/channels/{ch_id}/messages",
-                data=data,
-                headers={
-                    "Authorization": f"Bot {DISCORD_BOT_TOKEN}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "DiscordBot (https://discord.gg/YSdqKR4wVB, 1.0)",
-                },
-                method="POST"
-            )
-            with urllib.request.urlopen(req, timeout=15) as r:
-                print(f"  [DISCORD] Posted to channel {ch_id} (HTTP {r.status})")
+            r = discord_bot.send_message(message, channel=ch,
+                                         token=DISCORD_BOT_TOKEN)
+            if r.get("error"):
+                print(f"  [DISCORD] Failed channel {ch}: {r.get('message', r.get('error'))}")
+            else:
+                print(f"  [DISCORD] Posted to channel {ch} (id={r.get('id', '?')})")
         except Exception as e:
-            print(f"  [DISCORD] Failed channel {ch_id}: {e}")
+            print(f"  [DISCORD] Failed channel {ch}: {e}")
     print("  [DISCORD] Announcement done")
 
 
@@ -6913,6 +6919,13 @@ def _ask_paragraph_target() -> int:
 
 
 def main():
+    if "--setup-discord" in sys.argv:
+        try:
+            import discord_bot
+            sys.exit(0 if discord_bot.setup() else 1)
+        except Exception as e:
+            print(f"  [DISCORD] setup failed: {e}")
+            return
     if "--list-styles" in sys.argv:
         print("Selectable style profiles (STYLE=<name>):")
         list_style_profiles()

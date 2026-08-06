@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.14.0] - 2026-08-06
+
+### Bring-your-own Discord bot + channel setup
+
+- New `discord_bot.py` (self-contained, stdlib only - no pip installs, no discord.py): a guided `--setup` wizard that creates/attaches your own bot, invites it to your server, and picks an announcement channel
+- Commands: `python discord_bot.py --setup / --test / --send "msg"` (also `python system_breakers.py --setup-discord`)
+- Discord REST calls now retry on rate limits (429) and 5xx with exponential backoff
+- Announcement channels are now configurable via `.env` (`DISCORD_ANNOUNCE_CHANNELS` as comma-separated IDs or `#names`, or a single `DISCORD_CHANNEL`) instead of hardcoded IDs; a fallback keeps older installs working
+- `_post_discord_announcement` now routes through `discord_bot` for channel-name resolution + retries; uploads still succeed even if Discord isn't configured (announcement skipped gracefully)
+- README: new "Discord announcements setup" section + common commands; verified live against the API (bot connected, 2 guilds)
+
 ## [1.13.0] - 2026-08-06
 
 ### Video-length prompt - ask minutes, work backwards to paragraphs

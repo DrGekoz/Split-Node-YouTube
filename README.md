@@ -353,6 +353,48 @@ After that, uploads are fully automatic. If the token later expires, the
 pipeline refreshes it itself; only a re-authorization (step 7) is ever needed
 manually.
 
+### 🤖 Discord announcements setup (your own bot)
+
+Split Node can post a "new episode is live" announcement to a Discord channel
+through a bot **you** create and own. Everything is self-contained in this
+repo — no pip installs, no discord.py. It uses the Discord REST API via the
+standard library.
+
+The easiest way is the guided setup:
+
+```bash
+python discord_bot.py --setup          # walks you through token + channel
+python discord_bot.py --test           # verify the bot + channel
+python discord_bot.py --send "hello"   # send a one-off test message
+```
+
+That's the same as running `python system_breakers.py --setup-discord`.
+
+Manual steps:
+
+1. **Create a bot** — open <https://discord.com/developers/applications>,
+   click **New Application**, name it, then go to the **Bot** tab and click
+   **Add Bot**.
+2. **Copy the token** — under the Bot tab, click **Reset Token** / **Copy**.
+3. **Invite it to your server** — the setup prints the invite URL (or use
+   `https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=3072&scope=bot`).
+   It needs **Send Messages** + **View Channels** permissions.
+4. **Pick a channel** — the setup lists your servers + channels and saves your
+   choice to `.env`.
+
+Config lives in `.env` (never committed):
+
+```bash
+# .env
+DISCORD_BOT_TOKEN=your_bot_token_here
+DISCORD_ANNOUNCE_CHANNELS=123456789012345678,#my-channel   # comma-separated IDs or #names
+# or just: DISCORD_CHANNEL=123456789012345678
+```
+
+When a video is uploaded, Split Node posts the announcement to every channel
+in `DISCORD_ANNOUNCE_CHANNELS`. If no token/channel is configured, it skips
+the announcement gracefully (the video still uploads to YouTube).
+
 ### Common Commands
 
 | Command | Purpose |
@@ -364,6 +406,9 @@ manually.
 | `EASTER_EGG="duck pope" python system_breakers.py` | Hide an easter egg in one shot, no prompt |
 | `python system_breakers.py --cache-logos OpenAI Claude` | Pre-cache brand logos without a full run |
 | `python oauth_split_node.py` | YouTube OAuth authorization |
+| `python discord_bot.py --setup` | Guided Discord bot + channel setup |
+| `python discord_bot.py --test` | Verify the Discord bot + channel |
+| `python discord_bot.py --send "hi"` | Send a one-off Discord test message |
 
 ---
 
@@ -379,6 +424,7 @@ split-node/
 ├── split_node_titles.py        Chapter / title ASS engine
 ├── analyze_sfx.py              Analyze SFX library (build/hit/decay)
 ├── trend_scorer.py             Score topic ideas (demand/room/trajectory)
+├── discord_bot.py               Your own Discord bot + announcements (REST, no deps)
 ├── upscale_4k.py               Optional standalone SPAN 4x upscaler
 │
 ├── style_sheets/               Style profiles + custom_styles.json + easter_eggs.json
