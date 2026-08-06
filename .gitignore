@@ -19,6 +19,7 @@ thumbnails/
 .episode_counter
 .used_articles.json
 .resume_state.json
+.resume_state.json.bak
 
 # Test / debug artifacts
 zoom_frames_*/

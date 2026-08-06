@@ -261,6 +261,153 @@ STYLE_PROMPT_FALLBACK = (
     "high detail, cinematic documentary recreation"
 )
 
+# PRE-BUILT STYLE PROFILES (Joe 2026-08-06): pick the whole channel's visual
+# style with one env var - `STYLE=<name>` or `STYLE_PROFILE=<name>`. The
+# selected descriptor is injected as TEXT into every generation (shots,
+# character panels, location/prop prompts) so there are NO style image refs.
+# An unrecognised/custom value is used verbatim as a free-form style tag.
+STYLE_PROFILES = {
+    "arcane": (
+        "bold animated style, strong stylized brushwork, painterly shading, "
+        "saturated colors, dramatic rim lighting, dark moody atmosphere, "
+        "high detail, cinematic documentary recreation"),
+    "bold-outline": (
+        "bold thick black outlines, flat cel-shaded color, comic book "
+        "illustration, high contrast, clean graphic shapes, dynamic angles, "
+        "dramatic lighting, high detail"),
+    "artsy": (
+        "loose expressive brushstrokes, impressionistic painterly texture, "
+        "visible canvas weave, warm muted palette, soft atmospheric light, "
+        "hand-painted fine-art look, high detail"),
+    "photoreal": (
+        "hyper-realistic photograph, tack-sharp focus, natural skin texture, "
+        "cinematic color grade, shallow depth of field, subtle film grain, "
+        "high detail, professional documentary photography"),
+    "noir": (
+        "black and white film noir, dramatic low-key lighting, deep crushed "
+        "shadows, hard contrast, gritty textured grain, moody shadows, "
+        "high detail"),
+    "synthwave": (
+        "retro synthwave aesthetic, neon glow, purple and pink palette, "
+        "chrome reflections, glowing grid floor, 1980s retro-futurism, "
+        "high detail"),
+    "editorial": (
+        "clean modern editorial illustration, minimal detail, bold flat "
+        "color fields, geometric shapes, contemporary magazine art, "
+        "high detail"),
+    "watercolor": (
+        "delicate watercolor wash, soft bleeding edges, translucent color "
+        "layers, gentle paper texture, airy and light, high detail"),
+}
+
+_STYLE_SELECTED_PRINTED = {"done": False}
+
+# User-added styles persist here so "add new style" survives across runs and
+# becomes selectable via STYLE=<name> like any built-in profile.
+STYLE_CUSTOM_FILE = PROJECT_DIR / "style_sheets" / "custom_styles.json"
+
+
+def _load_style_profiles() -> dict:
+    """Built-in STYLE_PROFILES merged with any user-added styles persisted in
+    custom_styles.json, so a new style is selectable on every future run."""
+    merged = dict(STYLE_PROFILES)
+    try:
+        if STYLE_CUSTOM_FILE.is_file():
+            custom = json.loads(STYLE_CUSTOM_FILE.read_text(encoding="utf-8"))
+            if isinstance(custom, dict):
+                for k, v in custom.items():
+                    if isinstance(v, str) and v.strip():
+                        merged[k.strip().lower()] = v.strip()
+    except Exception:
+        pass
+    return merged
+
+
+def list_style_profiles() -> None:
+    """Print every selectable style profile (built-in + custom)."""
+    for name, desc in sorted(_load_style_profiles().items()):
+        print(f"  {name:16} {desc[:60]}{'...' if len(desc) > 60 else ''}")
+
+
+def add_custom_style(name: str, descriptor: str) -> bool:
+    """Persist a new selectable style profile. Returns True on success."""
+    name = name.strip().lower()
+    descriptor = descriptor.strip()
+    if not name or not descriptor:
+        print("  [STYLE] add requires a name AND a descriptor")
+        return False
+    if name in STYLE_PROFILES:
+        print(f"  [STYLE] '{name}' is a built-in profile - pick another name")
+        return False
+    profiles = {}
+    try:
+        if STYLE_CUSTOM_FILE.is_file():
+            profiles = json.loads(STYLE_CUSTOM_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        profiles = {}
+    if not isinstance(profiles, dict):
+        profiles = {}
+    profiles[name] = descriptor
+    try:
+        STYLE_CUSTOM_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STYLE_CUSTOM_FILE.write_text(json.dumps(profiles, indent=2), encoding="utf-8")
+        print(f"  [STYLE] added custom style '{name}' -> selectable via STYLE={name}")
+        return True
+    except Exception as e:
+        print(f"  [STYLE] could not save custom style: {e}")
+        return False
+
+
+def remove_custom_style(name: str) -> bool:
+    try:
+        if not STYLE_CUSTOM_FILE.is_file():
+            return False
+        profiles = json.loads(STYLE_CUSTOM_FILE.read_text(encoding="utf-8"))
+        if isinstance(profiles, dict) and name.lower() in profiles:
+            del profiles[name.lower()]
+            STYLE_CUSTOM_FILE.write_text(json.dumps(profiles, indent=2),
+                                         encoding="utf-8")
+            print(f"  [STYLE] removed custom style '{name.lower()}'")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+# Set from the resume state when an episode is resumed, so a resume run keeps
+# the exact style the episode was generated with (unless STYLE is set).
+_RESUME_STYLE = None
+
+
+def _get_style_prompt(force: bool = False) -> str:
+    """Channel style descriptor for prompt injection. Resolution order:
+      1. env STYLE / STYLE_PROFILE (explicit choice for THIS run)
+      2. the style recorded in the resume state (resume runs keep their look)
+      3. the cached sheet-extracted descriptor / arcane default
+    A profile name in STYLE_PROFILES maps to its descriptor; anything else is
+    treated as a free-form style tag used verbatim."""
+    sel = (os.environ.get("STYLE") or os.environ.get("STYLE_PROFILE") or "").strip()
+    if not sel and _RESUME_STYLE:
+        sel = str(_RESUME_STYLE)
+    low = sel.lower()
+    profiles = _load_style_profiles()
+    if sel:
+        if low in profiles:
+            desc = profiles[low]
+        else:
+            desc = sel  # custom free-form style tag (incl. resume descriptor)
+    elif not force and STYLE_PROMPT_FILE.is_file():
+        txt = STYLE_PROMPT_FILE.read_text(encoding="utf-8").strip()
+        desc = txt or profiles["arcane"]
+    else:
+        desc = _describe_style_from_sheets() or profiles["arcane"]
+    if not _STYLE_SELECTED_PRINTED["done"]:
+        label = low if low in profiles else "custom"
+        extra = f" ({sel})" if low not in profiles else ""
+        print(f"  [STYLE] active profile: {label}{extra}")
+        _STYLE_SELECTED_PRINTED["done"] = True
+    return desc
+
 
 def _describe_style_from_sheets() -> str:
     """Vision model: describe ONLY the shared visual painting/render style of
@@ -301,23 +448,6 @@ def _describe_style_from_sheets() -> str:
     except Exception as e:
         print(f"  [STYLE] vision extraction failed: {str(e)[:80]}")
         return ""
-
-
-def _get_style_prompt(force: bool = False) -> str:
-    """Channel style descriptor for prompt injection (cached once)."""
-    if not force and STYLE_PROMPT_FILE.is_file():
-        txt = STYLE_PROMPT_FILE.read_text(encoding="utf-8").strip()
-        if txt:
-            return txt
-    desc = _describe_style_from_sheets()
-    if not desc:
-        desc = STYLE_PROMPT_FALLBACK
-    try:
-        STYLE_PROMPT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STYLE_PROMPT_FILE.write_text(desc, encoding="utf-8")
-    except Exception:
-        pass
-    return desc
 
 
 def _style_inject() -> str:
@@ -1797,16 +1927,20 @@ SHOT_SYSTEM_PROMPT = (
     "verbatim in every shot they appear in. NEVER switch to first-name-only, last-name-only, "
     "ALL CAPS, initials, or a different spelling - 'Stefan Mandel' stays 'Stefan Mandel' "
     "in every single shot. "
+    "If a shot contains MULTIPLE people, put ALL of their names in the character field "
+    "separated by commas (e.g. 'Stefan Mandel, Richard Lustig'). "
     "The scenes must show the characters actually DOING something - an action that "
     "moves the story forward. Never static portraits. Full scenes based on the actions "
-    "they take in the narration.\n\n"
+    "they take in the narration. ALWAYS state which way each character faces in the scene "
+    "description ('facing left', 'turned to the right', 'seen from behind', 'facing the "
+    "camera') so the correct reference panel is chosen for the shot.\n\n"
     + CAMERA_LOGIC +
     "\nI will give you one paragraph of the narration script. Create ONE shot for it. "
     "Respond with EXACTLY ONE LINE of 7 pipe-separated fields, in this exact order, "
     "with NO labels, NO extra text, NO line breaks:\n"
     "<shot type EWS/WS/MS/CU/ECU> | <camera angle: eye-level, low-angle, high-angle, over-the-shoulder, from-behind, side-on> | "
-    "<character NAME or NONE> | <character role, e.g. lottery mathematician> | "
-    "<full scene description: setting, what the character is DOING, props, lighting, camera framing. 2-4 sentences, action-focused> | "
+    "<character NAME or NONE, or comma-separated names for multiple people> | <character role, e.g. lottery mathematician> | "
+    "<full scene description: setting, what the character is DOING, which way each faces, props, lighting, camera framing. 2-4 sentences, action-focused> | "
     "<SFX filename or NONE> | <suspense | neutral | triumphant>\n"
     "Example line:\n"
     "MS | low-angle | Stefan Mandel | lottery mathematician | Stefan sits at a candlelit desk in a cramped 1980s Bucharest apartment, hunched over a spreadsheet of every number combination, a worn calculator in hand. | mixkit-cinematic-trailer-riser-790.wav | suspense\n"
@@ -2534,50 +2668,85 @@ def _runpod_generate(prompt: str, seed: int, size: str = "1280*720",
     return None
 
 def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> str:
-    """Build the RunPod prompt for one shot (shared by full gen and resume regen)."""
+    """Build the prompt for ONE shot (shared by full gen and resume regen).
+    Discovery logic (Joe 2026-08-06):
+      - characters (possibly several) -> each described via their archetype
+        sheet + which way they're facing
+      - location + prop + action always carried by the scene text (always)
+      - style injected separately by the caller (_style_inject)
+      - refs (which character panel / logo / prop) chosen by _select_shot_refs
+    """
     character_sheets = character_sheets or {}
     angle = shot.get("angle", "eye-level")
     cam_desc = ""
     if shot.get("shot_type"):
         cam_desc = f", {shot['shot_type']} framing, {angle} camera angle"
+    scene = shot.get("scene", "")
+    chars = _parse_shot_characters(shot)
+    if not chars:
+        # No character (establishing/landscape/object/hand-closeup shot) - use
+        # the scene-only style with zero human language so no person appears.
+        return (
+            f"{SCENE_STYLE}. {scene}{cam_desc}, "
+            f"16:9 widescreen cinematic documentary frame, EXACTLY ONE "
+            f"continuous scene, one location, no collage, no split panels, "
+            f"no duplicated scenes"
+        )
+    facing_txt = {"left": "facing left", "right": "facing right",
+                  "front": "facing the camera", "back": "seen from behind",
+                  "behind": "seen from behind"}
+    blocks = []
+    for ch in chars:
+        name = ch["name"]
+        sheet = _sheet_for_name(character_sheets, name)
+        cb = _character_prompt_block(sheet, angle) if sheet else ""
+        if not cb:
+            cb = f"a person named {name}"
+        facing = facing_txt.get(ch["facing"], "facing the camera")
+        blocks.append(f"{cb} ({facing})")
+    char_part = " ".join(blocks)
+    return (
+        f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}, "
+        f"16:9 widescreen cinematic documentary frame, EXACTLY ONE continuous "
+        f"scene, no collage, no duplicated figures"
+    )
 
-    char_name = shot.get("character", "NONE")
-    sheet = None
-    if char_name != "NONE":
-        # Case-insensitive lookup: sheet keys and shot character names can differ
-        # in casing ('ARS' vs 'Ars') - a missed match would wrongly fall through
-        # to the scene-only branch and drop the character entirely.
-        sheet = character_sheets.get(char_name)
-        if sheet is None:
-            for k, v in character_sheets.items():
-                if k.lower() == char_name.lower():
-                    sheet = v
-                    break
-    if sheet:
-        char_block = _character_prompt_block(sheet, angle)
-        prompt = (
-            f"{RENDER_STYLE}. {char_block}. {shot['scene']}{cam_desc}, "
-            f"16:9 widescreen cinematic documentary frame"
-        )
-    else:
-        # No character (establishing/landscape/object shot) - use the scene-only
-        # style with zero human language so no person is ever generated.
-        prompt = (
-            f"{SCENE_STYLE}. {shot['scene']}{cam_desc}, "
-            f"16:9 widescreen cinematic documentary frame"
-        )
-    return prompt
+
+def _get_output_resolution() -> tuple:
+    """(W, H) for the final image/video output - RESOLUTION env var.
+    1080p (default) or 4K (3840x2160). Overridden by a per-run prompt that is
+    persisted in resume state."""
+    r = os.environ.get("RESOLUTION", "1080p").strip().lower()
+    return (3840, 2160) if r.startswith("4k") or r in ("2160p", "uhd") else (1920, 1080)
+
+
+def _ask_resolution() -> str:
+    """Interactive resolution selection (1080p or 4K) - affects the image
+    upscale target AND the final FFmpeg video output. RESOLUTION env var
+    overrides the prompt; returns the chosen key ('1080p' or '4k')."""
+    if os.environ.get("RESOLUTION"):
+        r = os.environ.get("RESOLUTION").strip().lower()
+        return "4k" if r.startswith("4k") or r in ("2160p", "uhd") else "1080p"
+    print("\n  Output resolution (affects image upscale target + final video):")
+    while True:
+        resp = input("  1080p or 4K? [1080p]: ").strip().lower()
+        if resp in ("4k", "2160p", "uhd", "4"):
+            return "4k"
+        if resp in ("1080p", "1080", "hd", ""):
+            return "1080p"
+        print(f"  [WARN] '{resp}' not recognised - enter 1080p or 4K")
 
 
 def _black_placeholder(episode_num: int) -> str:
-    """1920x1080 pure-black PNG used for chapter title placeholder clips."""
+    """WxH pure-black PNG used for chapter title placeholder clips."""
+    W_RES, H_RES = _get_output_resolution()
     ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
     ep_dir.mkdir(parents=True, exist_ok=True)
     out = str(ep_dir / "_black.png")
     if os.path.isfile(out) and os.path.getsize(out) > 1000:
         return out
     from PIL import Image
-    Image.new("RGB", (1920, 1080), (0, 0, 0)).save(out)
+    Image.new("RGB", (W_RES, H_RES), (0, 0, 0)).save(out)
     return out
 
 
@@ -3259,73 +3428,73 @@ def _brand_logo_for(location: str, brands: dict) -> Optional[str]:
     return None
 
 
+# Common hardening applied to EVERY location panel (Joe 2026-08-06):
+# location sheets are PURE txt2img (no image refs), so the model must be told
+# there is nothing to copy - exactly ONE continuous scene. The old prompts
+# said 'reference artwork / reference images show DIFFERENT scenes' which the
+# model read as 'composite multiple references' -> the 2x-collage + people
+# bug. Also: strip the per-view hardcoded style (it conflicted with the real
+# channel style injected via _style_inject()).
+LOC_HARDEN = (
+    "Render EXACTLY ONE single continuous scene showing EXACTLY ONE location. "
+    "This is a standalone text-to-image - there are NO reference images to copy "
+    "from. No collage, no split panels, no multiple images, no diptych, no "
+    "duplicated scenes, no mirrored repeats, no doubled subjects. One plain "
+    "composition, a single cohesive frame. "
+    "STRICTLY NO people, no humans, no faces, no characters, no figures, no "
+    "silhouettes, no body parts, no hands, no persons of any kind anywhere in "
+    "frame. The place is completely empty of people."
+)
+
+# A bare place name (country/region/city/town) has no concrete scene to anchor
+# on - the model freezes on 'The Netherlands' and hallucinates collage/people.
+# If the location does not read as a specific built venue, anchor it to a
+# representative city/street scene.
+_LOC_VENUE_HINT = re.compile(
+    r"(?i)\b(building|office|headquarters|hq|floor|room|apartment|house|home|"
+    r"casino|store|shop|factory|warehouse|bank|hotel|hospital|station|airport|"
+    r"restaurant|bar|club|nightclub|street|road|avenue|square|park|beach|desert|"
+    r"forest|mountain|field|farm|mall|market|gym|church|school|university|"
+    r"library|studio|kitchen|bedroom|garage|basement|rooftop|alley|pier|dock|"
+    r"bridge|tunnel|yard|landfill|site|compound|facility|campus|dorm|vault|"
+    r"bunker|shelter|interior|inside|of the)\b")
+
+
+def _location_scene_clause(location: str) -> str:
+    """For a bare place name, return a clause anchoring it to a representative
+    city/street scene (so 'The Netherlands' renders as a Dutch street, not junk).
+    Returns '' for specific venues which should render as-is."""
+    if _LOC_VENUE_HINT.search(location):
+        return ""
+    return ("Show a representative city or street scene of this place, the "
+            "local architecture and streetscape at a cinematic angle. ")
+
+
 LOCATION_VIEWS = [
     ("establishing",
-     "A wide establishing shot of THIS EXACT LOCATION, entire setting visible. "
-     "Use ONLY the painting and render style from the reference artwork - "
-     "bold animated style, strong stylized brushwork, painterly shading, "
-     "saturated colors, dramatic rim lighting, dark moody atmosphere. The "
-     "reference images show DIFFERENT scenes - the setting in this panel is "
-     "this exact location and NOTHING else. STRICTLY NO people, no humans, "
-     "no faces, no characters, no figures, no silhouettes, no body parts, "
-     "no hands, no persons of any kind anywhere in frame. Plain composition, "
-     "one location only."),
+     "A wide establishing shot of the location, the entire setting visible."),
     ("front_left",
-     "A medium shot of THIS EXACT LOCATION seen from the front-left angle. "
-     "Use ONLY the painting and render style from the reference artwork - "
-     "bold animated style, strong stylized brushwork, painterly shading, "
-     "saturated colors, dramatic rim lighting, dark moody atmosphere. The "
-     "reference images show DIFFERENT scenes - the setting in this panel is "
-     "this exact location and NOTHING else. STRICTLY NO people, no humans, "
-     "no faces, no characters, no figures, no silhouettes, no body parts, "
-     "no hands, no persons of any kind anywhere in frame. One location only."),
+     "A medium shot of the location seen from the front-left angle."),
     ("front_right",
-     "A medium shot of THIS EXACT LOCATION seen from the front-right angle. "
-     "Use ONLY the painting and render style from the reference artwork - "
-     "bold animated style, strong stylized brushwork, painterly shading, "
-     "saturated colors, dramatic rim lighting, dark moody atmosphere. The "
-     "reference images show DIFFERENT scenes - the setting in this panel is "
-     "this exact location and NOTHING else. STRICTLY NO people, no humans, "
-     "no faces, no characters, no figures, no silhouettes, no body parts, "
-     "no hands, no persons of any kind anywhere in frame. One location only."),
+     "A medium shot of the location seen from the front-right angle."),
     ("interior",
-     "A view inside THIS EXACT LOCATION, interior space, furniture and details "
-     "visible. Use ONLY the painting and render style from the reference "
-     "artwork - bold animated style, strong stylized brushwork, painterly "
-     "shading, saturated colors, dramatic rim lighting, dark moody atmosphere. "
-     "The reference images show DIFFERENT scenes - the setting in this panel "
-     "is this exact location and NOTHING else. STRICTLY NO people, no humans, "
-     "no faces, no characters, no figures, no silhouettes, no body parts, no "
-     "hands, no persons of any kind anywhere in frame. One location only."),
+     "A view inside the location, interior space, furniture and details visible."),
     ("detail",
-     "A close-up detail shot of a distinctive feature of THIS EXACT LOCATION "
-     "(a sign, a doorway, a key object). Use ONLY the painting and render "
-     "style from the reference artwork - bold animated style, strong stylized "
-     "brushwork, painterly shading, saturated colors, dramatic rim lighting, "
-     "dark moody atmosphere. The reference images show DIFFERENT scenes - the "
-     "setting in this panel is this exact location and NOTHING else. STRICTLY "
-     "NO people, no humans, no faces, no characters, no figures, no "
-     "silhouettes, no body parts, no hands, no persons of any kind anywhere "
-     "in frame. One location only."),
+     "A close-up detail shot of a distinctive feature of the location (a sign, "
+     "a doorway, a key object)."),
     ("overhead",
-     "An overhead elevated shot of THIS EXACT LOCATION from above, layout "
-     "visible. Use ONLY the painting and render style from the reference "
-     "artwork - bold animated style, strong stylized brushwork, painterly "
-     "shading, saturated colors, dramatic rim lighting, dark moody atmosphere. "
-     "The reference images show DIFFERENT scenes - the setting in this panel "
-     "is this exact location and NOTHING else. STRICTLY NO people, no humans, "
-     "no faces, no characters, no figures, no silhouettes, no body parts, no "
-     "hands, no persons of any kind anywhere in frame. One location only."),
+     "An overhead elevated shot of the location from above, layout visible."),
 ]
 
 
 def _generate_location_sheet(location: str, seed: int, out_dir: Path,
                              logo_ref: Optional[str] = None) -> Optional[str]:
-    """6-panel stylized location sheet (3x2 grid, 1920x1080). Refs = the
-    style plate ONLY (an asset, not a shot). Panels render at 640x540 and are
-    composed exactly like the character sheet. Cached per location name.
-    When the location IS a business building, its logo joins the refs so the
-    logo appears inside the generated location (signage, lobby, facade)."""
+    """6-panel stylized location sheet (3x2 grid, 1920x1080). Panels render at
+    the SAME resolution as character-sheet panels (SHEET_PANEL_W x SHEET_PANEL_H,
+    640x540) and are composed with the exact same grid method, so location
+    sheets and character sheets line up 1:1 as shot refs. Cached per location
+    name. When the location IS a business building, its logo joins the refs so
+    the logo appears inside the generated location (signage, lobby, facade)."""
     safe = re.sub(r"[^A-Za-z0-9]+", "_", location.lower()).strip("_") or "loc"
     out = out_dir / f"{safe}_sheet.png"
     if out.is_file():
@@ -3342,21 +3511,22 @@ def _generate_location_sheet(location: str, seed: int, out_dir: Path,
         if pan.is_file():
             panels[view] = str(pan)
             continue
-        p = (f"{prompt_txt} The location is: {location}. "
-             f"{_style_inject()}")
+        scene = _location_scene_clause(location)
+        p = (f"{prompt_txt} {scene}The location is: {location}. "
+             f"{LOC_HARDEN} {_style_inject()}")
         if logo:
             print(f"  [LOCATION] '{location}' panel {view} "
-                  f"(logo ref, 720p->1080p)...")
+                  f"(logo ref, 640x540)...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
-                                ref_images=[logo], denoise=1.0, upscale=True,
-                                steps=10, width=1280, height=720,
+                                ref_images=[logo], denoise=1.0, upscale=False,
+                                steps=10, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
                                 ref_mode="reference")
         else:
             print(f"  [LOCATION] '{location}' panel {view} (txt2img+style, "
-                  f"720p->1080p)...")
+                  f"640x540)...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
-                                ref_images=None, denoise=1.0, upscale=True,
-                                steps=10, width=1280, height=720,
+                                ref_images=None, denoise=1.0, upscale=False,
+                                steps=10, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
                                 ref_mode="img2img")
         if ok:
             panels[view] = str(pan)
@@ -3493,6 +3663,23 @@ def _match_prop_asset(scene: str, prop_assets: dict) -> Optional[str]:
     return best if best_score >= 1 else None
 
 
+def _broll_refs(shot: dict, location_sheets: dict, prop_assets: dict) -> list:
+    """Asset-sheet refs for a char=NONE shot (Joe 2026-08-04).
+
+    A LOCATION shot (scene matches a location sheet, no prop) references the
+    location sheet only. A B-ROLL shot (scene matches a prop too) references
+    the location sheet + prop sheet. Empty list = no asset matched -> caller
+    falls back to txt2img + style prompt injection."""
+    refs: list[str] = []
+    loc = _match_location_sheet(shot.get("scene", ""), location_sheets)
+    if loc:
+        refs.append(loc)
+    prop = _match_prop_asset(shot.get("scene", ""), prop_assets)
+    if prop and prop not in refs:
+        refs.append(prop)
+    return refs
+
+
 def _build_location_sheets(context: dict, seed: int, ep_dir: Path,
                            brands: Optional[dict] = None) -> dict:
     """Location sheets for every unique place/environment in the episode world.
@@ -3512,7 +3699,9 @@ def _build_location_sheets(context: dict, seed: int, ep_dir: Path,
     out_dir.mkdir(parents=True, exist_ok=True)
     sheets = {}
     print(f"\n[ASSETS] {len(names)} locations -> stylized sheets...")
-    for i, loc in enumerate(names[:6]):
+    _loc_iter = (tqdm(names[:6], desc="  [ASSETS] location sheets", unit="sheet",
+                      leave=False) if _HAS_PROGRESS else names[:6])
+    for i, loc in enumerate(_loc_iter):
         logo_ref = _brand_logo_for(loc, brands)
         path = _generate_location_sheet(loc, seed + i * 1000, out_dir,
                                         logo_ref=logo_ref)
@@ -3535,7 +3724,9 @@ def _build_prop_assets(context: dict, seed: int, ep_dir: Path,
     out_dir.mkdir(parents=True, exist_ok=True)
     assets = {}
     print(f"\n[ASSETS] {len(props)} props -> stylized front/back assets...")
-    for i, prop in enumerate(props[:8]):
+    _prop_iter = (tqdm(props[:8], desc="  [ASSETS] prop assets", unit="prop",
+                       leave=False) if _HAS_PROGRESS else props[:8])
+    for i, prop in enumerate(_prop_iter):
         path = _generate_prop_asset(prop, seed + 500 + i * 1000, out_dir,
                                     brands=brands)
         if path:
@@ -3571,127 +3762,309 @@ SHEET_PANELS = [
      "Create a close-up portrait of THIS EXACT MAN's face, head and face only, "
      "full face centered, both eyes looking at camera, hair styled as in the "
      "reference, expression neutral. NOTHING else in frame - no shoulders, no "
-     "neck, no body. Use ONLY the painting and render style from the "
-     "reference artwork - bold animated style, strong stylized brushwork, "
-     "painterly shading, saturated colors on the skin and hair; the person "
-     "shown is THIS EXACT MAN and no one else. Plain light grey "
-     "studio background, flat even neutral lighting, no dramatic lighting, "
-     "no coloured lighting, no rim light, one person only.",
+     "neck, no body. The person shown is THIS EXACT MAN and no one else. "
+     "Plain light grey studio background, flat even neutral lighting, no "
+     "dramatic lighting, no coloured lighting, no rim light, one person only.",
      "index_timestep_zero"),
     ("face_side", "face", 0.5,
      "Show THIS EXACT MAN in left side profile, head only, same hair, same "
      "face, no body, no shoulders. EXACTLY ONE single person, absolutely no "
-     "second figure, no duplicate, no mirror image. Use ONLY the painting and "
-     "render style from the reference artwork - bold animated style, strong "
-     "stylized brushwork, painterly shading, saturated colors. Plain light "
-     "grey studio background, flat even neutral lighting, no dramatic "
-     "lighting, no coloured lighting, one person only.",
+     "second figure, no duplicate, no mirror image. The person shown is THIS "
+     "EXACT MAN and no one else. Plain light grey studio background, flat even "
+     "neutral lighting, no dramatic lighting, no coloured lighting, one "
+     "person only.",
      "uxo/uno"),
     ("face_back", "face", 0.5,
      "Show the back of THIS EXACT MAN's head, rear view, hair as in the "
      "reference, no face visible, no body. EXACTLY ONE single person, "
-     "absolutely no second figure, no duplicate, no mirror image. Use ONLY "
-     "the painting and render style from the reference artwork - bold "
-     "animated style, strong stylized brushwork, painterly shading. Plain "
-     "light grey studio background, flat even neutral lighting, no dramatic "
-     "lighting, no coloured lighting, one person only.",
+     "absolutely no second figure, no duplicate, no mirror image. The person "
+     "shown is THIS EXACT MAN and no one else. Plain light grey studio "
+     "background, flat even neutral lighting, no dramatic lighting, no "
+     "coloured lighting, one person only.",
      "uxo/uno"),
     ("body_front", "face", 0.55,
      "Show THIS EXACT MAN full body standing facing the camera, complete "
      "outfit as in the reference, face identical, entire body head to feet, "
      "both feet on the ground, arms relaxed at sides. EXACTLY ONE single "
      "person, absolutely no second figure, no duplicate, no mirror image. "
-     "Use ONLY the painting and render style from the reference artwork - "
-     "bold animated style, strong stylized brushwork, painterly shading, "
-     "saturated colors. Plain light grey studio background, flat even "
-     "neutral lighting, no dramatic lighting, no coloured lighting.",
+     "The person shown is THIS EXACT MAN and no one else. Plain light grey "
+     "studio background, flat even neutral lighting, no dramatic lighting, "
+     "no coloured lighting.",
      "index_timestep_zero"),
     ("body_side", "body_front", 0.5,
      "Show THIS EXACT MAN full body side profile view facing left, same "
      "outfit, same face, same build, entire body head to feet. EXACTLY ONE "
      "single person, absolutely no second figure, no duplicate, no mirror "
-     "image, no shadow clone, no extra person anywhere in frame. Use ONLY "
-     "the painting and render style from the reference artwork - bold "
-     "animated style, strong stylized brushwork, painterly shading. Plain "
-     "light grey studio background, flat even neutral lighting, no dramatic "
-     "lighting, no coloured lighting.",
+     "image, no shadow clone, no extra person anywhere in frame. The person "
+     "shown is THIS EXACT MAN and no one else. Plain light grey studio "
+     "background, flat even neutral lighting, no dramatic lighting, no "
+     "coloured lighting.",
      "uxo/uno"),
     ("body_back", "body_front", 0.5,
      "Show THIS EXACT MAN full body rear view, back of head and full outfit "
      "visible, standing, entire body head to feet. EXACTLY ONE single "
      "person, absolutely no second figure, no duplicate, no mirror image. "
-     "Use ONLY the painting and render style from the reference artwork - "
-     "bold animated style, strong stylized brushwork, painterly shading. "
-     "Plain light grey studio background, flat even neutral lighting, no "
-     "dramatic lighting, no coloured lighting.",
+     "The person shown is THIS EXACT MAN and no one else. Plain light grey "
+     "studio background, flat even neutral lighting, no dramatic lighting, "
+     "no coloured lighting.",
      "uxo/uno"),
 ]
 
 
+# Character sheet panels are now SIX INDIVIDUAL 1280x1280 images (Joe
+# 2026-08-06) - they are NOT merged into a grid anymore. Each is used as the
+# image ref for a shot depending on the shot's framing + the person's facing.
+CHAR_PANEL_W, CHAR_PANEL_H = 1280, 1280
+CHAR_PANEL_VIEWS = ["face", "face_side", "face_back",
+                    "body_front", "body_side", "body_back"]
+
+# facing -> which panel to use, per camera subject (face for close-ups, body
+# for wide shots). 'right' reuses the left-facing side panel MIRRORED.
+_FACING_PANEL = {
+    "front":  {"face": "face",       "body": "body_front"},
+    "left":   {"face": "face_side",  "body": "body_side"},
+    "right":  {"face": "face_side",  "body": "body_side"},  # mirrored
+    "back":   {"face": "face_back",  "body": "body_back"},
+    "behind": {"face": "face_back",  "body": "body_back"},
+}
+
+# camera framing -> which body part the shot is ABOUT (drives face vs body ref)
+_FRAMING_SUBJECT = {"EWS": "body", "WS": "body", "MS": "body",
+                    "CU": "face", "ECU": "face"}
+
+_BG_CHAR_HINT = re.compile(
+    r"(?i)\b(in the background|behind him|behind her|stands behind|watches "
+    r"from|in the doorway|across the room|in the distance|off to the side|"
+    r"background|secondary)\b")
+
+
+def _shot_facing(shot, default: str = "front") -> str:
+    """Determine which way the on-screen character(s) face, from the camera
+    angle + scene text. side panels are generated facing LEFT, so a right-facing
+    shot uses the side panel mirrored."""
+    angle = (shot.get("angle") or "").lower()
+    scene = (shot.get("scene") or "").lower()
+    if any(x in angle for x in ("from-behind", "from behind", "rear", "behind")):
+        return "back"
+    if any(x in angle for x in ("over-the-shoulder", "over the shoulder")):
+        return "back"
+    if re.search(r"(?i)\b(rear view|back of|from behind|turning away|turned "
+                 r"away|walks away|his back|her back)\b", scene):
+        return "back"
+    if re.search(r"(?i)\b(facing left|turned left|to the left|left profile|"
+                 r"left side|leftward|looking left)\b", scene):
+        return "left"
+    if re.search(r"(?i)\b(facing right|turned right|to the right|right "
+                 r"profile|right side|rightward|looking right)\b", scene):
+        return "right"
+    return default
+
+
+def _parse_shot_characters(shot) -> list[dict]:
+    """Parse the shot's character field into [{name, facing}]. Supports a
+    comma list ('Stefan Mandel, Richard Lustig') and per-name facing via
+    'Name(left)'. Defaults facing from the shot's scene/angle heuristics."""
+    raw = str(shot.get("character", "NONE")).strip()
+    if not raw or raw.upper() == "NONE":
+        return []
+    default_facing = _shot_facing(shot)
+    out = []
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok or tok.upper() == "NONE":
+            continue
+        m = re.match(r"^(.*?)\s*\(([^)]*)\)\s*$", tok)
+        if m:
+            name, facing = m.group(1).strip(), m.group(2).strip().lower()
+        else:
+            name, facing = tok, default_facing
+        if facing not in _FACING_PANEL:
+            facing = default_facing if default_facing in _FACING_PANEL else "front"
+        if name:
+            out.append({"name": name, "facing": facing})
+    return out
+
+
+def _shot_uses_character(shot) -> bool:
+    """False for close-ups that are explicitly a body part / object / prop
+    (e.g. a hand, a phone, typing) - no person ref even if a name is attached."""
+    st = str(shot.get("shot_type", "")).upper()
+    scene = (shot.get("scene") or "").lower()
+    if st in ("ECU", "CU") and re.search(
+            r"(?i)\b(close-up of|closeup of|hand|hands|fingers|finger|"
+            r"object|keyboard|keys|phone|screen|monitor|machine|tool|device|"
+            r"wrist|watch|typing on|the\w* (button|lever|switch|dial|lock))\b",
+            scene):
+        return False
+    return True
+
+
+def _mirror_image(src: str, out: str) -> Optional[str]:
+    """Horizontally flip an image (used to turn the left-facing side panels
+    into right-facing refs). Returns the mirrored path or None on failure."""
+    try:
+        from PIL import Image, ImageOps
+        im = Image.open(src).convert("RGB")
+        ImageOps.mirror(im).save(out)
+        return out if os.path.getsize(out) > 1000 else None
+    except Exception as e:
+        print(f"  [MIRROR] {e}")
+        return None
+
+
+def _is_business_shot(shot) -> bool:
+    scene = (shot.get("scene") or "").lower()
+    return bool(re.search(
+        r"(?i)\b(hq|headquarters|head office|office|corporate|company|"
+        r"startup|founded|boardroom|executive suite|lobby|factory floor|"
+        r"data center|server room|warehouse|office building|signage|"
+        r"storefront|lab|the office|their office|at the company)\b", scene))
+
+
+def _select_shot_refs(shot, char_panels_cache, brand_assets=None):
+    """Pick the reference image(s) for a shot. Returns (refs, notes).
+    refs = image files fed to Krea (char panels, optionally mirrored, + a
+    brand logo for business shots). notes = human summary of the choice.
+
+    Ref logic (Joe 2026-08-06):
+      - wide shot -> body panel; close-up -> face panel
+      - facing left -> side panel as-is; facing right -> side panel MIRRORED
+      - back/from-behind -> back panel
+      - a close-up of a hand / object -> NO person ref at all
+      - multiple people -> one ref each (face/body can mismatch per framing)
+      - business HQ / interior shot -> also include the real brand logo ref
+    """
+    refs, notes = [], []
+    st = str(shot.get("shot_type", "")).upper()
+    subject = _FRAMING_SUBJECT.get(st, "body")
+    visible = _shot_uses_character(shot)
+    scene = (shot.get("scene") or "").lower()
+    for ch in _parse_shot_characters(shot):
+        if not visible:
+            break
+        panels = char_panels_cache.get(ch["name"])
+        if not panels:
+            continue
+        facing = ch["facing"]
+        # Secondary/background figure -> prefer a body ref (seen full-ish)
+        eff_subject = subject
+        if _BG_CHAR_HINT.search(scene) and len(_parse_shot_characters(shot)) > 1:
+            eff_subject = "body"
+        panel_key = _FACING_PANEL[facing][eff_subject]
+        panel_path = panels.get(panel_key) or panels.get("body_front") \
+            or panels.get("face")
+        if not panel_path or not os.path.isfile(panel_path):
+            continue
+        mirrored = (facing == "right" and panel_key.endswith("_side"))
+        if mirrored:
+            m = _mirror_image(panel_path, panel_path + ".mirror.png")
+            if m:
+                refs.append(m)
+                notes.append(f"{ch['name']}: {panel_key} (mirrored right)")
+                continue
+        refs.append(panel_path)
+        notes.append(f"{ch['name']}: {panel_key} ({facing})")
+    if brand_assets and _is_business_shot(shot):
+        brand = _match_brand_asset(shot.get("scene", ""), brand_assets)
+        if brand and brand not in refs and os.path.isfile(brand):
+            refs.append(brand)
+            notes.append(f"brand logo: {os.path.basename(brand)}")
+    return refs, "; ".join(notes)
+
+
+def _char_panels_paths(sheets_dir: Path, safe: str) -> dict:
+    """dict of view -> panel file path for a character's individual panels."""
+    return {v: str(sheets_dir / f"{safe}_{v}.png") for v in CHAR_PANEL_VIEWS}
+
+
+def _sheet_for_name(character_sheets: dict, name: str) -> Optional[dict]:
+    """Tolerant character-sheet lookup by name: exact key, case-insensitive
+    key, then a token within a comma-separated key. The last case handles
+    multi-person shots where the legacy pipeline keyed ONE sheet def by
+    'Name A, Name B' (e.g. ep8) - the def is reused for whichever person."""
+    if not character_sheets:
+        return None
+    v = character_sheets.get(name)
+    if isinstance(v, dict):
+        return v
+    nl = name.lower()
+    for k, val in character_sheets.items():
+        if isinstance(val, dict) and k.lower() == nl:
+            return val
+    for k, val in character_sheets.items():
+        if not isinstance(val, dict):
+            continue
+        for token in k.split(","):
+            if token.strip().lower() == nl:
+                return val
+    return None
+
+
 def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
-                              sheets_dir: Path) -> Optional[str]:
-    """Character sheet (1920x1080, 3x2 grid): face / face side / face back /
-    body front / body side / body back.
+                              sheets_dir: Path) -> dict:
+    """Generate a character's SIX INDIVIDUAL 1280x1280 panels (NO grid merge):
+    face / face_side / face_back / body_front / body_side / body_back. Returns
+    a dict {view -> panel file path} used as refs by _select_shot_refs (each
+    shot picks the perfect panel by framing + facing).
 
     Identity mode (krea2edit LoRA + real photo):
-      face      = [style_plate, real_photo] (2 refs, ref_boost 4.0)
+      face      = [real_photo] ONLY (ONE tight identity ref, ref_boost 4.0)
       all other = [face-front] ONLY (ref_boost 2.0 - prompt controls pose,
                   low boost stops the face ref bleeding into the body shot)
-    The sheet is then used as the image reference for every shot the
-    character appears in. Real photo comes from Google Images (SerpAPI).
-    Panels that fail are skipped; if the face panel fails the sheet falls
-    back to txt2img.
+    STYLE is injected as TEXT via _style_inject (no style-plate refs).
+    Real photo comes from Google Images (SerpAPI). Panels that fail are
+    skipped; if the face panel fails the char gets no usable panels.
     """
     safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
-    out = sheets_dir / f"{safe}_sheet.png"
-    if out.is_file():
-        print(f"  [SHEET] reuse {os.path.basename(out)}")
-        return str(out)
+    sheets_dir.mkdir(parents=True, exist_ok=True)
+    existing = {v: str(sheets_dir / f"{safe}_{v}.png") for v in CHAR_PANEL_VIEWS}
+    if all(os.path.isfile(p) for p in existing.values()):
+        print(f"  [SHEET] {char_name}: reuse all {len(existing)} individual panels (1280x1280)")
+        return existing
     ref_photo = _find_real_reference(char_name, sheet.get("role", ""))
     char_block = _character_prompt_block(sheet, "eye-level")
     # Identity mode (krea2edit LoRA, approved on the Elon test) when a real
     # photo exists: panels chain off ONE tight ref at a time (real photo ->
     # face -> face_side/back/body_front -> body_side/back), euler, boost 4.
+    # STYLE is always injected as TEXT (_style_inject) - no style plate ref.
     use_identity = ref_photo is not None
     if use_identity:
         print(f"  [SHEET] {char_name}: identity mode (krea2edit LoRA, real ref)")
     else:
         print(f"  [SHEET] {char_name}: Kontext reference mode (no real photo)")
     panels: dict[str, str] = {}
-    for view, ref_src, denoise, view_desc, ref_method in SHEET_PANELS:
+    _pan_iter = (tqdm(SHEET_PANELS, desc=f"  [SHEET] {char_name} panels",
+                      unit="panel", leave=False)
+                 if _HAS_PROGRESS else SHEET_PANELS)
+    for view, ref_src, denoise, view_desc, ref_method in _pan_iter:
         pan = sheets_dir / f"{safe}_{view}.png"
         if pan.is_file():
             panels[view] = str(pan)
             continue
         if use_identity:
-            # Identity mode prompt = view_desc ONLY (no RENDER_STYLE, no
-            # char_block, no "reference panel" suffix). VERIFIED 2026-08-04:
-            # prepending the long RENDER_STYLE block to an identity panel
-            # prompt flips the model into img2img copy mode - the body panels
-            # reproduced the face ref (giant head at 345x345, same pixel
-            # position). The style comes from the refs (face panel / style
-            # plate), the text only controls pose + framing. Short prompts
+            # Identity mode prompt = view_desc ONLY + the selected STYLE
+            # injected as TEXT (_style_inject). VERIFIED 2026-08-04: prepending
+            # the long RENDER_STYLE character block to an identity panel prompt
+            # flips the model into img2img copy mode - the body panels
+            # reproduced the face ref (giant head, same pixel position). The
+            # short view text + a style tag control pose/framing/style while
+            # the ONE tight identity ref locks the face. Short prompts
             # = clean full bodies (71px face at top of frame).
-            p = view_desc
+            p = view_desc + " " + _style_inject()
         else:
             # Kontext fallback (no real photo): full descriptive prompt.
             p = (f"{RENDER_STYLE}. {char_block}. {view_desc}. 3D character "
-                 f"reference panel - 640x540 portrait frame")
+                 f"reference panel - 1280x1280 portrait frame. {_style_inject()}")
         if use_identity:
-            # Face panel: [style_plate, real_photo] - 2 refs, strong identity
-            # + style lock (ref_boost 4.0). ALL other panels (face_side/back,
-            # body_front/side/back): chain off the FACE-FRONT panel ONLY, with
-            # a LOWER ref_boost (SHEET_CHAIN_BOOST, default 2.0) so the prompt
-            # fully controls pose/framing - ref_boost 4.0 on a face close-up
-            # forced the giant head into body shots (img2img-style bleed).
-            # STYLE_REF=0 disables the style plate (face = [real_photo] only).
+            # Face panel: [real_photo] ONLY (ONE tight identity ref) - style
+            # is injected as TEXT via _style_inject, no style plate ref. ALL
+            # other panels (face_side/back, body_front/side/back): chain off
+            # the FACE-FRONT panel ONLY, with a LOWER ref_boost
+            # (SHEET_CHAIN_BOOST, default 2.0) so the prompt fully controls
+            # pose/framing - ref_boost 4.0 on a face close-up forced the
+            # giant head into body shots (img2img-style bleed).
             if view == "face":
                 refs_full = [ref_photo] if ref_photo else []
-                style_ref = str(STYLE_REF_IMG)
-                if (os.environ.get("STYLE_REF", "1") != "0"
-                        and os.path.isfile(style_ref)
-                        and style_ref not in refs_full):
-                    refs_full.insert(0, style_ref)
                 boost = 4.0
                 g_px = 1024
             else:
@@ -3710,7 +4083,7 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
                   f"grounding={g_px})...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
                                 ref_images=refs_full, denoise=denoise, upscale=False,
-                                steps=10, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
+                                steps=10, width=CHAR_PANEL_W, height=CHAR_PANEL_H,
                                 ref_mode="identity", ref_boost=boost,
                                 grounding_px=g_px)
         else:
@@ -3735,43 +4108,19 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
                   f"(ref={ref_src}, kontext={ref_method})...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
                                 ref_images=ref, denoise=denoise, upscale=False,
-                                steps=14, width=SHEET_PANEL_W, height=SHEET_PANEL_H,
+                                steps=14, width=CHAR_PANEL_W, height=CHAR_PANEL_H,
                                 ref_mode="reference", ref_method=ref_method)
         if ok:
             panels[view] = str(pan)
     if "face" not in panels:
-        return None
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        grid = Image.new("RGB", (SHEET_GRID_W, SHEET_GRID_H), (10, 10, 12))
-        draw = ImageDraw.Draw(grid)
-        order = ["face", "face_side", "face_back",
-                 "body_front", "body_side", "body_back"]
-        for i, view in enumerate(order):
-            if view not in panels:
-                continue
-            im = Image.open(panels[view]).convert("RGB")
-            im = im.resize((SHEET_PANEL_W, SHEET_PANEL_H), Image.LANCZOS)
-            col, row = i % 3, i // 3
-            grid.paste(im, (col * SHEET_PANEL_W, row * SHEET_PANEL_H))
-            draw.rectangle([col * SHEET_PANEL_W, row * SHEET_PANEL_H,
-                            col * SHEET_PANEL_W + SHEET_PANEL_W - 1,
-                            row * SHEET_PANEL_H + SHEET_PANEL_H - 1],
-                           outline=(120, 120, 130), width=4)
-        try:
-            font = ImageFont.truetype("arial.ttf", 26)
-        except Exception:
-            font = None
-        # NO text on the sheet (Joe, Aug 2026): the grid is used as a pure
-        # image reference - text would bleed into identity conditioning.
-        sheets_dir.mkdir(parents=True, exist_ok=True)
-        grid.save(out)
-        print(f"  [SHEET] {char_name} locked -> {os.path.basename(out)} "
-              f"(1920x1080, {len(panels)}/6 panels)")
-        return str(out)
-    except Exception as e:
-        print(f"  [SHEET] compose failed: {e}")
-        return None
+        print(f"  [SHEET] {char_name}: face panel failed - no panels usable")
+        return {}
+    # Return the individual panels (NO grid merge - each is used directly as
+    # the perfect ref for whichever shot needs it, per framing/facing).
+    sheets_dir.mkdir(parents=True, exist_ok=True)
+    print(f"  [SHEET] {char_name}: {len(panels)} individual 1280x1280 panels "
+          f"-> {sheets_dir}")
+    return panels
 
 
 def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = None,
@@ -3780,14 +4129,18 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                         location_sheets: Optional[dict] = None,
                         prop_assets: Optional[dict] = None,
                         brand_assets: Optional[dict] = None) -> list[dict]:
-    """Generate ALL images locally with Krea 2 Turbo (ComfyUI) at 1280x720,
-    then upscale to 1920x1080 with 4x-FaceUpDAT + style-card grade.
+    """Generate ALL shot images locally with Krea 2 Turbo (ComfyUI) to
+    1920x1080 (in-graph FaceUpDAT upscale from 1280x720) + style-card grade.
 
     - Chapter shots: black placeholder (no generation).
-    - No-character shots: reuse image-assets/ cache when keywords match.
-    - Character shots: ONE locked portrait per character, then every shot of
-      that character is img2img-conditioned on the portrait (denoise 0.55) so
-      the face stays consistent. Set FACE_LOCK=0 to disable.
+    - Prompt: TEXT prompt + the channel STYLE prompt-injected (no style refs).
+    - Refs: _select_shot_refs picks the PERFECT character panel(s) per shot
+      (wide -> body panel, close-up -> face panel, mirrored side refs by
+      facing, multi-person refs, no person ref for hand/object closeups) +
+      the real brand logo for business shots. Location always lives in the
+      scene prompt; props included in the scene when present.
+    - Character panels: SIX individual 1280x1280 images per character, built
+      once and cached. Set FACE_LOCK=0 to disable.
     - Resume-safe: shots with an existing image file are skipped; failed shots
       are retried once with a fresh seed.
     """
@@ -3815,8 +4168,13 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
     prop_assets = prop_assets or {}
     print(f"\n[IMAGES] Generating {len(shots)} 3D shots via local Krea 2 Turbo "
           f"(1280x720 -> in-graph FaceUpDAT 1920x1080)...")
-    sheets: dict[str, Optional[str]] = {}
-    for idx, shot in enumerate(shots):
+    sheets: dict[str, dict] = {}
+    _img_iter = (tqdm(shots, desc="  [IMAGES] rendering shots", unit="shot",
+                      leave=False) if _HAS_PROGRESS else shots)
+    for idx, shot in enumerate(_img_iter):
+        if _HAS_PROGRESS:
+            _img_iter.set_description(
+                f"  [IMAGES] shot {idx+1}/{len(shots)}")
         if shot.get("is_chapter"):
             shot["seed"] = 0
             shot["image_path"] = black
@@ -3826,116 +4184,48 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             print(f"  [SHOT {idx+1}/{len(shots)}] resume: keep "
                   f"{os.path.basename(shot['image_path'])}")
             continue
-        char_name = shot.get("character", "NONE")
+        chars = _parse_shot_characters(shot)
         seed = 10000 + idx * 137 + random.randint(0, 999)
-        if char_name == "NONE":
-            # B-roll (char=NONE) shots: pure txt2img with the style PROMPT
-            # injection - no image refs, no b-roll cache (Joe 2026-08-04).
-            # Faster, and impossible to hit the reference-copy bug. The scene
-            # text carries the composition, the injection the channel look.
-            prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
-            out_path = str((ep_dir or SHOTS_DIR) / f"shot_{seed}.png")
-            ok = _krea_generate(prompt, seed, out_path,
-                                ref_images=None, denoise=1.0, upscale=True)
-            if not ok:
-                seed2 = seed + 31337
-                out2 = str((ep_dir or SHOTS_DIR) / f"shot_{seed2}.png")
-                print(f"  [SHOT {idx+1}/{len(shots)}] retrying with new seed...")
-                ok = _krea_generate(prompt, seed2, out2,
-                                    ref_images=None, denoise=1.0, upscale=True)
-                if ok:
-                    seed, out_path = seed2, out2
-            shot["seed"] = seed
-            shot["image_path"] = out_path if ok else None
-            if ok:
-                _apply_grade(out_path)
-                print(f"  [SHOT {idx+1}/{len(shots)}] image ready "
-                      f"(char=NONE, txt2img+style)")
-            else:
-                print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED after retry")
-            continue
-        prompt = _build_shot_prompt(shot, character_sheets)
-        # ---- Reference composition (real krea2edit references, NOT img2img) ----
-        # Ordered list, training order: image 1 = SCENE/style plate, image 2+ =
-        # subjects (character face panels), then location/prop refs. All refs
-        # become RoPE frames in the identity LoRA's in-context path - the
-        # prompt fully controls pose/composition while the refs lock style,
-        # identity and environment. STYLE_REF=0 disables the style plate.
-        refs: list[str] = []
-        use_identity = False
-        style_ref = str(STYLE_REF_IMG)
-        style_enabled = (os.environ.get("STYLE_REF", "1") != "0"
-                         and os.path.isfile(style_ref))
-        identity_ref: Optional[str] = None
-        if face_lock and char_name != "NONE":
-            sheet_img = sheets.get(char_name)
-            if sheet_img is None:
-                sheet_obj = None
-                for k, v in character_sheets.items():
-                    if k.lower() == char_name.lower():
-                        sheet_obj = v
-                        break
-                sheet_img = _generate_character_sheet(char_name, sheet_obj or {},
-                                                      seed, sheets_dir)
-                sheets[char_name] = sheet_img or ""
-            if sheet_img:
-                # face panel sits next to the sheet: <safe>_face.png
-                face_panel = os.path.join(
-                    os.path.dirname(sheet_img),
-                    os.path.basename(sheet_img).replace("_sheet.png", "_face.png"))
-                if os.path.isfile(face_panel):
-                    identity_ref = face_panel
-                else:
-                    refs.append(sheet_img)
-            if identity_ref:
-                refs.append(identity_ref)   # frame 1: character identity
-                use_identity = True
-        # location/prop refs: stylized asset sheets for THIS episode's world
-        # (next frames) so the environment + props stay consistent across
-        # shots. Falls back to the cached b-roll asset when nothing matches.
-        loc_sheet = _match_location_sheet(shot.get("scene", ""), location_sheets)
-        if loc_sheet and loc_sheet not in refs:
-            refs.append(loc_sheet)
-            use_identity = True
-        prop_sheet = _match_prop_asset(shot.get("scene", ""), prop_assets)
-        if prop_sheet and prop_sheet not in refs:
-            refs.append(prop_sheet)
-            use_identity = True
-        # Brand asset: scene talks about a business/AI company -> the hacker
-        # screen (entity talk) or logo-on-building (HQ talk) joins the refs.
-        brand_asset = _match_brand_asset(shot.get("scene", ""), brand_assets)
-        if brand_asset and brand_asset not in refs:
-            refs.append(brand_asset)
-            use_identity = True
-        # Style chain (Joe's rule): the assets are ALREADY styled - the shot
-        # does NOT need the style plate (verified shot test, no plate). The
-        # plate is only a fallback when a shot has NO styled refs at all
-        # (pure txt2img establishing/object shot with no matching assets).
-        if not refs and style_enabled:
-            refs.append(style_ref)          # last resort: channel style plate
-            use_identity = True
+        prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
+        # Build each character's SIX individual 1280x1280 panels once, then let
+        # _select_shot_refs pick the PERFECT panel(s) for this shot (framing,
+        # facing, mirrored sides, multi-person, business logo).
+        if face_lock and sheets_dir:
+            for ch in chars:
+                name = ch["name"]
+                if name in sheets:
+                    continue
+                sheet_obj = _sheet_for_name(character_sheets, name) or {}
+                sheets[name] = _generate_character_sheet(
+                    name, sheet_obj, seed, sheets_dir) or {}
+        refs, notes = _select_shot_refs(shot, sheets, brand_assets)
         out_path = str((ep_dir or SHOTS_DIR) / f"shot_{seed}.png")
-        if use_identity:
+        n = len(refs)
+        if refs:
+            # single ref -> tight identity boost; multiple refs -> lower boost
+            # so the char/logo panels don't bleed into each other.
+            boost = 4.0 if n == 1 else 2.5
+            g_px = 768 if n == 1 else 1024
             ok = _krea_generate(prompt, seed, out_path,
                                 ref_images=refs, denoise=1.0,
-                                ref_mode="identity", ref_boost=4.0,
-                                grounding_px=1024)
+                                ref_mode="identity", ref_boost=boost,
+                                grounding_px=g_px, upscale=True)
         else:
             ok = _krea_generate(prompt, seed, out_path,
-                                ref_images=None, denoise=0.55)
+                                ref_images=None, denoise=1.0, upscale=True)
         if not ok:
             # one retry with a fresh seed
             seed2 = seed + 31337
             out2 = str((ep_dir or SHOTS_DIR) / f"shot_{seed2}.png")
             print(f"  [SHOT {idx+1}/{len(shots)}] retrying with new seed...")
-            if use_identity:
+            if refs:
                 ok = _krea_generate(prompt, seed2, out2,
                                     ref_images=refs, denoise=1.0,
-                                    ref_mode="identity", ref_boost=4.0,
-                                    grounding_px=1024)
+                                    ref_mode="identity", ref_boost=boost,
+                                    grounding_px=g_px, upscale=True)
             else:
                 ok = _krea_generate(prompt, seed2, out2,
-                                    ref_images=None, denoise=0.55)
+                                    ref_images=None, denoise=1.0, upscale=True)
             if ok:
                 seed, out_path = seed2, out2
         shot["seed"] = seed
@@ -3944,7 +4234,8 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             # Shot images come out 1920x1080 from the in-graph FaceUpDAT
             # upscale - just apply the style-card grade.
             _apply_grade(out_path)
-            print(f"  [SHOT {idx+1}/{len(shots)}] image ready (char={char_name})")
+            label = notes if notes else "txt2img (no refs)"
+            print(f"  [SHOT {idx+1}/{len(shots)}] image ready -> refs: {label}")
         else:
             print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED after retry")
     ok = sum(1 for s in shots if s.get("image_path"))
@@ -4627,7 +4918,8 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
     black_frames=True prepends 2 frames of pure black before the image
     (camera-shutter mimic when a new character/location is introduced).
     """
-    W_RES, H_RES = 1920, 1080
+    W_RES, H_RES = _get_output_resolution()
+    OV_W, OV_H = W_RES * 4, H_RES * 4   # 4x overscan -> sub-pixel zoom steps
     if not image_path or not os.path.isfile(image_path):
         image_path = fallback_img or ""
     if not image_path or not os.path.isfile(image_path):
@@ -4644,8 +4936,8 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
     zoom_expr = f"z='if(eq(on,1),1,min(1+0.06*(on-1)/{max(n_frames-1,1)},1.06))'"
     chain = (
         f"[0:v]loop=1:size=1:start=0,"
-        f"scale=7680:4320:flags=lanczos:force_original_aspect_ratio=increase,"
-        f"crop=7680:4320,"
+        f"scale={OV_W}:{OV_H}:flags=lanczos:force_original_aspect_ratio=increase,"
+        f"crop={OV_W}:{OV_H},"
         f"zoompan={zoom_expr}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
         f"d={n_frames}:s={W_RES}x{H_RES}:fps=24,"
         f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(dur-0.3,0):.2f}:d=0.3"
@@ -5521,6 +5813,8 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
         "episode_num": episode_num,
         "article_url": article_url,
         "topic": topic,
+        "style": _get_style_prompt(),
+        "resolution": os.environ.get("RESOLUTION", "1080p"),
         "shots": shots or [],
         "character_sheets": character_sheets or {},
         "location_sheets": location_sheets or {},
@@ -5616,6 +5910,15 @@ def _resume_episode(state: dict) -> None:
     print(f"  Paragraph target: {target_paras} (sticking with the job-start count)")
     print(f"{'='*60}\n")
 
+    # Resume keeps the exact style the episode was generated with (unless the
+    # user overrides with STYLE=<profile>).
+    if state.get("style"):
+        global _RESUME_STYLE
+        _RESUME_STYLE = state.get("style")
+    # Resume keeps the episode's output resolution too (unless RESOLUTION set).
+    if state.get("resolution") and not os.environ.get("RESOLUTION"):
+        os.environ["RESOLUTION"] = str(state.get("resolution"))
+
     def _save(stg):
         _save_resume_state(stg, episode_num, article_url, topic, shots,
                            character_sheets, titles, description, tags,
@@ -5638,133 +5941,77 @@ def _resume_episode(state: dict) -> None:
         # anything not on disk so resume shots get the SAME refs as fresh ones.
         sheets_dir = ep_shot_dir / CHAR_SHEETS_DIR_NAME
         sheets_dir.mkdir(parents=True, exist_ok=True)
-        sheets_cache: dict[str, Optional[str]] = {}   # char -> sheet image path
+        sheets_cache: dict[str, dict] = {}   # char -> {view: panel path}
         face_lock = os.environ.get("FACE_LOCK", "1") != "0"
-        if not location_sheets or not prop_assets:
-            ctx = None
-            paragraphs: list[str] = []
-            if article_url:
-                try:
-                    paragraphs = fetch_article_paragraphs(article_url) or []
-                except Exception as e:
-                    print(f"  [ASSETS] article refetch failed ({str(e)[:80]}) - "
-                          f"deriving world from narration")
-            if not paragraphs:
-                paragraphs = [s.get("narration", "") for s in shots
-                              if s.get("narration")]
-            try:
-                ctx = _build_episode_context(topic or "", paragraphs)
-            except Exception as e:
-                print(f"  [ASSETS] context rebuild failed: {e}")
-            if ctx:
-                if not location_sheets:
-                    location_sheets = _build_location_sheets(
-                        ctx, 42000 + episode_num * 7, ep_shot_dir) or {}
-                    print(f"  [ASSETS] resume: {len(location_sheets)} location sheets")
-                if not prop_assets:
-                    prop_assets = _build_prop_assets(
-                        ctx, 43000 + episode_num * 7, ep_shot_dir) or {}
-                    print(f"  [ASSETS] resume: {len(prop_assets)} prop assets")
-        for shot in missing_img:
-            char_name = shot.get("character", "NONE")
+        brand_assets = _scan_brand_assets()
+        # ---- Smart shot regen (matches the fresh loop) ----
+        # Each character's SIX individual 1280x1280 panels are built once and
+        # _select_shot_refs picks the PERFECT panel(s) per shot (framing,
+        # facing, mirrored sides, multi-person, business logo). Style is
+        # prompt-injected; no style-plate refs.
+        _re_iter = (tqdm(missing_img, desc="  [IMAGES] regenerating missing",
+                         unit="shot", leave=False)
+                    if _HAS_PROGRESS else missing_img)
+        for shot in _re_iter:
+            chars = _parse_shot_characters(shot)
             seed = shot.get("seed") or (10000 + random.randint(0, 999))
-            if char_name == "NONE":
-                # B-roll (char=NONE) shots: pure txt2img with the style PROMPT
-                # injection - no image refs, no b-roll cache (Joe 2026-08-04).
-                prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
-                out_path = str(ep_shot_dir / f"shot_{seed}.png")
-                ok = _krea_generate(prompt, seed, out_path,
-                                    ref_images=None, denoise=1.0, upscale=True)
-                if not ok:
-                    seed2 = seed + 31337
-                    out2 = str(ep_shot_dir / f"shot_{seed2}.png")
-                    print("  [SHOT] retrying with new seed...")
-                    ok = _krea_generate(prompt, seed2, out2,
-                                        ref_images=None, denoise=1.0, upscale=True)
-                    if ok:
-                        seed, out_path = seed2, out2
-                shot["seed"] = seed
-                shot["image_path"] = out_path if ok else None
-                print(f"  [SHOT] {'image ready' if ok else 'IMAGE FAILED - fallback'} "
-                      f"(char=NONE, txt2img+style)")
-                time.sleep(1)
-                continue
-            prompt = _build_shot_prompt(shot, character_sheets)
-            # Same local Krea identity path as the fresh run: face panel +
-            # location sheet + prop asset refs (all pre-styled; the style
-            # plate is only a fallback when the shot has no styled refs).
-            refs: list[str] = []
-            use_identity = False
-            style_ref = str(STYLE_REF_IMG)
-            style_enabled = (os.environ.get("STYLE_REF", "1") != "0"
-                             and os.path.isfile(style_ref))
-            char_name = shot.get("character", "NONE")
-            if char_name != "NONE" and face_lock:
-                sheet_img = sheets_cache.get(char_name)
-                if sheet_img is None:
-                    # Def comes from state (a dict) - if a previous state only
-                    # stored a path or lost the def, rebuild from the shots
-                    # (deterministic, no LLM - mirrors _build_character_sheets).
-                    sheet_obj = None
-                    for k, v in character_sheets.items():
-                        if k.lower() == char_name.lower():
-                            sheet_obj = v
-                            break
-                    if not isinstance(sheet_obj, dict) or not sheet_obj:
+            prompt = (_build_shot_prompt(shot, character_sheets)
+                      + " " + _style_inject())
+            if face_lock:
+                for ch in chars:
+                    name = ch["name"]
+                    if name in sheets_cache:
+                        continue
+                    sheet_obj = _sheet_for_name(character_sheets, name) or {}
+                    if not sheet_obj:
                         defs = _build_character_sheets(
                             shots, [s.get("narration", "") for s in shots])
-                        sheet_obj = defs.get(char_name)
-                    # A prior run may already have written the sheet image -
-                    # reuse before spending ~7 min regenerating it.
-                    safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
-                    existing = sheets_dir / f"{safe}_sheet.png"
-                    if existing.is_file():
-                        sheet_img = str(existing)
-                        print(f"  [SHEET] reuse {existing.name} (on disk from prior run)")
+                        sheet_obj = defs.get(name) or {}
+                    # A prior run may already have written the individual
+                    # panels - reuse before spending ~7 min regenerating them.
+                    safe = re.sub(r"[^A-Za-z0-9]+", "_", name.lower()).strip("_") or "char"
+                    existing = {v: str(sheets_dir / f"{safe}_{v}.png")
+                                for v in CHAR_PANEL_VIEWS}
+                    if all(os.path.isfile(p) for p in existing.values()):
+                        sheets_cache[name] = existing
+                        print(f"  [SHEET] reuse {name} individual panels (on disk)")
                     else:
-                        sheet_img = _generate_character_sheet(
-                            char_name, sheet_obj or {}, seed, sheets_dir)
-                    sheets_cache[char_name] = sheet_img or ""
-                if sheet_img:
-                    face_panel = os.path.join(
-                        os.path.dirname(sheet_img),
-                        os.path.basename(sheet_img).replace("_sheet.png", "_face.png"))
-                    if os.path.isfile(face_panel):
-                        refs.append(face_panel)
-                        use_identity = True
-                    else:
-                        # No face crop yet - the full sheet still locks identity
-                        refs.append(sheet_img)
-                        use_identity = True
-            loc_sheet = _match_location_sheet(shot.get("scene", ""), location_sheets)
-            if loc_sheet and loc_sheet not in refs:
-                refs.append(loc_sheet)
-                use_identity = True
-            prop_sheet = _match_prop_asset(shot.get("scene", ""), prop_assets)
-            if prop_sheet and prop_sheet not in refs:
-                refs.append(prop_sheet)
-                use_identity = True
-            brand_asset = _match_brand_asset(shot.get("scene", ""),
-                                             _scan_brand_assets())
-            if brand_asset and brand_asset not in refs:
-                refs.append(brand_asset)
-                use_identity = True
-            if not refs and style_enabled:
-                refs.append(style_ref)
-                use_identity = True
+                        sheets_cache[name] = _generate_character_sheet(
+                            name, sheet_obj or {}, seed, sheets_dir) or {}
+            refs, notes = _select_shot_refs(shot, sheets_cache, brand_assets)
             out_path = str(ep_shot_dir / f"shot_{seed}.png")
-            if use_identity:
+            n = len(refs)
+            if refs:
+                # single ref -> tight identity boost; multiple refs -> lower
+                # boost so the char/logo panels don't bleed into each other.
+                boost = 4.0 if n == 1 else 2.5
+                g_px = 768 if n == 1 else 1024
                 ok = _krea_generate(prompt, seed, out_path,
                                     ref_images=refs, denoise=1.0,
-                                    ref_mode="identity", ref_boost=4.0,
-                                    grounding_px=1024)
+                                    ref_mode="identity", ref_boost=boost,
+                                    grounding_px=g_px, upscale=True)
             else:
                 ok = _krea_generate(prompt, seed, out_path,
-                                    ref_images=None, denoise=0.55)
+                                    ref_images=None, denoise=1.0, upscale=True)
+            if not ok:
+                seed2 = seed + 31337
+                out2 = str(ep_shot_dir / f"shot_{seed2}.png")
+                print("  [SHOT] retrying with new seed...")
+                if refs:
+                    ok = _krea_generate(prompt, seed2, out2,
+                                        ref_images=refs, denoise=1.0,
+                                        ref_mode="identity", ref_boost=boost,
+                                        grounding_px=g_px, upscale=True)
+                else:
+                    ok = _krea_generate(prompt, seed2, out2,
+                                        ref_images=None, denoise=1.0, upscale=True)
+                if ok:
+                    seed, out_path = seed2, out2
             shot["seed"] = seed
             shot["image_path"] = out_path if ok else None
+            label = notes if notes else "txt2img (no refs)"
             print(f"  [SHOT] {'image ready' if ok else 'IMAGE FAILED - fallback'} "
-                  f"(char={char_name})")
+                  f"-> refs: {label}")
             time.sleep(1)
         _save("images")
     else:
@@ -5910,6 +6157,26 @@ def _ask_paragraph_target() -> int:
 
 
 def main():
+    if "--list-styles" in sys.argv:
+        print("Selectable style profiles (STYLE=<name>):")
+        list_style_profiles()
+        print("\nCustom styles live in style_sheets/custom_styles.json - "
+              "add with --add-style <name> \"<descriptor>\".")
+        return
+    if "--add-style" in sys.argv:
+        args = sys.argv[sys.argv.index("--add-style") + 1:]
+        if len(args) >= 2:
+            add_custom_style(args[0], " ".join(args[1:]))
+        else:
+            print('Usage: python system_breakers.py --add-style <name> "<style descriptor>"')
+        return
+    if "--remove-style" in sys.argv:
+        i = sys.argv.index("--remove-style")
+        if i + 1 < len(sys.argv):
+            remove_custom_style(sys.argv[i + 1])
+        else:
+            print("Usage: python system_breakers.py --remove-style <name>")
+        return
     if "--cache-logos" in sys.argv:
         names = [a for a in sys.argv[1:] if not a.startswith("-")]
         if not names:
@@ -5951,6 +6218,13 @@ def main():
     #     sticks with the count it started with (never re-asked).
     target_paras = _ask_paragraph_target()
     print(f"  [LENGTH] Target {target_paras} narration paragraphs\n")
+
+    # 1b. Output resolution: 1080p or 4K (affects the image upscale target AND
+    #     the final FFmpeg video output). Persisted to resume state.
+    res = _ask_resolution()
+    os.environ["RESOLUTION"] = res
+    print(f"  [RES] Output resolution: {res.upper()} "
+          f"({_get_output_resolution()[0]}x{_get_output_resolution()[1]})\n")
 
     # Reusable episode template: load the last episode's winning formula
     tpl = _load_episode_template()

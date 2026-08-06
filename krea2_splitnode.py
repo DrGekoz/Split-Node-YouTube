@@ -35,6 +35,13 @@ IDENTITY_LORA = "krea2_identity_edit_v1_2_r128.safetensors"
 WIDTH, HEIGHT = 1280, 720
 OUT_W, OUT_H = 1920, 1080
 
+
+def _out_res() -> tuple:
+    """Upscale/Output resolution from the RESOLUTION env var (1080p default,
+    4k -> 3840x2160). Also used for the final FFmpeg video output."""
+    r = os.environ.get("RESOLUTION", "1080p").strip().lower()
+    return (3840, 2160) if r.startswith("4k") or r in ("2160p", "uhd") else (1920, 1080)
+
 _COMFY = None
 
 
@@ -271,7 +278,7 @@ def build_identity_api(prompt: str, seed: int, ref_names: list[str],
                      "inputs": {"upscale_model": ["50", 0], "image": ["12", 0]}}
         api["52"] = {"class_type": "ImageScale", "inputs": {
             "image": ["51", 0], "upscale_method": "lanczos",
-            "width": OUT_W, "height": OUT_H, "crop": "disabled"}}
+            "width": _out_res()[0], "height": _out_res()[1], "crop": "disabled"}}
         api["13"] = {"class_type": "SaveImage",
                      "inputs": {"images": ["52", 0], "filename_prefix": prefix}}
     else:
@@ -342,7 +349,7 @@ def build_api(prompt: str, seed: int, ref_images: list[str] | None = None,
                      "inputs": {"upscale_model": ["50", 0], "image": ["8", 0]}}
         api["52"] = {"class_type": "ImageScale", "inputs": {
             "image": ["51", 0], "upscale_method": "lanczos",
-            "width": OUT_W, "height": OUT_H, "crop": "disabled"}}
+            "width": _out_res()[0], "height": _out_res()[1], "crop": "disabled"}}
         api["9"]["inputs"]["images"] = ["52", 0]
     return api
 

@@ -2,6 +2,34 @@
 
 All notable changes to Split Node.
 
+## [1.5.0] - 2026-08-06
+
+### Selectable style profiles - `STYLE=<name>`
+
+- 8 built-in visual style profiles: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `synthwave`, `editorial`, `watercolor` - picked with the `STYLE` env var (or `STYLE_PROFILE`)
+- Custom styles persist in `style_sheets/custom_styles.json` and become selectable on every run: `--list-styles`, `--add-style <name> "<descriptor>"`, `--remove-style <name>`
+- The selected style is injected as TEXT into every shot, character panel, location and prop prompt - no style-plate image refs, no reference-copy bug
+- A resume keeps the exact style the episode was generated with (style recorded in resume state; `STYLE=` overrides)
+
+### Character panels: six individual 1280x1280 refs (no grid merge)
+
+- Every character now gets SIX separate 1280x1280 panels (face, face_side, face_back, body_front, body_side, body_back) instead of one 3x2 grid; style is prompt-injected, the only identity ref is the real photo on the face panel (style-plate ref dropped); panels chain off the face panel with lower ref-boost
+- Shot loop rewritten around per-shot ref discovery (`_select_shot_refs`): wide shot -> body panel, close-up -> face panel, facing left -> side panel as-is, facing right -> side panel MIRRORED, back/from-behind -> back panel, hand/object close-up -> no person ref, multi-person -> one panel per character (they can mismatch), business HQ/interior shot -> real brand logo ref added
+- Multi-character shots supported (comma-separated names in the shot list; each described from its archetype with which way it faces); tolerant sheet lookup handles legacy combined-keyed defs
+- Both fresh and resume image paths use the same logic; ref-boost tuned by ref count (single 4.0/768, multi 2.5/1024)
+- tqdm progress bars with per-item ETA on every Krea 2 stage (character panels, location sheets, prop assets, shots, resume regen)
+- Location/prop sheets still built but no longer used as shot refs (location always lives in the scene prompt; props in the scene when present)
+
+### Style previews
+
+- `style_previews/` ships one 1280x1280 face-front Elon Musk panel per selectable style (real-photo identity ref + that style injected) so the look can be previewed before choosing
+
+### Output resolution selection - 1080p or 4K
+
+- Pick the final output resolution with the `RESOLUTION` env var or the startup prompt (`RESOLUTION=4k` / `RESOLUTION=1080p`, default 1080p) - it drives BOTH the in-graph image upscale target (4x-FaceUpDAT -> 1920x1080 or 3840x2160) and the FFmpeg clip/video output (including the 4x zoompan overscan, scaled proportionally)
+- Persisted to resume state so a resumed episode keeps the same output resolution
+- Replaced the standalone SPAN 4x upscaler for the pipeline path with the in-graph 4x-FaceUpDAT (upscale_4k.py remains as an optional separate tool)
+
 ## [1.4.0] - 2026-08-04
 
 ### B-roll / location / prop sheets: style PROMPT injection (no image refs)
