@@ -223,6 +223,7 @@ def _fetch_hn_algolia(query: str) -> list[dict]:
                 "description": desc,
                 "score": _story_score(title),
                 "hn_points": points,
+                "date": h.get("created_at", ""),
             })
         return items
     except Exception as e:
@@ -1075,6 +1076,74 @@ def _save_used_article(url: str):
     used.add(url)
     USED_ARTICLES_FILE.write_text(json.dumps(list(used), indent=2))
 
+
+# Rejected-article cooldown: when the user says NO to an article it is
+# recorded with a timestamp and NOT re-presented for REJECT_COOLDOWN_DAYS
+# (7 by default), so it doesn't keep surfacing every run.
+REJECTED_ARTICLES_FILE = PROJECT_DIR / ".rejected_articles.json"
+REJECT_COOLDOWN_DAYS = float(os.environ.get("REJECT_COOLDOWN_DAYS", "7"))
+
+def _load_rejected_articles() -> dict:
+    """{url: iso timestamp} for articles the user rejected. Old entries older
+    than the cooldown are pruned on load so the file stays small."""
+    if REJECTED_ARTICLES_FILE.exists():
+        try:
+            data = json.loads(REJECTED_ARTICLES_FILE.read_text())
+            if not isinstance(data, dict):
+                data = {}
+            cutoff = datetime.now(timezone.utc) - timedelta(days=REJECT_COOLDOWN_DAYS)
+            pruned = {}
+            for k, v in data.items():
+                try:
+                    ts = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    if ts >= cutoff:
+                        pruned[k] = v
+                except Exception:
+                    continue
+            return pruned
+        except Exception:
+            pass
+    return {}
+
+def _save_rejected_article(url: str):
+    rejected = _load_rejected_articles()
+    rejected[url] = datetime.now(timezone.utc).isoformat()
+    REJECTED_ARTICLES_FILE.write_text(json.dumps(rejected, indent=2))
+
+
+def _parse_item_date(it: dict) -> float:
+    """Best-effort epoch timestamp for an article item (for recency sort).
+    Returns 0.0 when the date is missing/unparseable (oldest bucket)."""
+    d = str(it.get("date") or "").strip()
+    if not d:
+        return 0.0
+    try:
+        # HN Algolia: 2026-08-06T10:00:00.000Z ; RFC822 RSS pubDate;
+        # Atom updated ISO. Try a few formats.
+        candidates = [
+            d.replace("Z", "+00:00"),
+            d.replace(" +0000", "+00:00"),
+            d.replace(" GMT", "+00:00"),
+        ]
+        for c in candidates:
+            try:
+                dt = datetime.fromisoformat(c)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt.timestamp()
+            except Exception:
+                continue
+        # RFC 2822 (e.g. "Thu, 06 Aug 2026 09:00:00 GMT")
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(d)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return 0.0
+
 def _load_episode_num() -> int:
     if EPISODE_COUNTER_FILE.exists():
         try:
@@ -1122,16 +1191,21 @@ def _fetch_rss_feed(feed_url: str) -> list[dict]:
             title = item.findtext("title", "")
             link = item.findtext("link", "")
             desc = item.findtext("description", "")
+            date = item.findtext("pubDate", "") or ""
             if title and link:
-                items.append({"title": title, "link": link, "description": desc})
+                items.append({"title": title, "link": link,
+                              "description": desc, "date": date})
         if not items:
             for entry in root.iter("{http://www.w3.org/2005/Atom}entry"):
                 title_el = entry.find("{http://www.w3.org/2005/Atom}title")
                 link_el = entry.find("{http://www.w3.org/2005/Atom}link")
                 title = title_el.text if title_el is not None else ""
                 link = link_el.get("href", "") if link_el is not None else ""
+                updated = entry.find("{http://www.w3.org/2005/Atom}updated")
+                date = updated.text if updated is not None else ""
                 if title and link:
-                    items.append({"title": title, "link": link, "description": ""})
+                    items.append({"title": title, "link": link,
+                                  "description": "", "date": date})
         return items
     except Exception as e:
         print(f"  [RSS] failed: {str(e)[:60]}")
@@ -1221,9 +1295,10 @@ def _collect_candidate_stories(used: set, skip: set,
             break
         time.sleep(0.4)
 
-    # Sort by final score (niche + trend + engagement), tiebreak HN points
-    matches.sort(key=lambda x: (x.get("final_score", 0), x.get("hn_points", 0)),
-                 reverse=True)
+    # Sort by MOST RECENT first (recency-first, matching the filters), with
+    # final_score as the tiebreak so a fresher niche hit wins over an older one.
+    matches.sort(key=lambda x: (_parse_item_date(x), x.get("final_score", 0),
+                                x.get("hn_points", 0)), reverse=True)
 
     # -- Fallback: RSS feeds if Algolia gave nothing usable --
     if not matches:
@@ -1254,7 +1329,8 @@ def _collect_candidate_stories(used: set, skip: set,
             if len(matches) >= 8:
                 break
             time.sleep(0.3)
-        matches.sort(key=lambda x: x.get("final_score", 0), reverse=True)
+        matches.sort(key=lambda x: (_parse_item_date(x),
+                                    x.get("final_score", 0)), reverse=True)
     return matches
 
 
@@ -1268,7 +1344,8 @@ def _pick_story() -> tuple[str, str]:
     rejected candidates are skipped for the rest of the session.
     """
     used = _load_used_articles()
-    rejected = set()  # candidates the user said no to this session
+    rejected = _load_rejected_articles()  # persisted: {url: ts} - 7 day cooldown
+    rejected_set = set(rejected.keys())
     pool: list[dict] = []
     pool_idx = 0
     rounds = 0
@@ -1276,7 +1353,7 @@ def _pick_story() -> tuple[str, str]:
     print("\n[RSS] Scraping feeds for a 'beat the system' story...")
     print("  [TREND] scanning rising + under-served topics (trend-research-toolkit)...")
     trend_topics = _trend_topics()
-    pool = _collect_candidate_stories(used, rejected, trend_topics)
+    pool = _collect_candidate_stories(used, rejected_set, trend_topics)
     if not pool:
         print("  [FAIL] No articles found at all")
         return ("", "")
@@ -1291,7 +1368,7 @@ def _pick_story() -> tuple[str, str]:
                 return ("", "")
             print(f"\n  [RSS] Pool exhausted ({len(pool)} candidates). Re-polling feeds...")
             time.sleep(2)
-            pool = _collect_candidate_stories(used, rejected, trend_topics)
+            pool = _collect_candidate_stories(used, rejected_set, trend_topics)
             pool_idx = 0
             if not pool:
                 print("  [FAIL] No fresh articles found on re-poll")
@@ -1319,8 +1396,9 @@ def _pick_story() -> tuple[str, str]:
             _save_used_article(chosen["link"])
             print(f"  [OK] Story selected: {chosen['title'][:70]}")
             return (chosen["link"], chosen["title"])
-        # User said no - mark rejected so re-polls skip it
-        rejected.add(chosen["link"])
+        # User said no - persist it so it isn't re-presented for ~1 week
+        _save_rejected_article(chosen["link"])
+        rejected_set.add(chosen["link"])
         print("  [NEXT] Trying another story...")
 
 # -- Article ---------------------------------------------------------

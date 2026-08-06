@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.12.0] - 2026-08-06
+
+### Hardened RSS article selection - recency-first + rejection cooldown
+
+- Candidate articles are now sorted **most recent first** (matching the filters) instead of only by score - fresh stories surface before older ones, so the same few links stop looping every run
+- Article dates captured from HN Algolia (`created_at`) and RSS feeds (`pubDate` / Atom `updated`); `_parse_item_date` parses ISO / RFC-822 timestamps with a 0.0 fallback for missing dates
+- Rejected articles are now **persisted** to `.rejected_articles.json` (gitignored) with a timestamp and **not re-presented for 7 days** (`REJECT_COOLDOWN_DAYS` env) - previously a "no" only skipped for that one session
+- Old rejection entries older than the cooldown are auto-pruned on load so the file stays small
+- Used articles remain permanently excluded; new env knob `REJECT_COOLDOWN_DAYS` (default 7)
+
 ## [1.11.0] - 2026-08-06
 
 ### Mannequin style - canonical real-face method
