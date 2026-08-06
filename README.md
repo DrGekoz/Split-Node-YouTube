@@ -185,7 +185,7 @@ Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `sy
 |---|---|---|
 | ![Editorial style](docs/images/style_previews/elon_musk_face_editorial.jpg) | ![Watercolor style](docs/images/style_previews/elon_musk_face_watercolor.jpg) | ![Mannequin style](docs/images/style_previews/elon_musk_face_mannequin.jpg) |
 
-> 🧍 **Mannequin look:** unlike the other styles, the mannequin style is engineered for **high prompt adherence over identity transfer** — the porcelain face is *fully prompt-controlled* (blank glossy head, no eyes/nose/mouth, no human features) and the **only** trait carried over from the real-person reference is their **hair** (same cut, colour and texture). It runs in Krea reference mode (not identity mode) with a low ref-boost so the prompt wins over the reference, which is exactly what makes it read as a mannequin rather than the person.
+> 🧍 **Mannequin look:** unlike the other styles, the mannequin style is engineered for **high prompt adherence over identity transfer** — the porcelain face is *fully prompt-controlled* (blank glossy head, no eyes/nose/mouth, no human features) and it uses **no image reference at all**. Instead, the person's **hair** is fetched as *text* — a quick web search (with a character-archetype fallback) — and injected into the character panel prompts. So the only trait that carries over from the real person is their **hair** (same cut, colour and texture), described in words rather than copied from a photo. That's exactly what makes it read as a mannequin rather than the person.
 
 > 💡 **Want your own look?** The style is just plain text injected into every prompt — so add your own and it becomes a first-class option on every future run:
 > ```

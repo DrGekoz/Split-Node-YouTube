@@ -3094,6 +3094,97 @@ def _serpapi_key() -> str:
     return ""
 
 
+def _active_style_name() -> str:
+    """Return the currently selected style profile NAME (lowercase), or '' for
+    the default/custom. Reads STYLE / STYLE_PROFILE env, then the resume style."""
+    sel = (os.environ.get("STYLE") or os.environ.get("STYLE_PROFILE") or "").strip()
+    if not sel and _RESUME_STYLE:
+        sel = str(_RESUME_STYLE)
+    low = sel.lower()
+    if low in _load_style_profiles():
+        return low
+    return low  # custom free-form tag used verbatim
+
+
+def _is_mannequin_style() -> bool:
+    return _active_style_name() == "mannequin"
+
+
+def _serpapi_web_snippets(query: str, num: int = 3) -> list[str]:
+    """Quick SerpAPI GOOGLE WEB search (not images). Returns the top result
+    snippets. Used to fetch a text hair description for the mannequin style
+    (no image ref - the mannequin look is prompt-driven)."""
+    key = _serpapi_key()
+    if not key:
+        return []
+    import urllib.parse as _up
+    q = _up.quote(query)
+    try:
+        url = (f"https://serpapi.com/search.json?engine=google&q={q}"
+               f"&api_key={key}&num={num}")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=25) as r:
+            data = json.loads(r.read().decode())
+        snippets: list[str] = []
+        kb = data.get("knowledge_graph", {}) or {}
+        for f in ("description", "title", "heading"):
+            if kb.get(f):
+                snippets.append(str(kb[f]))
+        for res in data.get("organic_results", [])[:num]:
+            sn = res.get("snippet", "").strip()
+            if sn:
+                snippets.append(sn)
+        return [s for s in snippets if s][:num + 2]
+    except Exception as e:
+        print(f"  [HAIR] serpapi web search failed ({str(e)[:70]})")
+        return []
+
+
+def _describe_hair_text(char_name: str, role: str,
+                        sheet: Optional[dict] = None) -> str:
+    """Text hair description for the mannequin style (NO image ref).
+
+    Resolution order:
+      1. quick SerpAPI web search for the real person's hair -> ask the local
+         LLM to turn the top snippets into ONE short hair sentence
+      2. fall back to the archetype's static 'hair' field (always present)
+    Returns a non-empty string usable directly in a mannequin panel prompt.
+    """
+    sheet = sheet or {}
+    arch_hair = (sheet.get("hair") or "").strip()
+    query = f"{char_name} hair".strip() or char_name
+    snips = _serpapi_web_snippets(query, num=3)
+    if snips:
+        try:
+            text = _llm_chat([
+                {"role": "system", "content":
+                 "You extract factual physical descriptions from search results. "
+                 "From the given search snippets about a real person, output EXACTLY "
+                 "ONE short sentence (max 18 words) describing ONLY their hair - "
+                 "colour, length, style, texture. If the snippets mention no hair, "
+                 "reply with a single period '.'"},
+                {"role": "user", "content": "\n".join(snips)}
+            ], max_tokens=80, temp=0.2).strip()
+            # Reject meta-answers / non-descriptions; fall back to the archetype.
+            _META = ("not described", "not mentioned", "no information",
+                     "does not mention", "not explicitly", "isn't mentioned",
+                     "snippets", "the search", "a period",
+                     "single period", "reply with")
+            text = text.strip().strip(".")
+            if text and len(text) > 3 and not any(
+                    m in text.lower() for m in _META):
+                print(f"  [HAIR] {char_name}: '{text}' (from web search)")
+                return text
+            print(f"  [HAIR] {char_name}: web snippet had no hair info - "
+                  f"archetype fallback")
+        except Exception as e:
+            print(f"  [HAIR] llm extract failed ({str(e)[:60]})")
+    if arch_hair:
+        print(f"  [HAIR] {char_name}: archetype fallback '{arch_hair[:60]}'")
+        return arch_hair
+    return "styled hair"
+
+
 def _google_images_candidates(char_name: str, role: str) -> list[str]:
     """Google Images search via SerpAPI (Joe's key, ~$0.01/query).
     Returns image URLs (original full-size preferred, thumbnail fallback)."""
@@ -4049,6 +4140,64 @@ CHAR_PANEL_W, CHAR_PANEL_H = 1280, 1280
 CHAR_PANEL_VIEWS = ["face", "face_side", "face_back",
                     "body_front", "body_side", "body_back"]
 
+# Mannequin-style panels (NO image ref - high prompt adherence over identity).
+# Each is generated as a pure text-to-image with the person's HAIR described
+# as TEXT (via _describe_hair_text) + the mannequin descriptor injected. The
+# porcelain face is fully prompt-controlled; only the hair carries over from
+# the real person. (view, ref_src, denoise, prompt-template, method)
+MANNEQUIN_PANELS = [
+    ("face", "txt", 1.0,
+     "Close-up portrait of a seamless glossy porcelain mannequin head and "
+     "face, full face centered, facing the camera. Featureless smooth blank "
+     "porcelain face - NO eyes, NO nose, NO mouth, NO eyebrows, NO facial "
+     "hair, NO human facial features. Smooth matte off-white cream porcelain "
+     "surface. The mannequin's HAIR is sculpted exactly as: {hair} - same "
+     "cut, colour and texture. Nothing else in frame - no shoulders, no "
+     "neck, no body. Plain light grey studio background, flat even neutral "
+     "lighting, no rim light, one mannequin head only.",
+     "index_timestep_zero"),
+    ("face_side", "txt", 1.0,
+     "Show the SAME seamless glossy porcelain mannequin in left side profile, "
+     "head only. Featureless smooth blank porcelain face - NO eyes, nose or "
+     "mouth, no human facial features. The mannequin's HAIR is sculpted "
+     "exactly as: {hair}. No body, no shoulders. EXACTLY ONE single figure, "
+     "no duplicate, no mirror image. Plain light grey studio background, "
+     "flat even neutral lighting, no rim light.",
+     "uxo/uno"),
+    ("face_back", "txt", 1.0,
+     "Show the back of a seamless glossy porcelain mannequin head, rear view. "
+     "Smooth blank porcelain, no face visible. The mannequin's HAIR is "
+     "sculpted exactly as: {hair} - visible from behind. No body. EXACTLY "
+     "ONE single figure, no duplicate. Plain light grey studio background, "
+     "flat even neutral lighting, no rim light.",
+     "uxo/uno"),
+    ("body_front", "txt", 1.0,
+     "Show a seamless glossy porcelain mannequin full body standing facing "
+     "the camera, entire body head to feet, both feet on the ground, arms "
+     "relaxed at sides. Featureless smooth blank porcelain head (no eyes, "
+     "nose or mouth). The mannequin's HAIR is sculpted exactly as: {hair}. "
+     "Fully clothed head-to-toe in: {outfit}. EXACTLY ONE single figure, no "
+     "duplicate, no mirror image. Plain light grey studio background, flat "
+     "even neutral lighting, no rim light.",
+     "index_timestep_zero"),
+    ("body_side", "txt", 1.0,
+     "Show a seamless glossy porcelain mannequin full body side profile view "
+     "facing left, entire body head to feet. Featureless smooth blank "
+     "porcelain head. The mannequin's HAIR is sculpted exactly as: {hair}. "
+     "Fully clothed head-to-toe in: {outfit}. EXACTLY ONE single figure, no "
+     "duplicate, no mirror image, no shadow clone. Plain light grey studio "
+     "background, flat even neutral lighting, no rim light.",
+     "uxo/uno"),
+    ("body_back", "txt", 1.0,
+     "Show a seamless glossy porcelain mannequin full body rear view, back "
+     "of head and full outfit visible, standing, entire body head to feet. "
+     "The mannequin's HAIR is sculpted exactly as: {hair} - visible from "
+     "behind. Fully clothed head-to-toe in: {outfit}. EXACTLY ONE single "
+     "figure, no duplicate, no mirror image. Plain light grey studio "
+     "background, flat even neutral lighting, no rim light.",
+     "uxo/uno"),
+]
+
 # facing -> which panel to use, per camera subject (face for close-ups, body
 # for wide shots). 'right' reuses the left-facing side panel MIRRORED.
 _FACING_PANEL = {
@@ -4252,6 +4401,13 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
     if all(os.path.isfile(p) for p in existing.values()):
         print(f"  [SHEET] {char_name}: reuse all {len(existing)} individual panels (1280x1280)")
         return existing
+    # MANNEQUIN STYLE: NO image ref - the look is fully prompt-driven. Fetch the
+    # person's HAIR as TEXT (quick web search -> archetype fallback) and generate
+    # each panel as pure text-to-image with that hair + the mannequin descriptor.
+    # The porcelain face is controlled by the prompt; only the hair transfers.
+    if _is_mannequin_style():
+        return _generate_mannequin_panels(char_name, sheet, seed, sheets_dir,
+                                          existing)
     ref_photo = _find_real_reference(char_name, sheet.get("role", ""))
     char_block = _character_prompt_block(sheet, "eye-level")
     # Identity mode (krea2edit LoRA, approved on the Elon test) when a real
@@ -4350,6 +4506,48 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
     # the perfect ref for whichever shot needs it, per framing/facing).
     sheets_dir.mkdir(parents=True, exist_ok=True)
     print(f"  [SHEET] {char_name}: {len(panels)} individual 1280x1280 panels "
+          f"-> {sheets_dir}")
+    return panels
+
+
+def _generate_mannequin_panels(char_name: str, sheet: dict, seed: int,
+                               sheets_dir: Path, existing: dict) -> dict:
+    """Generate a character's SIX mannequin panels with NO image reference.
+
+    High prompt adherence over identity: each panel is a pure text-to-image
+    (Krea reference-mode off / txt2img) of a seamless glossy porcelain
+    mannequin. The ONLY trait carried from the real person is their HAIR,
+    injected as TEXT - fetched via a quick web search (_describe_hair_text,
+    archetype fallback) rather than from a photo. The porcelain face is fully
+    prompt-controlled. Returns {view -> panel path}.
+    """
+    print(f"  [SHEET] {char_name}: mannequin style - NO image ref, "
+          f"hair via text injection")
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
+    hair = _describe_hair_text(char_name, sheet.get("role", ""), sheet)
+    outfit = (sheet.get("outfit") or "").strip()
+    panels: dict[str, str] = {}
+    _pan_iter = (tqdm(MANNEQUIN_PANELS, desc=f"  [SHEET] {char_name} mannequin",
+                      unit="panel", leave=False)
+                 if _HAS_PROGRESS else MANNEQUIN_PANELS)
+    for view, _src, denoise, view_desc, _method in _pan_iter:
+        pan = sheets_dir / f"{safe}_{view}.png"
+        if pan.is_file():
+            panels[view] = str(pan)
+            continue
+        p = view_desc.format(hair=hair, outfit=outfit) + " " + _style_inject()
+        print(f"  [SHEET] {view} mannequin panel for {char_name} "
+              f"(txt2img, hair: '{hair[:50]}')...")
+        ok = _krea_generate(p, seed + 111 * len(view), str(pan),
+                            ref_images=None, denoise=denoise, upscale=False,
+                            steps=14, width=CHAR_PANEL_W, height=CHAR_PANEL_H,
+                            ref_mode="img2img")
+        if ok:
+            panels[view] = str(pan)
+    if "face" not in panels:
+        print(f"  [SHEET] {char_name}: mannequin face panel failed - no panels usable")
+        return {}
+    print(f"  [SHEET] {char_name}: {len(panels)} mannequin 1280x1280 panels "
           f"-> {sheets_dir}")
     return panels
 
