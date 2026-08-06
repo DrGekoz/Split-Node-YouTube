@@ -2,6 +2,14 @@
 
 All notable changes to Split Node.
 
+## [1.7.0] - 2026-08-06
+
+### New `mannequin` style profile (9th built-in)
+
+- Added a `mannequin` built-in style profile inspired by the ContentMachine documentary pipeline - seamless glossy porcelain mannequins with a perfectly smooth ceramic finish, featureless smooth porcelain faces (no eyes/nose/mouth), off-white cream or warm brown porcelain skin tones (never realistic human skin), painted or sculpted hair, no doll joints/seams/stands, always fully clothed head-to-toe in period-accurate outfits with explicitly named footwear, photorealistic render + ray tracing + 8K
+- Selectable like any other profile: `STYLE=mannequin python system_breakers.py`
+- Style preview generated and added to the README "See the look" gallery (Elon Musk face-front, same real-photo identity ref + mannequin style injected)
+
 ## [1.6.0] - 2026-08-06
 
 ### Easter eggs - one hidden element in one shot

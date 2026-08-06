@@ -132,7 +132,7 @@ python system_breakers.py --add-style vhs "<style descriptor text>"   # add + pe
 python system_breakers.py --remove-style vhs     # remove a custom style
 ```
 
-Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `synthwave`, `editorial`, `watercolor`. Custom styles persist in `style_sheets/custom_styles.json` and become selectable on every future run. A resume keeps the exact style the episode was generated with (unless you override with `STYLE=`).
+Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `synthwave`, `editorial`, `watercolor`, `mannequin`. Custom styles persist in `style_sheets/custom_styles.json` and become selectable on every future run. A resume keeps the exact style the episode was generated with (unless you override with `STYLE=`).
 
 **See the look** — every built-in style, previewed on the same face (Elon Musk — real-photo identity ref + that style injected) so you can compare before you pick:
 
@@ -144,9 +144,9 @@ Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `sy
 |---|---|---|
 | ![Photoreal style](docs/images/style_previews/elon_musk_face_photoreal.jpg) | ![Noir style](docs/images/style_previews/elon_musk_face_noir.jpg) | ![Synthwave style](docs/images/style_previews/elon_musk_face_synthwave.jpg) |
 
-| 🗞️ **Editorial** | 🎨 **Watercolor** |
-|---|---|
-| ![Editorial style](docs/images/style_previews/elon_musk_face_editorial.jpg) | ![Watercolor style](docs/images/style_previews/elon_musk_face_watercolor.jpg) |
+| 🗞️ **Editorial** | 🎨 **Watercolor** | 🧍 **Mannequin** |
+|---|---|---|
+| ![Editorial style](docs/images/style_previews/elon_musk_face_editorial.jpg) | ![Watercolor style](docs/images/style_previews/elon_musk_face_watercolor.jpg) | ![Mannequin style](docs/images/style_previews/elon_musk_face_mannequin.jpg) |
 
 > 💡 **Want your own look?** The style is just plain text injected into every prompt — so add your own and it becomes a first-class option on every future run:
 > ```
@@ -308,7 +308,7 @@ split-node/
 - **Smart per-shot ref selection** — wide shot → body panel, close-up → face panel, facing left → side panel as-is, facing right → side panel MIRRORED, back → back panel, hand/object close-up → no person ref, multi-person → one panel per character
 
 ### Style & Look
-- **Selectable style profiles** — 8 built-ins + unlimited custom styles, injected as text into every prompt (no style-plate refs, no reference-copy bug)
+- **Selectable style profiles** — 9 built-ins (incl. `mannequin`) + unlimited custom styles, injected as text into every prompt (no style-plate refs, no reference-copy bug)
 - **Style previews** — one preview panel per style so you can compare before you pick
 - **Locations & props** — 6-panel location sheets per environment (establishing / front-left / front-right / interior / detail / overhead), front+back prop assets
 
