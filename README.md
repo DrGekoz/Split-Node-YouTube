@@ -61,7 +61,7 @@ Here's the injection architecture that makes that possible:
 
 - **🚫 Covered-beat dedupe injection** — alongside each window, the pipeline injects a short `ALREADY COVERED in earlier narration - do NOT repeat these beats` list (the last couple of beats it already wrote). This stops the small model from looping or repeating ideas across paragraphs, which is the classic failure mode of small-context generation.
 
-- **🎨 Style injection (images)** — every image prompt (shots, character panels, locations, props) gets the selected **style profile injected as plain text** — e.g. `arcane`, `noir`, `mannequin`, or your own custom descriptor. There are **no style image refs and no LoRA training**, so the visual look is driven by a single text string that any image model understands. That's what lets 9 built-in looks (plus unlimited custom ones) exist with zero retraining.
+- **🎨 Style injection (images)** — every image prompt (shots, character panels, locations, props) gets the selected **style profile injected as plain text** — e.g. `arcane`, `noir`, `mannequin`, `roman-statue`, or your own custom descriptor. There are **no style image refs and no LoRA training**, so the visual look is driven by a single text string that any image model understands. That's what lets 10 built-in looks (plus unlimited custom ones) exist with zero retraining.
 
 - **🎬 Prompt injection for everything else** — each LLM pass (director's bible, episode world, scene board, shot list, chapter titles, brand extraction) is a **focused single-purpose prompt** with only the data it needs. The shot list, for example, is built one beat at a time with camera logic injected as structured constraints (EWS/WS/MS/CU/ECU, angles, facing, SFX). No stage sees more context than it can chew.
 
@@ -176,7 +176,7 @@ python system_breakers.py --add-style vhs "<style descriptor text>"   # add + pe
 python system_breakers.py --remove-style vhs     # remove a custom style
 ```
 
-Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `synthwave`, `editorial`, `watercolor`, `mannequin`. Custom styles persist in `style_sheets/custom_styles.json` and become selectable on every future run. A resume keeps the exact style the episode was generated with (unless you override with `STYLE=`).
+Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `synthwave`, `editorial`, `watercolor`, `mannequin`, `roman-statue`. Custom styles persist in `style_sheets/custom_styles.json` and become selectable on every future run. A resume keeps the exact style the episode was generated with (unless you override with `STYLE=`).
 
 **See the look** — every built-in style, previewed on the same face (Elon Musk — real-photo identity ref + that style injected) so you can compare before you pick:
 
@@ -192,7 +192,13 @@ Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `sy
 |---|---|---|
 | ![Editorial style](docs/images/style_previews/elon_musk_face_editorial.jpg) | ![Watercolor style](docs/images/style_previews/elon_musk_face_watercolor.jpg) | ![Mannequin style](docs/images/style_previews/elon_musk_face_mannequin.jpg) |
 
+| 🏛️ **Roman statue** |
+|---|
+| ![Roman statue style](docs/images/style_previews/elon_musk_face_roman-statue.jpg) |
+
 > 🧍 **Mannequin look:** the mannequin style uses the **real-face method** — it takes the real person's photo as the single identity reference and renders a glossy **porcelain mannequin whose facial features match that person exactly** (bone structure, brow, nose, lips, jaw). The face reads as a polished museum mannequin resembling the person, *not* realistic human skin — coloured hair matches the reference. When no real photo is available it falls back to a text-hair injection. It's fully prompt-controlled and license-safe, so it renders clean, consistent characters without depicting altered human likenesses.
+
+> 🏛️ **Roman statue look:** same real-face method, but rendered as a **classical ancient Roman marble statue** — the person's facial structure carved from smooth white Carrara marble (chiseled features, no skin/pores/stubble), sculpted marble hair matching the reference, draped in a classical toga. A museum-quality portrait-bust look that's equally license-safe and striking.
 
 > 💡 **Want your own look?** The style is just plain text injected into every prompt — so add your own and it becomes a first-class option on every future run:
 > ```
@@ -496,7 +502,7 @@ split-node/
 - **Smart per-shot ref selection** — wide shot → body panel, close-up → face panel, facing left → side panel as-is, facing right → side panel MIRRORED, back → back panel, hand/object close-up → no person ref, multi-person → one panel per character
 
 ### Style & Look
-- **Selectable style profiles** — 9 built-ins (incl. `mannequin`) + unlimited custom styles, injected as text into every prompt (no style-plate refs, no reference-copy bug)
+- **Selectable style profiles** — 10 built-ins (incl. `mannequin`, `roman-statue`) + unlimited custom styles, injected as text into every prompt (no style-plate refs, no reference-copy bug)
 - **Style previews** — one preview panel per style so you can compare before you pick
 - **Locations & props** — 6-panel location sheets per environment (establishing / front-left / front-right / interior / detail / overhead), front+back prop assets
 

@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.17.0] - 2026-08-06
+
+### Roman-statue style
+
+- New `roman-statue` built-in style profile (10th) - renders every character as a classical ancient Roman marble statue
+- Uses the same canonical **real-face method** as the mannequin style: the real person's photo is the single identity reference, and the result is carved from smooth white Carrara marble (chiseled features matching the ref exactly, sculpted marble hair, draped in a classical toga) - license-safe and striking
+- `_generate_mannequin_panels` generalized to `_generate_material_panels(look)` shared by both `mannequin` and `roman-statue`; `_look_panels_spec()` + new `ROMAN_STATUE_PANELS` added
+- `_generate_character_sheet` routes either material style automatically; text-hair fallback when no real photo exists
+- Style preview generated (Elon face-front, real-face method) + added to the README "See the look" gallery and built-ins list (now 10 styles)
+
 ## [1.16.0] - 2026-08-06
 
 ### Pre-mapped brand logos from Wikimedia Commons

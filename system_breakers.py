@@ -314,6 +314,21 @@ STYLE_PROFILES = {
         "head-to-toe in complete period-accurate outfits with explicitly "
         "named footwear, 8K resolution, hyperrealistic documentary "
         "recreation"),
+    "roman-statue": (
+        "photorealistic render, ray tracing, cinematic lighting, classical "
+        "ancient Roman marble statue, sculpted from pure white/grey Carrara "
+        "marble with smooth polished stone surface, the statue's facial "
+        "structure matches the reference person EXACTLY - same bone "
+        "structure, same brow ridge, same nose shape, same lips, same "
+        "jawline, same eyes - but rendered as carved marble like a "
+        "classical Roman portrait bust, chiseled stone features, no skin "
+        "pores, no realistic human skin, no stubble, no wrinkles, matte "
+        "marble finish, the ONLY thing carried from the reference person "
+        "beyond the face is their HAIR - carved as sculpted marble hair "
+        "matching the reference hairstyle exactly, toga-clad or draped "
+        "classical Roman garment, weathered classical marble, high detail, "
+        "museum-quality ancient statue, 8K resolution, hyperrealistic "
+        "documentary recreation"),
 }
 
 _STYLE_SELECTED_PRINTED = {"done": False}
@@ -3303,6 +3318,17 @@ def _active_style_name() -> str:
 def _is_mannequin_style() -> bool:
     return _active_style_name() == "mannequin"
 
+def _is_roman_statue_style() -> bool:
+    return _active_style_name() == "roman-statue"
+
+def _look_panels_spec() -> tuple[list, str]:
+    """Return (panels_spec, look_label) for the active material style
+    (mannequin or roman-statue). Both share the same real-face generation
+    path - only the prompt wording differs."""
+    if _is_roman_statue_style():
+        return ROMAN_STATUE_PANELS, "roman-statue"
+    return MANNEQUIN_PANELS, "mannequin"
+
 
 def _serpapi_web_snippets(query: str, num: int = 3) -> list[str]:
     """Quick SerpAPI GOOGLE WEB search (not images). Returns the top result
@@ -4417,6 +4443,72 @@ MANNEQUIN_PANELS = [
      "uxo/uno"),
 ]
 
+# Roman-statue panels - REAL-FACE method (same as mannequin). Use the real
+# person's photo as the ONE identity ref and render a classical Roman marble
+# statue whose facial features match the ref EXACTLY. The face reads as carved
+# Carrara marble (bone structure, brow, nose, lips, jaw) resembling the person,
+# not realistic skin. Hair is carved marble matching the ref. When NO real
+# photo exists, fall back to text-only hair injection. (view, ref_src, denoise,
+# prompt-template, method)
+ROMAN_STATUE_PANELS = [
+    ("face", "real", 1.0,
+     "A classical ancient Roman marble statue head and face, full face "
+     "centered, facing the camera. The statue's facial structure matches the "
+     "reference person EXACTLY - same bone structure, same brow ridge, same "
+     "nose shape, same lips, same jawline, same eyes. BUT the whole face is "
+     "sculpted from smooth white Carrara marble like a museum-quality Roman "
+     "portrait bust - polished stone surface, chiseled features, no skin "
+     "pores, no realistic skin texture, no stubble, no wrinkles, no skin "
+     "blemishes. Marble eyes, marble nose, marble lips - all carved in "
+     "matching stone, face of a classical Roman statue that strongly "
+     "resembles the reference person. Sculpted marble hair matching the "
+     "reference: {hair}. Nothing else in frame - no shoulders, no neck, no "
+     "body. Plain light grey studio background, flat even neutral lighting, "
+     "no rim light, one statue head only.",
+     "index_timestep_zero"),
+    ("face_side", "face", 1.0,
+     "Show the SAME classical Roman marble statue in left side profile, head "
+     "only. Marble face matching the reference person's features (brow, nose, "
+     "lips, jaw) carved in smooth white stone - no skin texture, no stubble. "
+     "Sculpted marble hair matching the reference: {hair}. No body, no "
+     "shoulders. EXACTLY ONE single figure, no duplicate, no mirror image. "
+     "Plain light grey studio background, flat even neutral lighting, no rim "
+     "light.",
+     "uxo/uno"),
+    ("face_back", "face", 1.0,
+     "Show the back of a classical Roman marble statue head, rear view. "
+     "Smooth carved marble, no face visible. Sculpted marble hair matching "
+     "the reference: {hair} - visible from behind. No body. EXACTLY ONE "
+     "single figure, no duplicate. Plain light grey studio background, flat "
+     "even neutral lighting, no rim light.",
+     "uxo/uno"),
+    ("body_front", "face", 1.0,
+     "Show a classical Roman marble statue full body standing facing the "
+     "camera, entire body head to feet, both feet on the ground. Marble head "
+     "with facial features matching the reference person, carved in smooth "
+     "white stone. Sculpted marble hair matching the reference: {hair}. Draped "
+     "in a classical Roman toga or garment: {outfit}. EXACTLY ONE single "
+     "figure, no duplicate, no mirror image. Plain light grey studio "
+     "background, flat even neutral lighting, no rim light.",
+     "index_timestep_zero"),
+    ("body_side", "body_front", 1.0,
+     "Show a classical Roman marble statue full body side profile view facing "
+     "left, entire body head to feet. Marble head with features matching the "
+     "reference person. Sculpted marble hair matching the reference: {hair}. "
+     "Draped in a classical Roman toga or garment: {outfit}. EXACTLY ONE "
+     "single figure, no duplicate, no mirror image, no shadow clone. Plain "
+     "light grey studio background, flat even neutral lighting, no rim light.",
+     "uxo/uno"),
+    ("body_back", "body_front", 1.0,
+     "Show a classical Roman marble statue full body rear view, back of head "
+     "and draped garment visible, standing, entire body head to feet. Sculpted "
+     "marble hair matching the reference: {hair} - visible from behind. Draped "
+     "in a classical Roman toga or garment: {outfit}. EXACTLY ONE single "
+     "figure, no duplicate, no mirror image. Plain light grey studio "
+     "background, flat even neutral lighting, no rim light.",
+     "uxo/uno"),
+]
+
 # facing -> which panel to use, per camera subject (face for close-ups, body
 # for wide shots). 'right' reuses the left-facing side panel MIRRORED.
 _FACING_PANEL = {
@@ -4620,13 +4712,14 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
     if all(os.path.isfile(p) for p in existing.values()):
         print(f"  [SHEET] {char_name}: reuse all {len(existing)} individual panels (1280x1280)")
         return existing
-    # MANNEQUIN STYLE: NO image ref - the look is fully prompt-driven. Fetch the
-    # person's HAIR as TEXT (quick web search -> archetype fallback) and generate
-    # each panel as pure text-to-image with that hair + the mannequin descriptor.
-    # The porcelain face is controlled by the prompt; only the hair transfers.
-    if _is_mannequin_style():
-        return _generate_mannequin_panels(char_name, sheet, seed, sheets_dir,
-                                          existing)
+    # MATERIAL STYLES (mannequin / roman-statue): REAL-FACE method - use the
+    # real person's photo as the identity ref and render the material look
+    # (porcelain mannequin or marble statue) whose facial features match the
+    # ref. Falls back to text-only hair injection when no real photo exists.
+    look = _active_style_name()
+    if look in ("mannequin", "roman-statue"):
+        return _generate_material_panels(char_name, sheet, seed, sheets_dir,
+                                         existing, look)
     ref_photo = _find_real_reference(char_name, sheet.get("role", ""))
     char_block = _character_prompt_block(sheet, "eye-level")
     # Identity mode (krea2edit LoRA, approved on the Elon test) when a real
@@ -4729,38 +4822,41 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
     return panels
 
 
-def _generate_mannequin_panels(char_name: str, sheet: dict, seed: int,
-                               sheets_dir: Path, existing: dict) -> dict:
-    """Generate a character's SIX mannequin panels.
+def _generate_material_panels(char_name: str, sheet: dict, seed: int,
+                              sheets_dir: Path, existing: dict,
+                              look: str = "mannequin") -> dict:
+    """Generate a character's SIX material panels (mannequin or roman-statue).
 
     Canonical REAL-FACE method (Joe-approved): use the real person's photo as
-    the ONE identity ref and render a glossy porcelain mannequin whose facial
-    features match the ref EXACTLY (bone structure, brow, nose, lips, jaw).
-    The face reads as a polished museum mannequin resembling the person, not
-    realistic human skin. Hair is coloured and matches the ref.
+    the ONE identity ref and render the material look (glossy porcelain
+    mannequin OR classical marble statue) whose facial features match the ref
+    EXACTLY (bone structure, brow, nose, lips, jaw). The face reads as the
+    material resembling the person, not realistic human skin. Hair matches the
+    ref (coloured sculpted hair for mannequin, carved marble hair for statue).
 
       face      = [real_photo] ONLY (ONE tight identity ref, ref_boost 4.0)
       all other = [face-front] ONLY (ref_boost 2.0 - prompt controls pose)
 
     When NO real photo exists, fall back to text-only hair injection: hair is
     fetched as TEXT (_describe_hair_text) and the panels are pure text-to-image
-    of a porcelain mannequin with that described hair. Returns {view -> path}.
+    of the material with that described hair. Returns {view -> path}.
     """
+    panels_spec = ROMAN_STATUE_PANELS if look == "roman-statue" else MANNEQUIN_PANELS
     safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
     hair = _describe_hair_text(char_name, sheet.get("role", ""), sheet)
     outfit = (sheet.get("outfit") or "").strip()
     ref_photo = _find_real_reference(char_name, sheet.get("role", ""))
     use_ref = ref_photo is not None
     if use_ref:
-        print(f"  [SHEET] {char_name}: mannequin REAL-FACE method "
-              f"(real photo ref -> porcelain face matching ref)")
+        print(f"  [SHEET] {char_name}: {look} REAL-FACE method "
+              f"(real photo ref -> {look} face matching ref)")
     else:
-        print(f"  [SHEET] {char_name}: mannequin text-hair fallback "
+        print(f"  [SHEET] {char_name}: {look} text-hair fallback "
               f"(no real photo)")
     panels: dict[str, str] = {}
-    _pan_iter = (tqdm(MANNEQUIN_PANELS, desc=f"  [SHEET] {char_name} mannequin",
+    _pan_iter = (tqdm(panels_spec, desc=f"  [SHEET] {char_name} {look}",
                       unit="panel", leave=False)
-                 if _HAS_PROGRESS else MANNEQUIN_PANELS)
+                 if _HAS_PROGRESS else panels_spec)
     for view, _src, denoise, view_desc, ref_method in _pan_iter:
         pan = sheets_dir / f"{safe}_{view}.png"
         if pan.is_file():
@@ -4780,7 +4876,7 @@ def _generate_mannequin_panels(char_name: str, sheet: dict, seed: int,
                 refs_full = [panels["face"]]
                 boost = float(os.environ.get("SHEET_CHAIN_BOOST", "2.0"))
                 g_px = int(os.environ.get("SHEET_CHAIN_GROUNDING", "768"))
-            print(f"  [SHEET] {view} mannequin panel for {char_name} "
+            print(f"  [SHEET] {view} {look} panel for {char_name} "
                   f"(real-face, refs={len(refs_full)}, boost={boost})...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
                                 ref_images=refs_full, denoise=denoise,
@@ -4789,8 +4885,8 @@ def _generate_mannequin_panels(char_name: str, sheet: dict, seed: int,
                                 ref_mode="identity", ref_boost=boost,
                                 grounding_px=g_px)
         else:
-            # Text-hair fallback: no ref, prompt controls the whole mannequin.
-            print(f"  [SHEET] {view} mannequin panel for {char_name} "
+            # Text-hair fallback: no ref, prompt controls the whole material.
+            print(f"  [SHEET] {view} {look} panel for {char_name} "
                   f"(txt2img, hair: '{hair[:50]}')...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
                                 ref_images=None, denoise=denoise, upscale=False,
