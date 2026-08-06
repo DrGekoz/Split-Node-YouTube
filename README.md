@@ -154,6 +154,12 @@ RSS / URL story
 └──────────────────────────────────────────────────────────┘
 ```
 
+### 🧍 Visual Style
+
+The default documentary aesthetic is **seamless glossy porcelain mannequins** — figures always fully clothed head-to-toe in complete period-accurate outfits including explicitly named footwear (e.g. "iron-buckled brown leather knee boots"), with **no visible joints, stands, or supports**. Photorealistic environments, ray tracing, cinematic lighting. It's a great starting point for YouTube-focused creators because it renders clean, consistent, license-safe characters without depicting realistic (possibly altered) human likenesses.
+
+The look is **fully customisable** via selectable **style profiles** — each is just a plain-text descriptor injected into every prompt. Pick the `mannequin` style with `STYLE=mannequin`, swap to any of the other 8 built-in looks (`arcane`, `noir`, `watercolor`, ...), or add your own with `--add-style` (persists for every future run). In `mannequin` mode the porcelain face is fully prompt-controlled and the person's **hair** is fetched as *text* (web search → archetype fallback) and injected, so only that trait carries over from the real person — no image reference needed. See [🎨 The Look](#-the-look) below for the full gallery and all customization commands.
+
 ### 🎨 The Look
 
 The channel style is a selectable **style profile** — a plain-text descriptor injected into every prompt (shots, character panels, locations, props). No style image refs, no LoRA training, no reference-copy bug.
