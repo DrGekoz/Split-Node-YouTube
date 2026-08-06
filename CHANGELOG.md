@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.6.0] - 2026-08-06
+
+### Easter eggs - one hidden element in one shot
+
+- Every episode can hide one tiny background element in EXACTLY ONE shot - injected into that shot's prompt as a "very small, in the background" element (subtle, easy to miss)
+- Startup prompt asks *"Hide an easter egg in one shot?"*; pick one from the list or choose *add new* to write your own prompt (saved to `style_sheets/easter_eggs.json`, selectable on future runs). `EASTER_EGG=<name>` selects without prompting
+- Built-in easter egg: **Duck Pope** - Pontiff of the Union of the Peking Duck - a tiny ancient majestic sacred white duck in papal regalia, hidden far-background and out of focus
+- The hidden shot prefers a wide/medium shot (room for a background), is picked once, and is kept on resume
+- The exact timecode of the hidden shot is reported right after the video finishes rendering AND again after the upload completes (`[EASTER EGG] 'duck pope' is hidden in the shot at HH:MM:SS`)
+- CLI: `--list-easter-eggs`, `--add-easter-egg <name> "<prompt>"`, `--remove-easter-egg <name>`
+
 ## [1.5.0] - 2026-08-06
 
 ### Selectable style profiles - `STYLE=<name>`

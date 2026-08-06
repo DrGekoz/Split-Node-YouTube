@@ -20,6 +20,7 @@ AI documentary generator. Turns "beat the system" news stories (hacks, lottery w
 - **Resume-safe** - every stage skips already-completed work, persistent batch clips
 - **4K output ready** - every shot is upscaled in-graph with 4x-FaceUpDAT, and you choose the final resolution: **1080p or 4K** - it drives both the image upscale target and the FFmpeg video output
 - **YouTube upload + Discord announcements**
+- **Easter eggs** - hide a tiny background element in exactly ONE shot per episode (subtle, easy to miss). Duck Pope is built-in (from the Union of the Peking Duck lore), or add your own; the exact timecode of the hidden shot is reported after render AND after upload
 
 ## The look
 
@@ -37,6 +38,23 @@ python system_breakers.py --remove-style vhs     # remove a custom style
 ```
 
 Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `synthwave`, `editorial`, `watercolor`. Custom styles persist in `style_sheets/custom_styles.json` and become selectable on every future run. When you resume an episode it keeps the exact style it was generated with (unless you override with `STYLE=`).
+
+## Easter eggs
+
+Every episode can hide one tiny background element in exactly ONE shot of the video - a subtle, easy-to-miss easter egg. At startup the pipeline asks *"Hide an easter egg in one shot?"*; pick one from the list, or choose *add new* to write your own prompt (it's saved and selectable on future runs too).
+
+The built-in easter egg is the **Duck Pope** - Pontiff of the Union of the Peking Duck - described as an ancient, majestic, sacred tiny white duck in papal regalia (tall two-peaked white-and-gold mitre, white robe, gold trim), placed very small and out of focus in the far background of that one shot.
+
+The exact timecode of the hidden shot is reported twice - right after the video finishes rendering, and again after the upload completes - so you know exactly where to scrub to find it.
+
+```
+python system_breakers.py --list-easter-eggs                          # show available eggs
+python system_breakers.py --add-easter-egg rat-pope "a tiny rat wearing a tiny papal hat in the far background"
+python system_breakers.py --remove-easter-egg rat-pope
+EASTER_EGG="duck pope" python system_breakers.py                     # select without prompting
+```
+
+Custom eggs persist in `style_sheets/easter_eggs.json`. The hidden shot is picked once and kept on resume.
 
 ## How it works
 
@@ -155,6 +173,10 @@ YouTube upload (native scheduling, per-channel credentials) + Discord announceme
 | `--list-styles` | List every selectable style profile |
 | `--add-style <name> "<desc>"` | Add a custom style (persists for future runs) |
 | `--remove-style <name>` | Remove a custom style |
+| `EASTER_EGG="duck pope"` | Hide the Duck Pope (or any egg) in one shot, no prompt |
+| `--list-easter-eggs` | List every selectable easter egg |
+| `--add-easter-egg <name> "<prompt>"` | Add a custom easter egg (persists) |
+| `--remove-easter-egg <name>` | Remove a custom easter egg |
 | `oauth_split_node.py` | YouTube OAuth authorization |
 
 ## Project layout
@@ -163,7 +185,7 @@ YouTube upload (native scheduling, per-channel credentials) + Discord announceme
 |------|---------|
 | `shots/` `rendered_audio/` `rendered_video/` `thumbnails/` | Stage outputs (gitignored) |
 | `cinematic_sounds/` | SFX library |
-| `style_sheets/` `style_refs/` | Style profiles + `custom_styles.json` + reference assets |
+| `style_sheets/` `style_refs/` | Style profiles + `custom_styles.json` + `easter_eggs.json` + reference assets |
 | `style_previews/` | Per-style preview panels (one per selectable style) |
 | `cast_refs/` | Cast likeness images (`cast_refs/real/` + `cast_refs/logos/` gitignored) |
 | `image-assets/` | Generated caches: b-roll, brand screens, brand buildings (gitignored) |

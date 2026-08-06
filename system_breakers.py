@@ -374,6 +374,177 @@ def remove_custom_style(name: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Easter eggs - one hidden background element in EXACTLY ONE shot per episode.
+# The element is injected into that single shot's prompt as a "very small, in
+# the background" element (an easter egg - subtle, easy to miss). After render
+# and after upload the exact timecode of the hidden shot is reported.
+# ---------------------------------------------------------------------------
+EASTER_EGG_FILE = PROJECT_DIR / "style_sheets" / "easter_eggs.json"
+
+BUILTIN_EASTER_EGGS = {
+    "duck pope": (
+        "In the far background, very small and soft-focus, is the Duck Pope - "
+        "an ancient majestic sacred tiny white duck dressed as a pope, wearing "
+        "a tall two-peaked white-and-gold papal mitre and a small white papal "
+        "robe with gold trim. He is tiny and barely noticeable in the distance, "
+        "blurred, not the subject of the shot, a subtle hidden detail."
+    ),
+}
+
+
+def _load_easter_eggs() -> dict:
+    """Built-in + user-added easter eggs (persisted in easter_eggs.json)."""
+    merged = dict(BUILTIN_EASTER_EGGS)
+    try:
+        if EASTER_EGG_FILE.is_file():
+            custom = json.loads(EASTER_EGG_FILE.read_text(encoding="utf-8"))
+            if isinstance(custom, dict):
+                for k, v in custom.items():
+                    if isinstance(v, str) and v.strip():
+                        merged[k.strip().lower()] = v.strip()
+    except Exception:
+        pass
+    return merged
+
+
+def list_easter_eggs() -> None:
+    for name, desc in sorted(_load_easter_eggs().items()):
+        print(f"  {name:18} {desc[:55]}{'...' if len(desc) > 55 else ''}")
+
+
+def add_easter_egg(name: str, prompt: str) -> bool:
+    name = name.strip().lower()
+    prompt = prompt.strip()
+    if not name or not prompt:
+        print("  [EGG] add requires a name AND a prompt")
+        return False
+    if name in BUILTIN_EASTER_EGGS:
+        print(f"  [EGG] '{name}' is a built-in easter egg - pick another name")
+        return False
+    eggs = {}
+    try:
+        if EASTER_EGG_FILE.is_file():
+            eggs = json.loads(EASTER_EGG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        eggs = {}
+    if not isinstance(eggs, dict):
+        eggs = {}
+    eggs[name] = prompt
+    try:
+        EASTER_EGG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        EASTER_EGG_FILE.write_text(json.dumps(eggs, indent=2), encoding="utf-8")
+        print(f"  [EGG] added easter egg '{name}' (selectable in future runs)")
+        return True
+    except Exception as e:
+        print(f"  [EGG] could not save: {e}")
+        return False
+
+
+def remove_easter_egg(name: str) -> bool:
+    try:
+        if not EASTER_EGG_FILE.is_file():
+            return False
+        eggs = json.loads(EASTER_EGG_FILE.read_text(encoding="utf-8"))
+        if isinstance(eggs, dict) and name.lower() in eggs:
+            del eggs[name.lower()]
+            EASTER_EGG_FILE.write_text(json.dumps(eggs, indent=2), encoding="utf-8")
+            print(f"  [EGG] removed easter egg '{name.lower()}'")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _ask_easter_egg() -> Optional[str]:
+    """Ask whether to hide an easter egg in one shot. Returns the egg NAME or
+    None. EASTER_EGG=<name> env selects directly without prompting."""
+    if os.environ.get("EASTER_EGG"):
+        name = os.environ.get("EASTER_EGG").strip().lower()
+        eggs = _load_easter_eggs()
+        if name in eggs:
+            print(f"  [EGG] easter egg selected via env: '{name}'")
+            return name
+        print(f"  [EGG] unknown easter egg '{name}' - skipping")
+        return None
+    resp = input("\n  Hide an easter egg in one shot? [Y/n]: ").strip().lower()
+    if resp in ("n", "no"):
+        return None
+    eggs = _load_easter_eggs()
+    names = list(eggs.keys())
+    print("  Select an easter egg:")
+    for i, n in enumerate(names, 1):
+        print(f"    {i}. {n}")
+    print(f"    {len(names)+1}. add new")
+    choice = input(f"  Choose [1-{len(names)+1}, or a name]: ").strip()
+    if choice.lower() in ("add", "add new", "new", "custom", str(len(names)+1)):
+        newname = input("  Easter egg name: ").strip()
+        newprompt = input("  Easter egg prompt (describes the small background element): ").strip()
+        if newname and newprompt:
+            add_easter_egg(newname, newprompt)
+            return newname.lower()
+        print("  [EGG] need a name and a prompt - no easter egg added")
+        return None
+    if choice.isdigit() and 1 <= int(choice) <= len(names):
+        return names[int(choice) - 1].lower()
+    if choice.lower() in [n.lower() for n in names]:
+        return choice.lower()
+    print("  [EGG] invalid choice - no easter egg this episode")
+    return None
+
+
+def _inject_easter_egg(shots: list[dict], egg_name: Optional[str]) -> None:
+    """Hide the easter egg into EXACTLY ONE shot of the episode (prompt text).
+    Prefers a wide/medium shot so there is room in the background; falls back
+    to any non-chapter shot. Idempotent on resume (skips if already set)."""
+    if not egg_name:
+        return
+    if any(s.get("easter_egg") for s in shots):
+        return
+    eggs = _load_easter_eggs()
+    prompt = eggs.get(egg_name, "")
+    if not prompt:
+        print(f"  [EGG] no prompt found for '{egg_name}' - skipping")
+        return
+    eligible = [i for i, s in enumerate(shots)
+                if not s.get("is_chapter")
+                and str(s.get("shot_type", "")).upper() in ("WS", "MS", "EWS")]
+    if not eligible:
+        eligible = [i for i, s in enumerate(shots) if not s.get("is_chapter")]
+    if not eligible:
+        print("  [EGG] no eligible shot - skipping")
+        return
+    idx = eligible[random.randint(0, len(eligible) - 1)]
+    shots[idx]["easter_egg"] = egg_name
+    shots[idx]["easter_egg_prompt"] = prompt
+    print(f"  [EGG] hiding '{egg_name}' in shot {idx+1}/{len(shots)} "
+          f"({shots[idx].get('shot_type', '?')})")
+
+
+def _fmt_timecode(seconds: float) -> str:
+    s = max(int(seconds or 0), 0)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h:02d}:{m:02d}:{sec:02d}"
+
+
+def _easter_egg_report(shots: list[dict]) -> Optional[str]:
+    """Where the hidden easter egg lands in the final video timecode. Returns a
+    human string, or None if no easter egg was injected."""
+    egg_shot = next((s for s in shots if s.get("easter_egg")), None)
+    if not egg_shot:
+        return None
+    cursor = 0.0
+    for s in shots:
+        if s.get("easter_egg"):
+            break
+        if s.get("tts_path") and os.path.isfile(s["tts_path"]):
+            cursor += _get_audio_duration(s["tts_path"]) + 0.3
+    name = str(egg_shot.get("easter_egg", "easter egg"))
+    return (f"[EASTER EGG] '{name}' is hidden in the shot at "
+            f"{_fmt_timecode(cursor)} in the final video")
+
+
 # Set from the resume state when an episode is resumed, so a resume run keeps
 # the exact style the episode was generated with (unless STYLE is set).
 _RESUME_STYLE = None
@@ -2682,6 +2853,11 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     if shot.get("shot_type"):
         cam_desc = f", {shot['shot_type']} framing, {angle} camera angle"
     scene = shot.get("scene", "")
+    # Easter egg: inject the hidden background element into this shot's prompt
+    # (set on exactly one shot by _inject_easter_egg).
+    egg = shot.get("easter_egg_prompt")
+    if egg:
+        scene = (scene + " " + egg).strip()
     chars = _parse_shot_characters(shot)
     if not chars:
         # No character (establishing/landscape/object/hand-closeup shot) - use
@@ -6068,6 +6244,9 @@ def _resume_episode(state: dict) -> None:
             _save("video")
             return
         _save("video")
+        egg_report = _easter_egg_report(shots)
+        if egg_report:
+            print(f"\n  {egg_report}")
 
     # 4. Titles / description / tags (stored, or regenerated once)
     if not titles:
@@ -6109,6 +6288,10 @@ def _resume_episode(state: dict) -> None:
                                        description=description)
     else:
         print("  [SKIP] YouTube upload disabled")
+
+    egg_report = _easter_egg_report(shots)
+    if egg_report:
+        print(f"\n  {egg_report}")
 
     _save("upload")
 
@@ -6176,6 +6359,27 @@ def main():
             remove_custom_style(sys.argv[i + 1])
         else:
             print("Usage: python system_breakers.py --remove-style <name>")
+        return
+    if "--list-easter-eggs" in sys.argv:
+        print("Easter eggs (hidden in one shot per episode):")
+        list_easter_eggs()
+        print("\nCustom eggs live in style_sheets/easter_eggs.json - add with "
+              "--add-easter-egg <name> \"<prompt>\". Pick one at run time, or "
+              "set EASTER_EGG=<name>.")
+        return
+    if "--add-easter-egg" in sys.argv:
+        args = sys.argv[sys.argv.index("--add-easter-egg") + 1:]
+        if len(args) >= 2:
+            add_easter_egg(args[0], " ".join(args[1:]))
+        else:
+            print('Usage: python system_breakers.py --add-easter-egg <name> "<prompt>"')
+        return
+    if "--remove-easter-egg" in sys.argv:
+        i = sys.argv.index("--remove-easter-egg")
+        if i + 1 < len(sys.argv):
+            remove_easter_egg(sys.argv[i + 1])
+        else:
+            print("Usage: python system_breakers.py --remove-easter-egg <name>")
         return
     if "--cache-logos" in sys.argv:
         names = [a for a in sys.argv[1:] if not a.startswith("-")]
@@ -6305,6 +6509,12 @@ def main():
     #    chapter paras become black cards)
     shots = _build_shot_list(narration, bible=bible, context=context)
 
+    # 4a. Easter egg: ask whether to hide one, pick the egg (duck pope built-in
+    #     or add-new), and inject it into EXACTLY one shot of the episode.
+    easter_egg = _ask_easter_egg()
+    if easter_egg:
+        _inject_easter_egg(shots, easter_egg)
+
     # 4b. Stage 2b: character sheets for every named character
     character_sheets = _build_character_sheets(shots, narration)
     # 4c0. Brand logos: detect AI companies/models and real businesses in the
@@ -6401,6 +6611,9 @@ def main():
                        chapter_events=chapter_events, anchor_events=anchor_events,
                        location_sheets=location_sheets, prop_assets=prop_assets,
                        target_paras=target_paras)
+    egg_report = _easter_egg_report(shots)
+    if egg_report:
+        print(f"\n  {egg_report}")
 
     # 8. Titles + description (3 titles scored by Google Trends + YouTube
     #    competition, best first)
@@ -6452,6 +6665,10 @@ def main():
         print(f"\n  [SKIP] YouTube upload disabled")
         print(f"  [SKIP] Video saved locally: {video_path}")
         EPISODE_COUNTER_FILE.write_text(str(episode_num))
+
+    egg_report = _easter_egg_report(shots)
+    if egg_report:
+        print(f"\n  {egg_report}")
 
     print(f"\n  {'='*50}")
     print(f"  EPISODE #{episode_num:03d} COMPLETE")
