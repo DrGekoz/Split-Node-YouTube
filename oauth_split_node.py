@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-PROJECT_DIR = Path(r"F:\aaaaaVIBECODING\System Breakers")
+PROJECT_DIR = Path(__file__).resolve().parent
 URL_FILE = PROJECT_DIR / "oauth_url.txt"
 CODE_FILE = PROJECT_DIR / "oauth_code.txt"
 CREDS_FILE = Path.home() / ".youtube-upload-credentials.json"
@@ -100,9 +100,11 @@ def main():
 
     # Include the venv's google libs if available (fall back to whatever is
     # on PYTHONPATH if this exact venv path doesn't exist on this machine).
-    _venv = Path(r"C:\Users\josep\AppData\Local\hermes\hermes-agent\venv\Lib\site-packages")
-    if _venv.is_dir():
-        sys.path.insert(0, str(_venv))
+    _venv_site = os.environ.get("HERMES_VENV_SITE", "").strip()
+    if _venv_site:
+        _venv = Path(_venv_site)
+        if _venv.is_dir():
+            sys.path.insert(0, str(_venv))
     from google_auth_oauthlib.flow import InstalledAppFlow
 
     secrets = json.loads(secret.read_text(encoding="utf-8"))
