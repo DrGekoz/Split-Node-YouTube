@@ -3184,7 +3184,7 @@ def _ask_thumbnail_backend() -> tuple[str, str]:
     if os.environ.get("THUMBNAIL_BACKEND"):
         b = os.environ["THUMBNAIL_BACKEND"].strip().lower()
         m = os.environ.get("THUMBNAIL_MODEL", "").strip().lower() or None
-        if b in ("local", "runpod", "fal"):
+        if b in ("local", "runpod", "fal", "codex"):
             try:
                 import providers
                 _, _m = providers._resolve_thumbnail()
@@ -3195,15 +3195,18 @@ def _ask_thumbnail_backend() -> tuple[str, str]:
     print("    1. local     - ComfyUI (free, your GPU)")
     print("    2. fal       - fal.ai GPT Image 2 (default, best text rendering)")
     print("    3. runpod    - RunPod z-image-turbo")
+    print("    4. codex     - Codex CLI /imagegen (local GPT Image 2, if installed)")
     while True:
-        resp = input("  Pick 1-3 [2]: ").strip().lower()
+        resp = input("  Pick 1-4 [2]: ").strip().lower()
         if resp in ("", "2", "fal"):
             return "fal", "gpt-image-2"
         if resp in ("1", "local"):
             return "local", "krea2-turbo"
         if resp in ("3", "runpod"):
             return "runpod", "z-image-turbo"
-        print(f"  [WARN] '{resp}' not recognised - enter 1, 2 or 3")
+        if resp in ("4", "codex"):
+            return "codex", "gpt-image-2"
+        print(f"  [WARN] '{resp}' not recognised - enter 1, 2, 3 or 4")
 
 
 def _black_placeholder(episode_num: int) -> str:

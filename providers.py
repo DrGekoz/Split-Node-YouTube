@@ -70,7 +70,7 @@ FAL_QUEUE = "https://queue.fal.run"
 # ---------------------------------------------------------------------------
 # Backend / model registry + selection
 # ---------------------------------------------------------------------------
-IMAGE_BACKENDS = ("local", "runpod", "fal")
+IMAGE_BACKENDS = ("local", "runpod", "fal", "codex")
 VIDEO_BACKENDS = ("runpod", "fal", "local")
 
 IMAGE_MODELS = {
@@ -85,6 +85,9 @@ IMAGE_MODELS = {
         "nano-banana-2": "fal-ai/nano-banana-2",
         "z-image-turbo": "fal-ai/z-image-turbo",
         "gpt-image-2": "openai/gpt-image-2",
+    },
+    "codex": {
+        "gpt-image-2": "gpt-image-2",  # Codex CLI /imagegen -> GPT Image 2
     },
 }
 
@@ -105,7 +108,7 @@ VIDEO_MODELS = {
 }
 
 IMAGE_DEFAULTS = {"local": "krea2-turbo", "runpod": "z-image-turbo",
-                  "fal": "flux-schnell"}
+                  "fal": "flux-schnell", "codex": "gpt-image-2"}
 VIDEO_DEFAULTS = {"runpod": "hailuo-02-std", "fal": "minimax-hailuo",
                   "local": "comfyui"}
 
@@ -291,6 +294,143 @@ class RunPod:
 
 
 # ---------------------------------------------------------------------------
+# Codex CLI client (local GPT Image 2 via `codex exec --skip-git-repo-check
+# '/imagegen <prompt>'`). Uses OpenAI Codex CLI + its built-in image_gen tool,
+# which calls GPT Image 2. The generated PNG lands in a fresh session folder
+# under ~/.codex/generated_images/<uuid>/; we take the newest one.
+# ---------------------------------------------------------------------------
+def _codex_available() -> bool:
+    try:
+        import shutil
+        return shutil.which("codex") is not None or shutil.which("codex.exe") is not None
+    except Exception:
+        return False
+
+
+class Codex:
+    def __init__(self):
+        if not _codex_available():
+            raise RuntimeError("codex CLI not found on PATH - install with: npm install -g @openai/codex")
+
+    def generate_image(self, prompt: str, out_path: str,
+                       timeout: int = 900) -> bool:
+        import shutil
+        import subprocess
+        import tempfile
+        import glob
+        generated = Path.home() / ".codex" / "generated_images"
+        generated.mkdir(parents=True, exist_ok=True)
+        before = set(glob.glob(str(generated / "**" / "ig_*.png"), recursive=True))
+
+        # Codex is a Windows Node app -> always shell through powershell.exe.
+        # The --skip-git-repo-check flag MUST come BEFORE the /imagegen prompt.
+        ps_cmd = ("codex exec --skip-git-repo-check " +
+                  "/imagegen " + _ps_quote(prompt))
+        cmd = ["powershell.exe", "-NoProfile", "-Command", ps_cmd]
+        print(f"  [CODEX] running codex exec /imagegen (this can take a minute)...")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print("  [CODEX] timed out generating image")
+            return False
+
+        # No reliable "saved to X" line - find the NEWEST generated image.
+        after = set(glob.glob(str(generated / "**" / "ig_*.png"), recursive=True))
+        new = after - before
+        if not new:
+            # fall back to newest mtime if the session folder already existed
+            all_imgs = sorted(glob.glob(str(generated / "**" / "ig_*.png"), recursive=True),
+                              key=os.path.getmtime, reverse=True)
+            if all_imgs:
+                new = {all_imgs[0]}
+        if not new:
+            print("  [CODEX] no generated image found under ~/.codex/generated_images")
+            return False
+        src = sorted(new, key=os.path.getmtime, reverse=True)[0]
+        try:
+            shutil.copy2(src, out_path)
+        except Exception as e:
+            print(f"  [CODEX] failed to copy output: {e}")
+            return False
+        print(f"  [CODEX] {os.path.basename(out_path)} ({os.path.getsize(out_path)//1024}KB)")
+        return os.path.getsize(out_path) > 500
+
+
+def _ps_quote(s: str) -> str:
+    """Escape a string for a PowerShell single-quoted argument."""
+    return "'" + s.replace("'", "''") + "'"
+
+
+def _faceupdat_upscale(image_path: str, out_path: str,
+                       width: int = 1920, height: int = 1080,
+                       timeout: int = 900) -> bool:
+    """Upscale an existing image through ComfyUI's 4xFaceUpDAT model, then
+    ImageScale to the target resolution. Used to pipe Codex/GPT-Image-2 output
+    up to the final shot/panel/thumbnail resolution (in-graph, no second GPU
+    process). Reuses krea2_splitnode's ComfyUI connection helpers."""
+    import shutil
+    try:
+        import krea2_splitnode as krea
+    except Exception as e:
+        print(f"  [UPSCALE] import krea2_splitnode failed: {e}")
+        return False
+    try:
+        base = krea._comfy_url()
+    except Exception as e:
+        print(f"  [UPSCALE] ComfyUI not reachable: {str(e)[:80]}")
+        return False
+    try:
+        # Upload the codex output into ComfyUI's input dir.
+        ref = krea._upload_ref(image_path, base)
+        api = {
+            "1": {"class_type": "LoadImage", "inputs": {"image": ref}},
+            "2": {"class_type": "UpscaleModelLoader",
+                  "inputs": {"model_name": krea.UPSCALER}},
+            "3": {"class_type": "ImageUpscaleWithModel",
+                  "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+            "4": {"class_type": "ImageScale",
+                  "inputs": {"image": ["3", 0], "upscale_method": "lanczos",
+                             "width": width, "height": height, "crop": "center"}},
+            "5": {"class_type": "SaveImage",
+                  "inputs": {"images": ["4", 0], "filename_prefix": "splitnode_up"}},
+        }
+        queued = krea._req(base, "/prompt", {"prompt": api}, timeout=120)
+        pid = queued.get("prompt_id")
+        if not pid:
+            print(f"  [UPSCALE] submit failed: {str(queued)[:150]}")
+            return False
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            try:
+                hist = krea._req(base, f"/history/{pid}", timeout=30)
+            except OSError:
+                time.sleep(5)
+                continue
+            entry = hist.get(pid)
+            if entry and entry.get("outputs"):
+                imgs = []
+                for node_out in entry["outputs"].values():
+                    imgs.extend(node_out.get("images", []))
+                if imgs:
+                    img = imgs[0]
+                    dl = (f"{base}/view?filename={img['filename']}"
+                          f"&subfolder={img.get('subfolder', '')}"
+                          f"&type={img.get('type', 'output')}")
+                    with urllib.request.urlopen(dl, timeout=120) as r:
+                        with open(out_path, "wb") as f:
+                            f.write(r.read())
+                    print(f"  [UPSCALE] {os.path.basename(out_path)} "
+                          f"({os.path.getsize(out_path)//1024}KB, {width}x{height})")
+                    return os.path.getsize(out_path) > 500
+            time.sleep(3)
+        print("  [UPSCALE] timed out waiting for upscale job")
+    except Exception as e:
+        print(f"  [UPSCALE] error: {str(e)[:150]}")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # fal.ai client (sync /fal.run + async queue fallback)
 # ---------------------------------------------------------------------------
 class Fal:
@@ -415,6 +555,21 @@ def generate_image(prompt: str, seed: int, out_path: str,
             print(f"  [RUNPOD] {str(e)[:140]}")
             return False
 
+    if backend == "codex":
+        try:
+            c = Codex()
+        except RuntimeError as e:
+            print(f"  [CODEX] {e}")
+            return False
+        ok = c.generate_image(prompt, out_path)
+        if not ok:
+            return False
+        # Pipe codex output through FaceUpDAT upscaler to reach target res.
+        if upscale:
+            return _faceupdat_upscale(out_path, out_path, width=width,
+                                      height=height)
+        return True
+
     if backend == "fal":
         try:
             f = Fal()
@@ -449,7 +604,6 @@ def _resolve_thumbnail() -> tuple[str, str]:
     if model not in IMAGE_MODELS[backend]:
         model = IMAGE_DEFAULTS[backend]
     return backend, model
-
 
 def generate_thumbnail(prompt: str, out_path: str,
                        seed: int = 70001,
