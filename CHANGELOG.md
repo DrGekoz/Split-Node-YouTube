@@ -2,6 +2,37 @@
 
 All notable changes to Split Node.
 
+## [1.28.0] - 2026-08-07
+
+### Story Bible before script (FERN + Isaac scripting framework)
+
+- **New `_build_story_bible()` stage runs BEFORE the script is written** and locks the episode structure from the article: visual hook (the thing the viewer must SEE), deeper question (the mystery the episode answers), surface + deeper problem, protagonist transformation arc, hero's-journey beats, key numbers/places, and — critically — the **REAL character roster** extracted from the article.
+- **Narration is written to follow the bible.** The bible is injected into the narration system prompt (`_narration_prompt_with_bible`), so every paragraph obeys the locked structure and uses only the article's actual people.
+- **Removed the episode-template system** (`last_episode.json` load/save). Every story is now written fresh from its own article — no stale formula, no leaked character names from a previous episode.
+- **Fixed the character leak.** The shot list now receives the bible's real character roster and is instructed to use ONLY those exact names. Verified: the Alex-casino story now produces Alex / Tracey Elkerton / Willy Allison — no "Stefan Mandel" contamination.
+
+### Deterministic pacing & rhythm (LLM can't break it)
+
+- **`_pace_narration()`** — a deterministic pass that splits overlong sentences at clause boundaries into distinct spoken sentences, and breaks monotone length-runs (Isaac's rhythm rule) so the voice reads with natural variety. No LLM involved.
+- **`_pace_gaps_after()`** — per-shot silence gaps computed in code and applied to the audio mix + clip starts: chapter cards 1.6s, rhetorical questions 1.2s, reveal/drop openers 1.0s, hero/ECU beats 0.9s, place anchors 0.7s, default 0.4s. The voice now breathes where the story needs it.
+
+### FERN-style title & description (tags/chapters/Discord unchanged)
+
+- `_generate_titles` and `_generate_description` now receive the story bible and use the visual hook + deeper question to write clickbait titles and descriptions. Tags generation, chapter timecodes, and the Discord link stay exactly as they were.
+
+### Anti-duplicate figure fix (2-humans bug)
+
+- **Negative prompt support added** through the full Krea2 stack (`_krea_generate` → `providers.generate_image` → `krea.generate` → `build_identity_api`). Single-character character-sheet panels and single-character shots now pass `NO_DUPLICATE_NEGATIVE` (bans "two people, duplicate, clone, mirror image, split body...") — on top of the existing grounding_px=768 fix, this steers the sampler away from rendering two bodies on the side/back views. Multi-person shots keep their multiple identities.
+- Krea2 can take up to **8 identity references** at once (nodes A–H), so shots with two+ characters lock all their identities in one generation.
+
+### Per-episode resume state
+
+- **`EPISODE_RESUME=<n>` env var** points the pipeline at a dedicated `.resume_state.ep{n}.json`, so two episodes (e.g. one on RunPod + one on Krea2) can run in parallel in the same folder without clobbering each other's state.
+
+### New narration voice
+
+- **Voice clone replaced with Hamza** ("Get Deeper Voice Naturally" short, `youtube.com/shorts/X_957URxtgM`) — clean 18s window, 24kHz mono, loudnorm 0dB → `voice_refs/split_node.wav`. Old ref backed up to `split_node.wav.bak_old`.
+
 ## [1.27.0] - 2026-08-06
 
 ### Harden real-photo reference search (audit + CDN filtering)

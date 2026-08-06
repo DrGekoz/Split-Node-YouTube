@@ -201,7 +201,8 @@ def build_identity_api(prompt: str, seed: int, ref_names: list[str],
                        width: int, height: int,
                        ref_boost: float = 4.0, grounding_px: int = 1024,
                        steps: int = 10, upscale: bool = False,
-                       prefix: str = "krea2id") -> dict:
+                       prefix: str = "krea2id",
+                       negative_prompt: str = "") -> dict:
     """Krea2Edit identity graph: N tight refs -> VAE source tokens (RoPE
     frames 1..N) + Qwen3-VL grounded instruction. Trained path
     (krea2_identity_edit LoRA). euler sampler (er_sde disrupts the
@@ -264,7 +265,7 @@ def build_identity_api(prompt: str, seed: int, ref_names: list[str],
     api["9"] = {"class_type": "Krea2EditGroundedEncode",
                 "inputs": dict(enc_inputs_a, prompt=prompt)}
     api["10"] = {"class_type": "Krea2EditGroundedEncode",
-                 "inputs": dict(enc_inputs_a, prompt="")}
+                 "inputs": dict(enc_inputs_a, prompt=negative_prompt)}
     api["11"] = {"class_type": "KSampler", "inputs": {
         "model": ["8", 0], "positive": ["9", 0], "negative": ["10", 0],
         "latent_image": ["1", 0], "seed": seed, "control_after_generate": "fixed",
@@ -362,7 +363,8 @@ def _generate_once(prompt: str, seed: int, out_path: str,
              ref_mode: str = "img2img",
              ref_method: str = "index_timestep_zero",
              ref_boost: float = 4.0, grounding_px: int = 1024,
-             ref_images_b: list[str] | None = None) -> bool:
+             ref_images_b: list[str] | None = None,
+             negative_prompt: str = "") -> bool:
     """Generate one image via ComfyUI (single attempt). Blocks until the queue finishes.
     Every reference (single or multiple) is normalized to a 640x720 strip
     BEFORE conditioning - a full-res ref (e.g. a 4K photo) would otherwise
@@ -389,7 +391,8 @@ def _generate_once(prompt: str, seed: int, out_path: str,
         ref_names = [_upload_ref(r, base) for r in refs_all]
         api = build_identity_api(prompt, seed, ref_names, width, height,
                                  ref_boost=ref_boost, grounding_px=grounding_px,
-                                 steps=steps, upscale=upscale, prefix=prefix)
+                                 steps=steps, upscale=upscale, prefix=prefix,
+                                 negative_prompt=negative_prompt)
     else:
         ref_name = None
         if ref_images:
@@ -484,7 +487,8 @@ def generate(prompt: str, seed: int, out_path: str,
              ref_mode: str = "img2img",
              ref_method: str = "index_timestep_zero",
              ref_boost: float = 4.0, grounding_px: int = 1024,
-             ref_images_b: list[str] | None = None) -> bool:
+             ref_images_b: list[str] | None = None,
+             negative_prompt: str = "") -> bool:
     """Generate one image via ComfyUI, surviving server crashes/wedges.
 
     ComfyUI 0.29.0 with Krea2 on 8GB --lowvram intermittently crashes with
@@ -502,7 +506,7 @@ def generate(prompt: str, seed: int, out_path: str,
             return _generate_once(prompt, seed, out_path, ref_images, denoise,
                                   upscale, timeout, prefix, steps, cfg, width,
                                   height, ref_mode, ref_method, ref_boost,
-                                  grounding_px, ref_images_b)
+                                  grounding_px, ref_images_b, negative_prompt)
         except (OSError, RuntimeError) as e:
             if attempt >= max_retries:
                 print(f"  [KREA] ComfyUI unreachable after {attempt} attempts "

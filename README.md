@@ -507,18 +507,22 @@ split-node/
 - **Trend scoring toolkit** — SerpAPI demand + YouTube competition analysis to pick topics with actual demand (cached 24h)
 
 ### Script Generation
+- **Story bible (NEW) — built from the article BEFORE the script** (FERN + Isaac framework): locks the visual hook (the thing the viewer must SEE), the deeper question the episode answers, surface + deeper problem, the protagonist's transformation arc, hero's-journey beats, and the **REAL character roster** extracted from the article. The narration script is then written to **follow this bible**, and the shot list may only use those exact character names — so every episode is written fresh from its own story (no template reuse, no leaked names from a previous episode)
 - **Director's bible** — before any image is made: deeper problem, transformation arc, chapter moods, hero paragraphs for ECU magnification
 - **Episode world** — works for any topic / environment / location
 - **Scene board** — one storyboard card per narration beat, saved to the episode folder for human review
-- **Stage 1 — narration script** — you pick the **video length in minutes**, and the pipeline works backwards (at ~14.3s per paragraph) to the target narration-paragraph count; each article paragraph is then expanded into multiple narration paragraphs, with covered-beat dedupe and a strict OUTPUT CONTRACT
+- **Stage 1 — narration script** — you pick the **video length in minutes**, and the pipeline works backwards (at ~14.3s per paragraph) to the target narration-paragraph count; each article paragraph is then expanded into multiple narration paragraphs, with covered-beat dedupe and a strict OUTPUT CONTRACT. A **deterministic pacing pass** then splits overlong sentences at clause boundaries and breaks monotone length-runs so the voice reads with natural rhythm
+- **Deterministic pacing gaps** — per-shot silence pauses computed in code (chapter 1.6s, question 1.2s, reveal 1.0s, hero 0.9s, place anchor 0.7s, default 0.4s) are applied to the audio mix so the narration breathes where the story needs it — no LLM involved
 - **Stage 2 — shot list** — every narration paragraph gets a shot entry: character archetype, camera logic (EWS/WS/MS/CU/ECU), angle, action, facing, SFX category
 - **10 chapter breaks** — duration-aligned from word counts, LLM-written titles
+- **FERN-style title & description** — written from the bible's visual hook + deeper question; tags, chapter timecodes and the Discord link unchanged
 - **Style test frame** — a Krea 2 test frame is generated and human-reviewed before the run commits
 
 ### Cast & Likeness
 - **20 metahuman archetypes** with exact clothing prompts; role / gender / age matching with everyman fallback
 - **Real-photo reference search** (SerpAPI + Openverse) with local vision audit (person + text/logo/watermark checks) and **image-decode validation** — cached refs and downloads that turn out to be HTML redirects/error pages are discarded and re-fetched, so a bad ref can't crash the face panel. The audit **only rejects on an explicit NO** (an uncertain/`?` vision response is accepted best-effort so a real ref isn't thrown away), known-bad CDNs (Instagram widget, TikTok API, gstatic/YouTube thumbs) are skipped before download, candidate count is capped (`REALREF_MAX_CANDIDATES`, default 12), and a "no ref found" result is cached so the search isn't re-burned every run
 - **Six individual 1280x1280 identity panels** per character (face, face-side, face-back, body-front, body-side, body-back) — no grid merge
+- **Anti-duplicate figure fix** — character panels and single-character shots pass a `NO_DUPLICATE_NEGATIVE` prompt (bans "two people, duplicate, clone, mirror image, split body...") on top of `grounding_px=768`, so the side/back views never render two bodies. Krea2 takes up to **8 identity refs** at once for multi-person shots
 - **Smart per-shot ref selection** — wide shot → body panel, close-up → face panel, facing left → side panel as-is, facing right → side panel MIRRORED, back → back panel, hand/object close-up → no person ref, multi-person → one panel per character
 - **Panels-first generation** — every character's six identity panels are built in a **dedicated pass before any shot renders** (in both fresh and resume runs), with face-panel failure retries, so a ComfyUI hiccup can't cascade into every shot missing a face
 

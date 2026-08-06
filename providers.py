@@ -519,7 +519,8 @@ def generate_image(prompt: str, seed: int, out_path: str,
                    ref_images_b: list | None = None,
                    out_dir: str | None = None,
                    image_url: str | None = None,
-                   image_size: str | None = None) -> bool:
+                   image_size: str | None = None,
+                   negative_prompt: str = "") -> bool:
     """Generate one image on the selected backend. Returns True on success."""
     backend, model = _resolve_image(backend, model)
 
@@ -535,7 +536,7 @@ def generate_image(prompt: str, seed: int, out_path: str,
                 timeout=timeout, steps=steps, cfg=cfg, width=width,
                 height=height, ref_mode=ref_mode, ref_method=ref_method,
                 ref_boost=ref_boost, grounding_px=grounding_px,
-                ref_images_b=ref_images_b)
+                ref_images_b=ref_images_b, negative_prompt=negative_prompt)
         except Exception as e:
             print(f"  [LOCAL] {str(e)[:140]}")
             return False

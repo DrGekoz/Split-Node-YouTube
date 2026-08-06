@@ -71,7 +71,19 @@ THUMBNAILS_DIR = PROJECT_DIR / "thumbnails"
 SFX_DIR = PROJECT_DIR / "cinematic_sounds"
 USED_ARTICLES_FILE = PROJECT_DIR / ".used_articles.json"
 EPISODE_COUNTER_FILE = PROJECT_DIR / ".episode_counter"
-RESUME_FILE = PROJECT_DIR / ".resume_state.json"
+# Per-episode resume state: when EPISODE_RESUME=<n> is set, use a dedicated
+# .resume_state.ep{n}.json so multiple episodes can run in parallel in the
+# same folder without clobbering each other's state. Unset/0 -> the legacy
+# single .resume_state.json.
+_RESUME_EP = (os.environ.get("EPISODE_RESUME") or "").strip()
+try:
+    _RESUME_EP_INT = int(_RESUME_EP)
+except Exception:
+    _RESUME_EP_INT = 0
+if _RESUME_EP_INT > 0:
+    RESUME_FILE = PROJECT_DIR / f".resume_state.ep{_RESUME_EP_INT:03d}.json"
+else:
+    RESUME_FILE = PROJECT_DIR / ".resume_state.json"
 BATCH_TEMP = PROJECT_DIR / "batch_temp"
 
 YOUTUBE_CREDENTIALS = Path.home() / ".youtube-upload-credentials.json"
@@ -1819,8 +1831,186 @@ NARRATION_SYSTEM_PROMPT = (
     "and drama."
 )
 
+def _narration_prompt_with_bible(base_prompt: str, bible: dict) -> str:
+    """Append the locked STORY BIBLE to the narration system prompt so the
+    scriptwriter follows the article's real structure and names."""
+    b = bible or {}
+    prot = b.get("protagonist") or {}
+    hj = b.get("hero_journey") or {}
+    chars = b.get("characters") or []
+    char_lines = "\n".join(
+        f"  - {c.get('name','?')} ({c.get('gender','?')}/{c.get('age','?')}): "
+        f"{c.get('role','')}" + (f" - {c.get('relation','')}" if c.get('relation') else "")
+        for c in chars[:10]) or "  - (none named - use role labels)"
+
+    def _hj(k):
+        v = hj.get(k, "")
+        return v if isinstance(v, str) and v.strip() else "(n/a)"
+
+    section = (
+        "\n\n=== LOCKED STORY BIBLE (you MUST follow this; it overrides all "
+        "other structure) ===\n"
+        f"VISUAL HOOK (open the cold open on this, make it seen): {b.get('visual_hook','')}\n"
+        f"DEEPER QUESTION (plant early, answer at the end): {b.get('deeper_question','')}\n"
+        f"SURFACE PROBLEM (the mechanics): {b.get('surface_problem','')}\n"
+        f"DEEPER PROBLEM (the emotional struggle underneath): {b.get('deeper_problem','')}\n"
+        f"PROTAGONIST: {prot.get('name','?')} ({prot.get('role','')})\n"
+        f"  before: {prot.get('transformation_start','')}\n"
+        f"  after:  {prot.get('transformation_end','')}\n"
+        f"HERO'S JOURNEY:\n"
+        f"  status_quo:  {_hj('status_quo')}\n"
+        f"  call:        {_hj('call')}\n"
+        f"  assistance:  {_hj('assistance')}\n"
+        f"  departure:   {_hj('departure')}\n"
+        f"  trials:      {_hj('trials')}\n"
+        f"  approach:    {_hj('approach')}\n"
+        f"  crisis:      {_hj('crisis')}\n"
+        f"  reward:      {_hj('reward')}\n"
+        f"  return:      {_hj('return')}\n"
+        f"  new_life:    {_hj('new_life')}\n"
+        f"REAL CHARACTERS (use ONLY these exact names; never invent or import "
+        f"names from other stories):\n{char_lines}\n"
+        f"KEY NUMBERS (use the exact figures): {', '.join(str(x) for x in (b.get('key_numbers') or [])[:12])}\n"
+        f"KEY PLACES (use only these real places): {', '.join(str(x) for x in (b.get('key_places') or [])[:12])}\n"
+        "IMPORTANT: the script must open with the VISUAL HOOK in a cold open, "
+        "establish the DEEPER QUESTION in the first act, escalate through the "
+        "hero's journey beats in order, and resolve the transformation + "
+        "deeper question in the final act. Every character must be referred to "
+        "by their exact locked name. Do not add characters that are not in the "
+        "REAL CHARACTERS list."
+    )
+    return base_prompt + section
+
+
+# Pacing keywords / heuristics (deterministic - the LLM can't be trusted with
+# rhythm, so we enforce it here in code).
+_QUESTION_END = ("?",)
+_REVEAL_OPENERS = ("but ", "except ", "however ", "then ", "suddenly ",
+                   "what happened next", "that's when", "and then",
+                   "the truth", "it was", "turns out", "only then")
+_DROP_OPENERS = ("case closed", "game over", "it was over", "and that was it",
+                 "it worked", "he won", "she won", "they won", "caught",
+                 "guilty", "done", "enough", "no one", "nothing")
+_MID_LEN_LO = 18   # words: too short -> merge/shorten risk
+_MID_LEN_HI = 46   # words: too long -> split signal
+
+
+def _sentence_words(s: str) -> int:
+    return len(re.findall(r"\S+", s))
+
+
+def _split_long_sentence(s: str, maxw: int = 42) -> list[str]:
+    """Deterministically split an overlong sentence at a clause boundary so it
+    reads as DISTINCT spoken sentences (rhythm + breathing room for the voice).
+
+    Splits on ', ' then ' while ' then ' but ' then ' and ', choosing a boundary
+    so no piece exceeds maxw words. Each piece is capitalised and terminated
+    with a period so it reads as its own sentence (a comma split that stays a
+    comma re-merges into the same run-on)."""
+    if _sentence_words(s) <= maxw:
+        return [s]
+    clauses = None
+    for sep in (", ", " while ", " but ", " and ", " then "):
+        cand = re.split(re.escape(sep), s, flags=re.I)
+        if len(cand) >= 2:
+            clauses = cand
+            break
+    if not clauses:
+        # last resort: hard cut near maxw at a word boundary
+        words = s.split()
+        out, cur = [], ""
+        for w in words:
+            if cur and _sentence_words(cur) >= maxw:
+                out.append(cur)
+                cur = w
+            else:
+                cur = (cur + " " + w).strip() if cur else w
+        if cur:
+            out.append(cur)
+        res = []
+        for i, p in enumerate(out):
+            p = p.rstrip(".,;")
+            if i < len(out) - 1:
+                p += "."
+            res.append(_cap_sentence(p))
+        return res
+    # rebuild greedily into <=maxw-word pieces, then make each a sentence
+    out, cur = [], ""
+    for cl in clauses:
+        cl = cl.strip()
+        if cur and _sentence_words(cur + " " + cl) > maxw:
+            if cur:
+                out.append(cur)
+            cur = cl
+        else:
+            cur = (cur + " " + cl).strip() if cur else cl
+    if cur:
+        out.append(cur)
+    res = []
+    for i, p in enumerate(out):
+        p = p.strip().rstrip(".,;")
+        if i < len(out) - 1:
+            p += "."
+        res.append(_cap_sentence(p))
+    return res or [s]
+
+
+def _cap_sentence(s: str) -> str:
+    """Capitalise the first letter of a sentence, keep the rest."""
+    s = s.strip()
+    if not s:
+        return s
+    return s[0].upper() + s[1:]
+
+
+def _pace_narration(paras: list[str], bible: Optional[dict] = None) -> list[str]:
+    """Deterministic pacing + rhythm pass on the narration.
+
+    The LLM tends to write uniform, overlong sentences with no dramatic beats.
+    We fix that here in code:
+      - Split overlong sentences at clause boundaries.
+      - Ensure sentence LENGTH VARIES (short beat next to long flow) - Isaac's
+        'rhythm' rule.
+      - Break monotone runs where 3+ consecutive sentences share a length band.
+    This returns the tightened narration paragraphs. It does NOT reorder or
+    invent content - it only reflows what the writer produced so the voice
+    reads with natural pacing. Gaps/pauses between clips are handled in the
+    audio mix stage (_pace_gaps_after), not here.
+    """
+    if not paras:
+        return paras
+    out = []
+    for para in paras:
+        para = re.sub(r"\s+", " ", para).strip()
+        # 1. split into sentences (keep ? ! . boundaries)
+        sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", para) if s.strip()]
+        # 2. reflow long sentences into shorter ones
+        reflowed = []
+        for s in sents:
+            reflowed.extend(_split_long_sentence(s))
+        sents = reflowed
+        # 3. rhythm: if 3+ consecutive sentences are in the SAME length band,
+        #    try to split/shorten a middle one (bump variation) - deterministic.
+        bands = ["short" if _sentence_words(s) < _MID_LEN_LO else
+                 ("long" if _sentence_words(s) > _MID_LEN_HI else "mid")
+                 for s in sents]
+        for i in range(2, len(sents)):
+            if bands[i] == bands[i-1] == bands[i-2] and bands[i] == "mid":
+                # split the current mid sentence to inject a short beat
+                pieces = _split_long_sentence(sents[i], maxw=24)
+                if len(pieces) > 1:
+                    sents[i:i+1] = pieces
+                    bands = ["short" if _sentence_words(x) < _MID_LEN_LO else
+                             ("long" if _sentence_words(x) > _MID_LEN_HI else "mid")
+                             for x in sents]
+        # 4. rebuild the paragraph (join with single spaces; keep sentence caps)
+        out.append(" ".join(sents))
+    return out
+
+
 def _build_narration_script(paragraphs: list[str],
-                            target_paras: int = 0) -> list[str]:
+                            target_paras: int = 0,
+                            bible: Optional[dict] = None) -> list[str]:
     """Stage 1: expand the article into ~target narration paragraphs.
 
     target_paras comes from the interactive length prompt (default
@@ -1828,6 +2018,12 @@ def _build_narration_script(paragraphs: list[str],
     narration paragraphs where X = round(target / len(article_paragraphs)),
     so the total lands as close to the target as possible even when the
     article has fewer paragraphs.
+
+    When a STORY BIBLE is provided (built from the article BEFORE the script),
+    the bible is injected into the system prompt so every narration paragraph
+    follows the locked structure: visual hook cold open, deeper question,
+    surface + deeper problem, hero's journey beats, transformation arc, and
+    the exact real character names from the article.
     """
     target = target_paras or TARGET_NARRATION_PARAS
     print("\n[LLM] Stage 1: writing documentary narration script...")
@@ -1835,6 +2031,12 @@ def _build_narration_script(paragraphs: list[str],
     per_para = max(2, round(target / n_art))
     print(f"  [LLM] Target {target} narration paragraphs "
           f"({per_para} per article paragraph x {n_art} article paragraphs)")
+
+    # Build the bible-injected system prompt (structure the whole script follows)
+    sys_prompt = NARRATION_SYSTEM_PROMPT
+    if bible:
+        sys_prompt = _narration_prompt_with_bible(NARRATION_SYSTEM_PROMPT, bible)
+
     narration_paras = []
     covered = []  # rolling summary of already-written beats (dedupe guard)
     for i, _para in enumerate(paragraphs):
@@ -1852,7 +2054,7 @@ def _build_narration_script(paragraphs: list[str],
                 + "\n".join(f"- {c}" for c in covered[-2:])
             )
         text = _llm_chat([
-            {"role": "system", "content": NARRATION_SYSTEM_PROMPT},
+            {"role": "system", "content": sys_prompt},
             {"role": "user", "content": user}
         ], max_tokens=min(1600, 250 + per_para * 120), temp=0.85)
         parts = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
@@ -1873,6 +2075,9 @@ def _build_narration_script(paragraphs: list[str],
         print("  [LLM] Narration failed, using article paragraphs directly")
         narration_paras = [re.sub(r"\s+", " ", p).strip()[:500]
                            for p in paragraphs[:target]]
+
+    # Deterministic pacing pass: enforce sentence-rhythm + tighten the script
+    narration_paras = _pace_narration(narration_paras, bible)
 
     print(f"  [LLM] Narration script: {len(narration_paras)} paragraphs")
     for i, p in enumerate(narration_paras):
@@ -2219,6 +2424,76 @@ def _build_episode_context(topic: str, paragraphs: list[str]) -> dict:
     return defaults
 
 
+def _build_story_bible(topic: str, paragraphs: list[str]) -> dict:
+    """STORY BIBLE (built from the ARTICLE, BEFORE the script is written).
+
+    Implements the FERN + Isaac framework (the two scripting videos):
+      - visual_hook: the ONE thing the topic must be SEEN to be understood
+      - deeper_question: the 'how did this happen / why' the episode answers
+      - surface_problem (mechanics) + deeper_problem (emotional struggle)
+      - protagonist transformation (start -> end)
+      - hero's journey beats (status quo -> call -> ... -> return -> new life)
+      - REAL character roster (names + roles) locked from the article so the
+        shot list and character sheets use the correct story people - never a
+        stale/hallucinated name (fixes the 'Stefan Mandel leak').
+    The narration script is then written to FOLLOW this bible.
+    """
+    sample = "\n\n".join(paragraphs[:40])[:9000]
+    bible = _llm_json([
+        {"role": "system", "content":
+            "You are a documentary director. From the article, build the locked "
+            "story bible as STRICT JSON only, with EXACTLY these keys: "
+            '{"visual_hook": "the one striking thing the viewer must SEE (person, place, object, action, event - the video topic has to be seen to be understood)", '
+            '"deeper_question": "the deeper WHY/HOW-DID-THIS-HAPPEN question the whole episode answers (never a yes/no, always a mystery)", '
+            '"surface_problem": "the mechanical problem - the hack, scheme, loophole", '
+            '"deeper_problem": "the emotional struggle underneath (greed, desperation, revenge, injustice, the need to prove something)", '
+            '"protagonist": {"name": "the main person", "role": "their role", "transformation_start": "who they are before", "transformation_end": "who they become / the price paid"}, '
+            '"characters": [{"name": "exact name from article", "role": "their role in the story", "gender": "male|female", "age": "young|mid30s|mid40s|old", "relation": "how they relate to the protagonist"}], '
+            '"hero_journey": {"status_quo": "...", "call": "...", "assistance": "...", "departure": "...", "trials": "...", "approach": "...", "crisis": "...", "reward": "...", "return": "...", "new_life": "..."}, '
+            '"key_numbers": ["exact figures from the article"], '
+            '"key_places": ["real places"], '
+            '"chapter_moods": [{"n": 1, "title": "chapter title", "mood": "suspense|triumphant|neutral"}]}. '
+            "Use ONLY real names, places and figures from the article. Do NOT invent "
+            "characters. If the article gives no name for a person, use a role label "
+            "like 'The Hacker'. Say NOTHING outside the JSON."},
+        {"role": "user", "content": f"TOPIC: {topic}\n\nARTICLE:\n{sample}"}
+    ], max_tokens=1400, temp=0.35)
+    # Normalize shapes
+    if not isinstance(bible.get("characters"), list):
+        bible["characters"] = []
+    for c in bible["characters"]:
+        if isinstance(c, dict):
+            c.setdefault("name", "The Subject")
+            c.setdefault("role", "character in the story")
+            c.setdefault("gender", "male")
+            c.setdefault("age", "mid30s")
+            c.setdefault("relation", "")
+    prot = bible.get("protagonist")
+    if isinstance(prot, dict):
+        prot.setdefault("name", "")
+        prot.setdefault("role", "")
+        prot.setdefault("transformation_start", "")
+        prot.setdefault("transformation_end", "")
+    hj = bible.get("hero_journey")
+    if isinstance(hj, dict):
+        for k in ("status_quo", "call", "assistance", "departure", "trials",
+                  "approach", "crisis", "reward", "return", "new_life"):
+            hj.setdefault(k, "")
+    if not isinstance(bible.get("chapter_moods"), list):
+        bible["chapter_moods"] = []
+    print("  [BIBLE] visual_hook:", str(bible.get("visual_hook", "?"))[:80])
+    print("  [BIBLE] deeper_question:", str(bible.get("deeper_question", "?"))[:80])
+    print("  [BIBLE] deeper_problem:", str(bible.get("deeper_problem", "?"))[:80])
+    prot_name = prot.get("name") if isinstance(prot, dict) else ""
+    if prot_name:
+        print(f"  [BIBLE] protagonist: {prot_name} ({prot.get('role','')})")
+    for c in bible["characters"][:8]:
+        print(f"  [BIBLE] character: {c.get('name','?')} - {c.get('role','')} "
+              f"({c.get('gender','')}/{c.get('age','')})")
+    print(f"  [BIBLE] {len(bible['characters'])} characters locked from article")
+    return bible
+
+
 def _build_directors_bible(topic: str, narration_paras: list[str]) -> dict:
     """Director's bible: per-chapter mood, hero moments (paragraph indices to
     magnify with ECU + riser), deeper problem, transformation arc. Written
@@ -2492,6 +2767,19 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
             f"props={', '.join(context.get('props', []))}. "
             "Scenes MUST be set in this world - use these real places, "
             "environments and props.\n")
+    # Lock the REAL character roster from the story bible so the shot list
+    # never invents or imports characters from other stories (fixes the
+    # 'Stefan Mandel leak'). Only these exact names may appear as characters.
+    roster = []
+    if bible:
+        for c in (bible.get("characters") or []):
+            if isinstance(c, dict) and c.get("name"):
+                roster.append(f"{c['name']} ({c.get('role','')})")
+    if roster:
+        ctx_line += (
+            "\nREAL CHARACTERS (ONLY these people exist in the story - every "
+            "shot with a person must use one of these EXACT names, never invent "
+            "or import names):\n" + "\n".join(f"  - {r}" for r in roster) + "\n")
     shots = []
     for i, para in enumerate(narration_paras):
         if len(shots) >= 120:
@@ -3288,7 +3576,8 @@ def _krea_generate(prompt: str, seed: int, out_path: str,
                    ref_mode: str = "img2img",
                    ref_method: str = "index_timestep_zero",
                    ref_boost: float = 4.0, grounding_px: int = 1024,
-                   ref_images_b: Optional[list] = None) -> bool:
+                   ref_images_b: Optional[list] = None,
+                   negative_prompt: str = "") -> bool:
     """Generate one image, routed through the unified provider layer.
 
     Backend is selected at runtime by IMAGE_BACKEND (default 'local' ->
@@ -3308,7 +3597,8 @@ def _krea_generate(prompt: str, seed: int, out_path: str,
         ref_images=ref_images, denoise=denoise, upscale=upscale,
         timeout=timeout, steps=steps, cfg=cfg, width=width, height=height,
         ref_mode=ref_mode, ref_method=ref_method, ref_boost=ref_boost,
-        grounding_px=grounding_px, ref_images_b=ref_images_b)
+        grounding_px=grounding_px, ref_images_b=ref_images_b,
+        negative_prompt=negative_prompt)
 
 
 def _generate_motion_clip(prompt: str, out_path: str,
@@ -4593,6 +4883,16 @@ CHAR_PANEL_W, CHAR_PANEL_H = 1280, 1280
 CHAR_PANEL_VIEWS = ["face", "face_side", "face_back",
                     "body_front", "body_side", "body_back"]
 
+# Negative prompt for character/body panels: hard-ban duplicate figures so a
+# single identity never renders as two people (fixes the body_side 2-human
+# bug beyond grounding_px=768 alone - the negative prompt steers the sampler
+# away from clones/mirrors in every panel).
+NO_DUPLICATE_NEGATIVE = (
+    "two people, two persons, duplicate, cloned, double figure, second person, "
+    "extra person, twin, mirror image, split body, two bodies, two heads, "
+    "double exposure, multiple figures, crowd, mannequin, duplicate subject"
+)
+
 # Mannequin-style panels - REAL-FACE method (canonical, Joe-approved 2026-08-06):
 # Use the real person's photo as the ONE identity ref (krea2edit identity mode)
 # but render the result as a glossy PORCELAIN mannequin whose facial features
@@ -5012,7 +5312,8 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
                                 ref_images=refs_full, denoise=denoise, upscale=False,
                                 steps=10, width=CHAR_PANEL_W, height=CHAR_PANEL_H,
                                 ref_mode="identity", ref_boost=boost,
-                                grounding_px=g_px)
+                                grounding_px=g_px,
+                                negative_prompt=NO_DUPLICATE_NEGATIVE)
         else:
             # Kontext fallback (no real photo): strict build order - every
             # panel needs its ref source ready first.
@@ -5273,10 +5574,14 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             # so the char/logo panels don't bleed into each other.
             boost = 4.0 if n == 1 else 2.5
             g_px = 768 if n == 1 else 1024
+            # Hard-ban duplicate figures on SINGLE-character shots (2-humans
+            # bug). Multi-person shots (n>1) keep multiple identities.
+            np = NO_DUPLICATE_NEGATIVE if n == 1 else ""
             ok = _krea_generate(prompt, seed, out_path,
                                 ref_images=refs, denoise=1.0,
                                 ref_mode="identity", ref_boost=boost,
-                                grounding_px=g_px, upscale=True)
+                                grounding_px=g_px, upscale=True,
+                                negative_prompt=np)
         else:
             ok = _krea_generate(prompt, seed, out_path,
                                 ref_images=None, denoise=1.0, upscale=True)
@@ -5289,7 +5594,8 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                 ok = _krea_generate(prompt, seed2, out2,
                                     ref_images=refs, denoise=1.0,
                                     ref_mode="identity", ref_boost=boost,
-                                    grounding_px=g_px, upscale=True)
+                                    grounding_px=g_px, upscale=True,
+                                    negative_prompt=np)
             else:
                 ok = _krea_generate(prompt, seed2, out2,
                                     ref_images=None, denoise=1.0, upscale=True)
@@ -5481,6 +5787,59 @@ def _generate_all_tts(shots: list[dict], episode_num: int) -> None:
 
 # -- Audio mix: voice + music + timecoded SFX ------------------------
 
+def _pace_gaps_after(shots: list[dict]) -> None:
+    """Deterministic pacing: assign the silence GAP AFTER each shot's clip.
+
+    This is where the 'voice should have gaps where necessary' requirement is
+    implemented. The LLM cannot be trusted to pace - we compute the pause after
+    each narration clip in code, based on the SHOT's content:
+      - chapter card       -> long pause (card needs time to land)   1.6s
+      - rhetorical ?       -> beat for the question to hang          1.2s
+      - reveal/drop openers-> breath before the turn                 1.0s
+      - hero/ECU beat      -> hold on the magnified moment           0.9s
+      - place anchor       -> pause so the scene shift registers     0.7s
+      - default            -> natural beat                           0.4s
+    Each shot dict gets shot['gap_after'] (seconds). Deterministic, no LLM.
+    """
+    for s in shots:
+        gap = 0.4  # default natural beat
+        if s.get("is_chapter"):
+            gap = 1.6
+        else:
+            narration = (s.get("narration") or "").strip()
+            low = narration.lower()
+            if low.endswith(("?", "?")):
+                gap = 1.2
+            elif low.startswith(_REVEAL_OPENERS) or low.startswith(_DROP_OPENERS):
+                gap = 1.0
+            elif s.get("hero"):
+                gap = 0.9
+            elif _is_place_anchor(narration):
+                gap = 0.7
+        s["gap_after"] = gap
+    total = sum(s.get("gap_after", 0.4) for s in shots)
+    print(f"  [PACING] per-shot gaps applied (total {total:.1f}s of pause across "
+          f"{len(shots)} clips)")
+
+
+def _is_place_anchor(text: str) -> bool:
+    """Heuristic: does the clip open with a real place anchor sentence?"""
+    if not text:
+        return False
+    first = text.split(".")[0].strip()
+    # A place anchor is a short standalone location sentence (comma-delimited
+    # place, ends without a verb). e.g. 'Goulburn, New South Wales.'
+    if _sentence_words(first) > 12:
+        return False
+    if "," in first and not first.rstrip(".").lower().endswith(("said", "says", "was", "is")):
+        return True
+    # single known place keyword
+    return bool(re.search(
+        r"\b(St\.|Saint|New South Wales|Queensland|Victoria|Sydney|Melbourne|"
+        r"Brisbane|Perth|Adelaide|Russia|Moscow|St Petersburg|Goulburn|Brooklyn|"
+        r"New York|London|Macau|Poland|Peru|Singapore|Australia)\b", first))
+
+
 def _build_audio_mix(shots: list[dict], episode_num: int,
                      title_events: Optional[list] = None):
     """Build the full audio track: voice (0dB) + music (-18dB) + SFX (-14dB hit-aligned).
@@ -5493,24 +5852,28 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
 
     Returns (mix_wav_path, voice_wav_path, clip_starts):
       voice_wav_path is the deterministic voice-only track (for whisper timing),
-      clip_starts[i] is the REAL absolute start time of clip i (0.3s pads).
+      clip_starts[i] is the REAL absolute start time of clip i (per-shot pacing gaps).
     """
     valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
     if not valid:
         print("  [AUDIO] No TTS clips")
         return None, None, []
 
+    # Deterministic pacing gaps after each clip (before the concat math)
+    _pace_gaps_after(valid)
+
     temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_audio_{episode_num}_"))
     try:
-        # -- Voice track: concat with 0.3s pads; REAL start times --
+        # -- Voice track: concat with per-shot pacing gaps; REAL start times --
         voice_parts = []
         clip_starts = []  # absolute start time of each clip in the final timeline
         cursor = 0.0
         for shot in valid:
             clip_starts.append(cursor)
             d = _get_audio_duration(shot["tts_path"])
-            voice_parts.append((shot["tts_path"], cursor, d))
-            cursor += d + 0.3  # 0.3s pad after each clip (matches the pad files below)
+            gap = shot.get("gap_after", 0.3)
+            voice_parts.append((shot["tts_path"], cursor, d, gap))
+            cursor += d + gap
 
         total_dur = cursor
         print(f"  [AUDIO] Voice timeline: {total_dur:.1f}s total, {len(valid)} clips")
@@ -5518,13 +5881,13 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
         # Concat voice with silence pads
         concat_list = temp_dir / "voice_concat.txt"
         with open(concat_list, "w") as f:
-            for path, start, d in voice_parts:
+            for path, start, d, gap in voice_parts:
                 f.write(f"file '{str(Path(path).resolve())}'\n")
-                # pad 0.3s silence after each clip
+                # pad gap seconds of silence after each clip
                 pad = temp_dir / f"pad_{int(start*1000)}.wav"
                 subprocess.run(
                     ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
-                     f"anullsrc=r=24000:cl=mono", "-t", "0.3",
+                     f"anullsrc=r=24000:cl=mono", "-t", f"{gap:.2f}",
                      "-c:a", "pcm_s16le", str(pad)],
                     capture_output=True, text=True, timeout=30)
                 f.write(f"file '{str(pad.resolve())}'\n")
@@ -6091,19 +6454,20 @@ def _master_gain_filter(audio_path: str) -> str:
 
 def _compute_clip_starts(shots: list[dict]) -> list[float]:
     """Absolute start times of each clip in the voice/video timeline (0.3s pads).
-    Must stay in sync with _build_audio_mix's cursor math."""
+    Must stay in sync with _build_audio_mix's cursor math. Pacing gaps are
+    applied per-shot (see _pace_gaps_after)."""
     starts, cursor = [], 0.0
     for s in shots:
         if not (s.get("tts_path") and os.path.isfile(s["tts_path"])):
             continue
         starts.append(cursor)
-        cursor += _get_audio_duration(s["tts_path"]) + 0.3
+        cursor += _get_audio_duration(s["tts_path"]) + s.get("gap_after", 0.3)
     return starts
 
 
 def _ensure_voice_track(shots: list[dict], episode_num: int) -> Optional[str]:
     """Build rendered_audio/ep{N:03d}_voice.wav if missing (same concat as the
-    mix: clips + 0.3s pads). Used by the whisper title pass on resume."""
+    mix: clips + per-shot pacing gaps). Used by the whisper title pass on resume."""
     RENDERED_AUDIO.mkdir(parents=True, exist_ok=True)
     out = str(RENDERED_AUDIO / f"ep{episode_num:03d}_voice.wav")
     if os.path.isfile(out) and os.path.getsize(out) > 1000:
@@ -6111,6 +6475,7 @@ def _ensure_voice_track(shots: list[dict], episode_num: int) -> Optional[str]:
     valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
     if not valid:
         return None
+    _pace_gaps_after(valid)
     temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_voice_{episode_num}_"))
     try:
         concat_list = temp_dir / "vc.txt"
@@ -6120,7 +6485,8 @@ def _ensure_voice_track(shots: list[dict], episode_num: int) -> Optional[str]:
                 pad = temp_dir / f"pad_{i}.wav"
                 subprocess.run(
                     ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
-                     "anullsrc=r=24000:cl=mono", "-t", "0.3",
+                     "anullsrc=r=24000:cl=mono", "-t",
+                     f"{shot.get('gap_after', 0.3):.2f}",
                      "-c:a", "pcm_s16le", str(pad)],
                     capture_output=True, text=True, timeout=30)
                 f.write(f"file '{str(pad.resolve())}'\n")
@@ -6415,16 +6781,26 @@ def _generate_thumbnail(topic: str, output_path: str) -> bool:
 
 # -- Titles / description --------------------------------------------
 
-def _generate_titles(topic: str, episode_num: int) -> list[str]:
+def _generate_titles(topic: str, episode_num: int,
+                     bible: Optional[dict] = None) -> list[str]:
     msg = [
         {"role": "system", "content": (
             "You are a viral YouTube title generator for 'Split Node' - a channel about "
             "ordinary people who beat the system. Write 3 clickbaity titles. "
             "Each starts with '#XXX - ' where XXX is the episode number. "
-            "Use curiosity gaps, under 70 chars, reference the story topic directly. "
+            "Use the FERN formula: each title must IMPLICITLY promise the story's "
+            "VISUAL HOOK (the striking thing the viewer will see) and tease the "
+            "DEEPER QUESTION (the 'how did this happen / why' the episode answers) "
+            "without giving it away. Under 70 chars, reference the story directly. "
             "Return ONLY 3 lines, one title per line, no numbering."
         )},
-        {"role": "user", "content": f"Episode #{episode_num:03d}\nTopic: {topic}\n\nWrite 3 titles."}
+        {"role": "user", "content": (
+            f"Episode #{episode_num:03d}\nTopic: {topic}\n"
+            + (f"VISUAL HOOK: {bible.get('visual_hook','')}\n"
+               f"DEEPER QUESTION: {bible.get('deeper_question','')}\n"
+               if bible and (bible.get('visual_hook') or bible.get('deeper_question')) else "")
+            + "\nWrite 3 titles."
+        )}
     ]
     text = _llm_chat(msg, max_tokens=250, temp=0.85)
     titles = [t.strip() for t in text.split("\n") if t.strip()]
@@ -6478,14 +6854,22 @@ DESCRIPTION_SYSTEM_PROMPT = (
     "- Mention the episode number\n"
 )
 
-def _generate_description(topic: str, episode_num: int, article_url: str) -> str:
+def _generate_description(topic: str, episode_num: int, article_url: str,
+                          bible: Optional[dict] = None) -> str:
+    hook = ""
+    if bible and (bible.get("visual_hook") or bible.get("deeper_question")):
+        hook = (
+            f"Visual hook (open the description with this image): {bible.get('visual_hook','')}\n"
+            f"Deeper question (the mystery the episode answers): {bible.get('deeper_question','')}\n"
+        )
     msg = [
         {"role": "system", "content": DESCRIPTION_SYSTEM_PROMPT},
         {"role": "user", "content": (
             f"Episode #{episode_num:03d}\n"
             f"Topic: {topic}\n"
-            f"Source article: {article_url}\n\n"
-            f"Write the comprehensive YouTube description."
+            f"Source article: {article_url}\n"
+            + hook
+            + "\nWrite the comprehensive YouTube description."
         )}
     ]
     text = _llm_chat(msg, max_tokens=600, temp=0.75)
@@ -7131,10 +7515,12 @@ def _resume_episode(state: dict) -> None:
                 # boost so the char/logo panels don't bleed into each other.
                 boost = 4.0 if n == 1 else 2.5
                 g_px = 768 if n == 1 else 1024
+                np = NO_DUPLICATE_NEGATIVE if n == 1 else ""
                 ok = _krea_generate(prompt, seed, out_path,
                                     ref_images=refs, denoise=1.0,
                                     ref_mode="identity", ref_boost=boost,
-                                    grounding_px=g_px, upscale=True)
+                                    grounding_px=g_px, upscale=True,
+                                    negative_prompt=np)
             else:
                 ok = _krea_generate(prompt, seed, out_path,
                                     ref_images=None, denoise=1.0, upscale=True)
@@ -7146,7 +7532,8 @@ def _resume_episode(state: dict) -> None:
                     ok = _krea_generate(prompt, seed2, out2,
                                         ref_images=refs, denoise=1.0,
                                         ref_mode="identity", ref_boost=boost,
-                                        grounding_px=g_px, upscale=True)
+                                        grounding_px=g_px, upscale=True,
+                                        negative_prompt=np)
                 else:
                     ok = _krea_generate(prompt, seed2, out2,
                                         ref_images=None, denoise=1.0, upscale=True)
@@ -7441,12 +7828,6 @@ def main():
     os.environ["REGEN_IMAGES"] = "1" if regen_images else "0"
     print(f"  [IMAGES] mode: {'RE-GENERATE (overwrite all)' if regen_images else 'resume (keep existing)'}\n")
 
-    # Reusable episode template: load the last episode's winning formula
-    tpl = _load_episode_template()
-    if tpl:
-        print(f"  [TEMPLATE] reuse ep{tpl.get('episode')} formula: "
-              f"{tpl.get('topic', '')[:70]}")
-
     # 1. Find a story
     article_url, article_title = _pick_story()
     if not article_url:
@@ -7466,15 +7847,22 @@ def main():
         input("  Press Enter to exit...")
         return
 
-    # 3. Stage 1: narration script (Black Files style, cold open + anchors)
-    narration = _build_narration_script(paragraphs, target_paras)
+    # 2a. STORY BIBLE FIRST: lock the structure + REAL character roster from
+    #     the article, BEFORE the script is written. The narration is then
+    #     written to FOLLOW this bible (FERN visual hook + Isaac's hero's
+    #     journey / deeper-problem framework).
+    print("\n[BIBLE] Building story bible from the article (before script)...")
+    story_bible = _build_story_bible(article_title, paragraphs)
+
+    # 3. Stage 1: narration script (follows the story bible)
+    narration = _build_narration_script(paragraphs, target_paras, bible=story_bible)
 
     # 3b. Rate each narration segment against the topic, discard <= 4/10
     if narration:
         narration = _rate_paragraph_relevance(article_title, narration)
         if not narration:
             print("  [FILTER] All narration segments off-topic, rebuilding from filtered article...")
-            narration = _build_narration_script(paragraphs, target_paras)
+            narration = _build_narration_script(paragraphs, target_paras, bible=story_bible)
 
     # 3c. Chapter pass: insert 'Chapter N - Title' paragraphs (black cards)
     narration, chapter_events = _insert_chapter_markers(narration)
@@ -7517,8 +7905,13 @@ def main():
         print("  [STYLE] test frame failed (ComfyUI not running?) - continuing")
 
     # 4. Stage 2: shot list from narration (bible + episode world injected;
-    #    chapter paras become black cards)
-    shots = _build_shot_list(narration, bible=bible, context=context)
+    #    chapter paras become black cards). Merge the story bible's REAL
+    #    character roster into the directors bible so the shot list uses only
+    #    the article's actual people (never a stale/invented name).
+    _shot_bible = dict(bible or {})
+    if story_bible and story_bible.get("characters"):
+        _shot_bible["characters"] = story_bible["characters"]
+    shots = _build_shot_list(narration, bible=_shot_bible, context=context)
 
     # 4a. Easter egg: ask whether to hide one, pick the egg (duck pope built-in
     #     or add-new), and inject it into EXACTLY one shot of the episode.
@@ -7574,9 +7967,6 @@ def main():
                        anchor_events=anchor_events,
                        location_sheets=location_sheets, prop_assets=prop_assets,
                        target_paras=target_paras)
-    # Reusable episode template: this episode's winning formula for next time
-    _save_episode_template(article_title, episode_num, bible, context,
-                           roster_ids=list(character_sheets.keys())[:8])
 
     # 6. Join the TTS worker: all narration clips should be ready now
     tts_thread.join(timeout=1800)
@@ -7627,11 +8017,13 @@ def main():
         print(f"\n  {egg_report}")
 
     # 8. Titles + description (3 titles scored by Google Trends + YouTube
-    #    competition, best first)
-    titles = _generate_titles(topic, episode_num)
+    #    competition, best first). Uses the story bible's visual hook +
+    #    deeper question (FERN framework). Chapters + Discord link appended
+    #    below as usual.
+    titles = _generate_titles(topic, episode_num, bible=story_bible)
     for i, t in enumerate(titles):
         print(f"  Title {i+1}: {t}")
-    description = _generate_description(topic, episode_num, article_url)
+    description = _generate_description(topic, episode_num, article_url, bible=story_bible)
     description = _append_chapters_to_description(description, title_events)
     llm_tags = _generate_tags(topic, episode_num)
     all_tags = YOUTUBE_BASE_TAGS + [t for t in llm_tags if t not in YOUTUBE_BASE_TAGS]
