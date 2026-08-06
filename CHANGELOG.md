@@ -2,6 +2,15 @@
 
 All notable changes to Split Node.
 
+## [1.19.0] - 2026-08-06
+
+### Thumbnail provider selection + YouTube metadata docs
+
+- The pipeline now **asks which image-gen provider to use for the thumbnail** at startup (1. local ComfyUI / 2. fal GPT Image 2 / 3. RunPod z-image-turbo) - sets `THUMBNAIL_BACKEND` / `THUMBNAIL_MODEL` (env vars skip the prompt)
+- Thumbnails default to fal.ai GPT Image 2 (best text rendering for the "SPLIT NODE" + headline); `providers.py` gained a `generate_thumbnail()` entry point + `_resolve_thumbnail()` that routes the shared image path with 16:9 landscape sizing
+- `_generate_thumbnail` now routes through the provider layer instead of a hardcoded FAL call
+- README: documents the `THUMBNAIL_BACKEND` selection + a new "YouTube metadata & publishing" section covering **chapterizing** (chapter cards + whisper-pinned timestamps written to the description), **title generation** (3 clickbait titles scored vs trends), **description generation**, **tag generation** (12 LLM tags), and thumbnail generation
+
 ## [1.18.0] - 2026-08-06
 
 ### Discord multi-server / multi-channel support
