@@ -302,12 +302,17 @@ STYLE_PROFILES = {
     "mannequin": (
         "photorealistic render, ray tracing, cinematic lighting, seamless "
         "glossy porcelain mannequins with a perfectly smooth ceramic finish, "
-        "featureless smooth porcelain face (no eyes, nose or mouth carved in), "
-        "off-white cream or warm brown porcelain skin tone (never realistic "
-        "human skin), painted or sculpted hair, no doll joints, no seams, no "
-        "visible stands or supports, figures ALWAYS fully clothed head-to-toe "
-        "in complete period-accurate outfits with explicitly named footwear, "
-        "8K resolution, hyperrealistic documentary recreation"),
+        "featureless smooth blank porcelain face (no eyes, nose or mouth "
+        "carved in - a completely smooth porcelain head), off-white cream or "
+        "warm brown porcelain skin tone (never realistic human skin), NO "
+        "human facial features, no facial hair, the ONLY thing carried from "
+        "the reference person is their HAIR - the mannequin's hair is styled, "
+        "colored and textured EXACTLY like the reference photo's hair, painted "
+        "sculpted hair matching the reference hairstyle, no doll joints, no "
+        "seams, no visible stands or supports, figures ALWAYS fully clothed "
+        "head-to-toe in complete period-accurate outfits with explicitly "
+        "named footwear, 8K resolution, hyperrealistic documentary "
+        "recreation"),
 }
 
 _STYLE_SELECTED_PRINTED = {"done": False}
