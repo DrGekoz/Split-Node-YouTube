@@ -544,7 +544,7 @@ split-node/
 - The exact timecode of the hidden shot is reported after render AND after upload
 
 ### Reliability & Automation
-- **Resume-safe** — every stage skips already-completed work, persistent batch clips; a crash rebuilds the episode world, not just the images
+- **Resume-safe** — every stage skips already-completed work, persistent batch clips; a crash rebuilds the episode world, not just the images. At startup the pipeline **asks whether to resume image generation or re-generate everything** (R/e, or `REGEN_IMAGES=1` to force overwrite) — so you can keep the shots you like or rebuild all panels/sheets/shots from scratch
 - **Crash-resilient image gen** — retry wrapper with ComfyUI recovery (polls `/system_stats` up to 240s), ref re-encode, 4 crash-retries per image
 - **tqdm progress bars** with per-item ETA on every stage
 

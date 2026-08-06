@@ -2,6 +2,15 @@
 
 All notable changes to Split Node.
 
+## [1.23.0] - 2026-08-06
+
+### Image-generation resume vs re-generate prompt
+
+- At startup the pipeline now **asks whether to resume image generation or re-generate everything** (R/e), with a `REGEN_IMAGES=1` env var to force overwrite non-interactively
+- `_ask_image_regen()` returns the mode; resume keeps already-rendered shots (only missing ones generate), re-generate overwrites every shot image
+- In re-generate mode, cached character-sheet panels are also dropped and rebuilt (`_generate_character_sheet` reuse check gated on `REGEN_IMAGES`), so a full rebuild covers shots + panels/sheets
+- README: updated the Resume-safe feature bullet to document the prompt + `REGEN_IMAGES`
+
 ## [1.22.0] - 2026-08-06
 
 ### CRITICAL style enforcement on all image prompts

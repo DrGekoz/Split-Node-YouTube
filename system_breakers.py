@@ -3188,6 +3188,24 @@ def _ask_resolution() -> str:
         print(f"  [WARN] '{resp}' not recognised - enter 1080p or 4K")
 
 
+def _ask_image_regen() -> bool:
+    """Ask whether to RESUME existing episode images (keep what's already
+    rendered) or RE-GENERATE everything (overwrite). REGEN_IMAGES env var
+    overrides the prompt ('1'/'yes' = regenerate, '0'/'no' = resume)."""
+    if os.environ.get("REGEN_IMAGES"):
+        return os.environ["REGEN_IMAGES"].strip().lower() in ("1", "yes", "y", "true")
+    print("\n  Image generation mode:")
+    print("  [RESUME]  keep already-rendered images, only generate the missing ones")
+    print("  [REGEN]   re-generate ALL images, overwriting existing ones")
+    while True:
+        resp = input("  Resume or regenerate? (R/e): ").strip().lower()
+        if resp in ("", "r", "resume"):
+            return False
+        if resp in ("e", "regen", "regenerate", "regenerate"):
+            return True
+        print(f"  [WARN] '{resp}' not recognised - enter R (resume) or E (regenerate)")
+
+
 def _ask_thumbnail_backend() -> tuple[str, str]:
     """Ask which image-gen provider to use for the YouTube THUMBNAIL.
     Sets THUMBNAIL_BACKEND / THUMBNAIL_MODEL (env override skips the prompt).
@@ -4793,8 +4811,17 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
     sheets_dir.mkdir(parents=True, exist_ok=True)
     existing = {v: str(sheets_dir / f"{safe}_{v}.png") for v in CHAR_PANEL_VIEWS}
     if all(os.path.isfile(p) for p in existing.values()):
-        print(f"  [SHEET] {char_name}: reuse all {len(existing)} individual panels (1280x1280)")
-        return existing
+        _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
+        if _regen:
+            for _p in existing.values():
+                try:
+                    os.remove(_p)
+                except OSError:
+                    pass
+            print(f"  [SHEET] {char_name}: REGEN - dropping {len(existing)} cached panels")
+        else:
+            print(f"  [SHEET] {char_name}: reuse all {len(existing)} individual panels (1280x1280)")
+            return existing
     # MATERIAL STYLES (mannequin / roman-statue): REAL-FACE method - use the
     # real person's photo as the identity ref and render the material look
     # (porcelain mannequin or marble statue) whose facial features match the
@@ -5042,7 +5069,9 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             shot["image_path"] = black
             print(f"  [SHOT {idx+1}/{len(shots)}] chapter placeholder (no image)")
             continue
-        if shot.get("image_path") and os.path.isfile(shot["image_path"]):
+        # REGEN_IMAGES=1 -> force re-generate (overwrite) instead of resuming.
+        _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
+        if not _regen and shot.get("image_path") and os.path.isfile(shot["image_path"]):
             print(f"  [SHOT {idx+1}/{len(shots)}] resume: keep "
                   f"{os.path.basename(shot['image_path'])}")
             continue
@@ -7205,6 +7234,11 @@ def main():
     if thumb_model:
         os.environ["THUMBNAIL_MODEL"] = thumb_model
     print(f"  [THUMB] Thumbnail provider: {thumb_backend} ({thumb_model})\n")
+
+    # 1d. Image generation mode: resume existing or re-generate (overwrite).
+    regen_images = _ask_image_regen()
+    os.environ["REGEN_IMAGES"] = "1" if regen_images else "0"
+    print(f"  [IMAGES] mode: {'RE-GENERATE (overwrite all)' if regen_images else 'resume (keep existing)'}\n")
 
     # Reusable episode template: load the last episode's winning formula
     tpl = _load_episode_template()
