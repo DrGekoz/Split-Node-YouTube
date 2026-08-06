@@ -159,7 +159,40 @@ Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `sy
 
 ## Supported Models & APIs
 
-> **Note:** Split Node runs everything locally. The LLM, image model, TTS, music, SFX, and rendering all run on your own machine — the only cloud key needed is SerpAPI (and YouTube OAuth for upload).
+> **Note:** Split Node can render every image and video through **three interchangeable backends** — local (ComfyUI), RunPod, or fal.ai — selected per run with `IMAGE_BACKEND` / `VIDEO_BACKEND`. Defaults to fully local. Cloud backends need a `RUNPOD_API_KEY` / `FAL_API_KEY` in `.env`.
+
+| Selection | Values |
+|---|---|
+| `IMAGE_BACKEND` | `local` *(default)* · `runpod` · `fal` |
+| `IMAGE_MODEL` | see table below (per backend) |
+| `VIDEO_BACKEND` | `runpod` · `fal` · `local` |
+| `VIDEO_MODEL` | see table below (per backend) |
+
+```bash
+IMAGE_BACKEND=runpod python system_breakers.py        # shots via RunPod z-image-turbo
+IMAGE_BACKEND=fal IMAGE_MODEL=flux-dev python system_breakers.py
+VIDEO_BACKEND=runpod VIDEO_MODEL=veo3-1-fast python system_breakers.py
+python providers.py --list-images   # show every image backend/model
+python providers.py --list-videos   # show every video backend/model
+```
+
+> **Note:** local rendering needs ComfyUI + the Krea 2 / Z-Image models. `comfy_manager.py` auto-starts ComfyUI and downloads any missing model files. Cloud backends ignore character/location ref panels (text-to-image) but need no local GPU.
+
+### Image models
+
+| Backend | Model | Notes |
+|---|---|---|
+| **local** *(ComfyUI)* | `krea2-turbo` *(default)*, `z-image-turbo` | Krea 2 Turbo FP8 + 4x-FaceUpDAT upscale; supports identity panels |
+| **runpod** | `z-image-turbo` *(default)*, `nano-banana-2` (edit) | Serverless, async /run + poll; ~$0.005/image |
+| **fal** | `flux-schnell` *(default)*, `flux-dev`, `nano-banana-2`, `z-image-turbo` | Sync /fal.run; ~$0.003–0.06/image |
+
+### Video models
+
+| Backend | Model | Notes |
+|---|---|---|
+| **runpod** | `hailuo-02-std` *(default)*, `hailuo-2-3-fast`, `veo3-1-fast` (i2v), `p-video` | Serverless async; ~$0.23/clip |
+| **fal** | `runway-gen3`, `veo3-1`, `minimax-hailuo` | Sync endpoint |
+| **local** | `comfyui` | Requires a ComfyUI video workflow/model installed |
 
 ### LLM — Story, Scripts, Shot Lists, Metadata
 
@@ -221,10 +254,11 @@ Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `sy
 
 - **Python 3.11+**
 - **LM Studio** on `localhost:1234` (LLM + vision)
-- **ComfyUI** with **Krea 2 Turbo** (identity / asset / shot pipeline)
+- **ComfyUI** with **Krea 2 Turbo** (default local backend — `comfy_manager.py` auto-starts it + downloads models)
 - **PocketTTS** server on `127.0.0.1:8769`
 - **FFmpeg** with `hevc_nvenc` (NVIDIA)
 - A **SerpAPI** key for real-photo references + trend scoring
+- *(optional, cloud backends)* **RunPod** and/or **fal.ai** API keys for `IMAGE_BACKEND` / `VIDEO_BACKEND`
 
 ### Install & Run
 
@@ -262,7 +296,9 @@ python system_breakers.py
 ```
 split-node/
 ├── system_breakers.py          Main pipeline script (all 8 stages)
-├── krea2_splitnode.py          Local Krea 2 Turbo image generation
+├── krea2_splitnode.py          Local Krea 2 Turbo image generation (ComfyUI)
+├── providers.py                Unified image/video backends: local, RunPod, fal.ai
+├── comfy_manager.py            Auto-start ComfyUI, download models, run workflows
 ├── cast_likeness.py            Build cast likeness references
 ├── split_node_titles.py        Chapter / title ASS engine
 ├── analyze_sfx.py              Analyze SFX library (build/hit/decay)
@@ -318,6 +354,7 @@ split-node/
 - **Cache-first** — logos downloaded once, reused forever, zero repeat searches
 
 ### Rendering
+- **Three interchangeable backends** — every image/video renders via local ComfyUI, RunPod, or fal.ai, selected with `IMAGE_BACKEND` / `VIDEO_BACKEND` (defaults to local). `providers.py` routes each call; `comfy_manager.py` auto-starts ComfyUI and downloads missing models
 - **Local Krea 2 Turbo** (RTX 3070, `--lowvram`) with in-graph 4x-FaceUpDAT upscale
 - **1080p or 4K output** — `RESOLUTION` env var or startup prompt; drives both image upscale and video output, persisted to resume state
 - **Chapter cards + typewriter titles** — Bahnschrift glow-pop chapter cards, Consolas typewriter location/person cards, pinned to faster-whisper word timings

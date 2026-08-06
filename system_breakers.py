@@ -26,6 +26,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -2944,34 +2945,74 @@ def _krea_generate(prompt: str, seed: int, out_path: str,
                    ref_method: str = "index_timestep_zero",
                    ref_boost: float = 4.0, grounding_px: int = 1024,
                    ref_images_b: Optional[list] = None) -> bool:
-    """Generate one image via local ComfyUI Krea 2 Turbo.
+    """Generate one image, routed through the unified provider layer.
 
-    ref_images: 0+ reference images (character sheets, props, location).
-    upscale=True: in-graph 4x-FaceUpDAT -> 1920x1080 (shot images).
-    upscale=False: raw generation (character-sheet panels).
-    steps: 8 = turbo fast (shots); 10 = identity edit (sheets).
-    ref_mode: "img2img" (composition from ref), "reference" (Krea Kontext
-      identity, pose from prompt), or "identity" (krea2edit trained path -
-      krea2_identity_edit LoRA + grounded Qwen3-VL encode, ONE tight ref).
-    ref_boost/grounding_px: identity mode only (default 4.0/1024).
-    ref_images_b: identity mode only - optional SECOND ref = style plate
-      (scene first, subject second, training order).
+    Backend is selected at runtime by IMAGE_BACKEND (default 'local' ->
+    ComfyUI Krea 2 Turbo). Set IMAGE_BACKEND=runpod or =fal to render shots
+    through a cloud provider instead (ref_images/ref_mode only apply to the
+    local backend - cloud models are text-to-image). Cloud providers need a
+    RUNPOD_API_KEY / FAL_API_KEY in .env.
     """
+    backend = (os.environ.get("IMAGE_BACKEND", "") or "local").strip().lower()
     try:
-        import krea2_splitnode as _krea
+        import providers
     except Exception as e:
-        print(f"  [KREA] krea2_splitnode import failed: {e}")
+        print(f"  [IMG] providers import failed: {e}")
         return False
+    return providers.generate_image(
+        prompt, seed, out_path, backend=backend,
+        ref_images=ref_images, denoise=denoise, upscale=upscale,
+        timeout=timeout, steps=steps, cfg=cfg, width=width, height=height,
+        ref_mode=ref_mode, ref_method=ref_method, ref_boost=ref_boost,
+        grounding_px=grounding_px, ref_images_b=ref_images_b)
+
+
+def _generate_motion_clip(prompt: str, out_path: str,
+                          image_path: Optional[str] = None,
+                          duration: int = 6, timeout: int = 1200) -> bool:
+    """Generate an AI motion clip from a shot (or text prompt) via the
+    selected VIDEO_BACKEND (runpod/fal). For local video, a ComfyUI video
+    workflow must be installed. Returns True on success.
+
+    Wired via env vars: VIDEO_BACKEND (default runpod), VIDEO_MODEL."""
     try:
-        return _krea.generate(prompt, seed, out_path, ref_images, denoise,
-                              upscale, timeout=timeout, steps=steps, cfg=cfg,
-                              width=width, height=height, ref_mode=ref_mode,
-                              ref_method=ref_method, ref_boost=ref_boost,
-                              grounding_px=grounding_px,
-                              ref_images_b=ref_images_b)
+        import providers
     except Exception as e:
-        print(f"  [KREA] {str(e)[:140]}")
+        print(f"  [VID] providers import failed: {e}")
         return False
+    image_url = None
+    if image_path:
+        # Upload the shot to a public host so the cloud model can fetch it.
+        image_url = _upload_to_public_url(image_path)
+        if not image_url:
+            print(f"  [VID] could not upload {os.path.basename(image_path)} "
+                  f"for image-to-video - generating from text only")
+    return providers.generate_video(
+        prompt, out_path, image_url=image_url, duration=duration,
+        timeout=timeout)
+
+
+def _upload_to_public_url(image_path: str) -> Optional[str]:
+    """Host an image for image-to-video cloud providers. Tries 0x0.st
+    (no key) and returns a public HTTPS URL, else None."""
+    import urllib.parse
+    try:
+        with open(image_path, "rb") as f:
+            data = f.read()
+        boundary = "----splitnode" + uuid.uuid4().hex[:12]
+        body = (f"--{boundary}\r\nContent-Disposition: form-data; "
+                f"name=\"file\"; filename=\"shot.png\"\r\n"
+                f"Content-Type: image/png\r\n\r\n").encode() + data + \
+               f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(
+            "https://0x0.st", data=body, method="POST",
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            url = resp.read().decode().strip()
+            return url if url.startswith("http") else None
+    except Exception as e:
+        print(f"  [VID] upload failed: {e}")
+        return None
 
 
 def _vision_available() -> bool:

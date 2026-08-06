@@ -2,6 +2,18 @@
 
 All notable changes to Split Node.
 
+## [1.8.0] - 2026-08-06
+
+### Provider backends - local / RunPod / fal.ai for images AND video
+
+- New `providers.py`: one entry point for every image and video call, with backend + model selection via `IMAGE_BACKEND` / `IMAGE_MODEL` / `VIDEO_BACKEND` / `VIDEO_MODEL`
+- **Images** - `local` (ComfyUI Krea 2 Turbo, default), `runpod` (`z-image-turbo`, `nano-banana-2` edit), `fal` (`flux-schnell`, `flux-dev`, `nano-banana-2`, `z-image-turbo`)
+- **Videos** - `runpod` (`hailuo-02-std`, `hailuo-2-3-fast`, `veo3-1-fast` i2v, `p-video`), `fal` (`runway-gen3`, `veo3-1`, `minimax-hailuo`), `local` (ComfyUI video, when a workflow is installed)
+- `_krea_generate` now routes through the provider layer (default stays fully local); `_generate_motion_clip` + `_upload_to_public_url` added for AI image-to-video from shots
+- New `comfy_manager.py`: auto-start ComfyUI (`run_nvidia_gpu.bat`), health-check, auto-download missing models (Krea 2 / Z-Image / Qwen from Hugging Face), and run API-format workflows
+- Keys read from `.env` (RUNPOD_API_KEY / FAL_API_KEY) - never committed
+- CLI: `python providers.py --list-images / --list-videos`, `python comfy_manager.py start|check-models|download-models|run <workflow.json>`
+
 ## [1.7.0] - 2026-08-06
 
 ### New `mannequin` style profile (9th built-in)
