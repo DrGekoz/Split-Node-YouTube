@@ -2,6 +2,13 @@
 
 All notable changes to Split Node.
 
+## [1.15.0] - 2026-08-06
+
+### Docs - system storage requirements
+
+- README now documents the **storage requirement for the default local setup** (~35 GB): ~25 GB of ComfyUI image models (`krea2_turbo_fp8` 13 GB, `z-image-turbo` 5.6 GB, text encoders + VAE), ~5 GB LLM, ~0.5 GB TTS, ~4-5 GB runtime/repo
+- Notes that cloud image backends (`IMAGE_BACKEND=runpod`/`fal`) skip the ~25 GB of image models, and that an SSD is strongly recommended since the 13 GB UNET is streamed to VRAM per image
+
 ## [1.14.0] - 2026-08-06
 
 ### Bring-your-own Discord bot + channel setup

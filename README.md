@@ -307,6 +307,35 @@ python providers.py --list-videos   # show every video backend/model
 - A **SerpAPI** key for real-photo references + trend scoring
 - *(optional, cloud backends)* **RunPod** and/or **fal.ai** API keys for `IMAGE_BACKEND` / `VIDEO_BACKEND`
 
+### 💾 Storage requirements (default local setup)
+
+The default fully-local setup needs about **35 GB** free on your system drive
+for the models + runtime. Breakdown of what the default install pulls down
+(`comfy_manager.py` auto-downloads the image models; LM Studio + PocketTTS
+install the rest):
+
+| Component | Model / File | Size |
+|---|---|---|
+| ComfyUI image gen | `krea2_turbo_fp8.safetensors` | ~13 GB |
+| ComfyUI image gen | `z-image-turbo-Q6_K.gguf` | ~5.6 GB |
+| ComfyUI text encoder | `qwen3vl_4b_fp8_scaled.safetensors` | ~4.9 GB |
+| ComfyUI text encoder | `Qwen3-4B-Q2_K.gguf` | ~1.6 GB |
+| ComfyUI VAE | `qwen_image_vae.safetensors` | ~0.2 GB |
+| **Image models subtotal** | *(ComfyUI models/ dir)* | **~25 GB** |
+| LLM + vision (LM Studio) | Gemma 4 / 7.5B-class, Q4 | ~5 GB |
+| TTS (PocketTTS) | cached voice model | ~0.5 GB |
+| Runtime + repo | ComfyUI portable, FFmpeg, SFX library, voice refs | ~4–5 GB |
+| **Total (approx)** | | **~35 GB** |
+
+Notes:
+- This is the **default local** footprint. Run image gen on the **cloud**
+  (`IMAGE_BACKEND=runpod` or `=fal`) and you can skip the ~25 GB of ComfyUI
+  image models entirely — your only local storage is the LLM, TTS and repo.
+- **SSD strongly recommended** — the 13 GB Krea 2 UNET is streamed to VRAM on
+  every image (`--lowvram`), so a slow drive makes generation noticeably slower.
+- The exact `comfy_manager.py` download list lives in `MODEL_SOURCES`; run
+  `python comfy_manager.py download-models` to fetch them.
+
 ### Install & Run
 
 ```bash
