@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.26.0] - 2026-08-06
+
+### Fix corrupt real-photo refs killing character face panels
+
+- Root cause: some real-person reference photos (Google Images via Instagram's `lookaside.instagram.com`) were saved as **HTML redirect/error pages** with a `.jpg` extension. ComfyUI's `LoadImage` node then failed with `PIL.UnidentifiedImageError`, which cascaded into every character's face panel failing (Stefan Mandel, David van der Zee, Xandem Operator)
+- New `_is_real_image()` (PIL decode check) guards `_find_real_reference()`:
+  - **Cached refs** are validated on reuse - a corrupt cached `.jpg` is deleted and re-fetched instead of being reused and crashing the face panel
+  - **Downloaded blobs** are validated before saving - HTML/bad bytes are discarded and the next candidate tried
+- Verified: identity-mode face panel generation succeeds with a valid ref (previously the exact prompt failed); corrupt cached refs are now flagged `False` and re-fetched
+- README: noted the real-photo ref is validated as a decodable image
+
 ## [1.25.0] - 2026-08-06
 
 ### Panels-first character generation

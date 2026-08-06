@@ -517,7 +517,7 @@ split-node/
 
 ### Cast & Likeness
 - **20 metahuman archetypes** with exact clothing prompts; role / gender / age matching with everyman fallback
-- **Real-photo reference search** (SerpAPI + Openverse) with local vision audit (person + text/logo/watermark checks)
+- **Real-photo reference search** (SerpAPI + Openverse) with local vision audit (person + text/logo/watermark checks) and **image-decode validation** — cached refs and downloads that turn out to be HTML redirects/error pages are discarded and re-fetched, so a bad ref can't crash the face panel
 - **Six individual 1280x1280 identity panels** per character (face, face-side, face-back, body-front, body-side, body-back) — no grid merge
 - **Smart per-shot ref selection** — wide shot → body panel, close-up → face panel, facing left → side panel as-is, facing right → side panel MIRRORED, back → back panel, hand/object close-up → no person ref, multi-person → one panel per character
 - **Panels-first generation** — every character's six identity panels are built in a **dedicated pass before any shot renders** (in both fresh and resume runs), with face-panel failure retries, so a ComfyUI hiccup can't cascade into every shot missing a face

@@ -3589,6 +3589,21 @@ def _openverse_candidates(char_name: str, role: str) -> list[str]:
     return urls
 
 
+def _is_real_image(path: str) -> bool:
+    """Return True if `path` is a decodable image file. Guards against HTML
+    redirects / error pages / truncated downloads saved with a .jpg extension
+    (e.g. Instagram lookaside CDN returning an HTML page) - those crash the
+    ComfyUI LoadImage node with PIL.UnidentifiedImageError and silently kill
+    every character face panel."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            im.load()
+        return True
+    except Exception:
+        return False
+
+
 def _find_real_reference(char_name: str, role: str) -> Optional[str]:
     """Search GOOGLE IMAGES (SerpAPI, Openverse fallback) for a photo of the
     REAL person from the story and cache it to cast_refs/real/. Returns None
@@ -3596,8 +3611,16 @@ def _find_real_reference(char_name: str, role: str) -> Optional[str]:
     safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
     out = REAL_REFS_DIR / f"{safe}.jpg"
     if out.is_file():
-        print(f"  [REALREF] reuse {os.path.basename(out)}")
-        return str(out)
+        if _is_real_image(str(out)):
+            print(f"  [REALREF] reuse {os.path.basename(out)}")
+            return str(out)
+        # Corrupt cached ref (HTML redirect / bad download) - re-fetch.
+        print(f"  [REALREF] cached {os.path.basename(out)} is not a valid "
+              f"image - re-fetching")
+        try:
+            out.unlink()
+        except OSError:
+            pass
     urls = _google_images_candidates(char_name, role)
     if not urls:
         urls = _openverse_candidates(char_name, role)
@@ -3613,6 +3636,13 @@ def _find_real_reference(char_name: str, role: str) -> Optional[str]:
                     break
                 REAL_REFS_DIR.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(blob)
+                if not _is_real_image(str(out)):
+                    print(f"  [REALREF] not an image (HTML/bad bytes): {u[:60]}")
+                    try:
+                        out.unlink()
+                    except OSError:
+                        pass
+                    break
                 # Audit the photo (person match + no text/logo/watermark)
                 # when the local vision model is loaded; else accept best effort.
                 if _vision_available() and not _audit_real_photo(
