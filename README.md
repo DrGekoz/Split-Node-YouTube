@@ -1,8 +1,17 @@
-# Split Node
+# 🎬 Split Node
 
-AI documentary generator. Turns "beat the system" news stories (hacks, lottery wins, loopholes, scams) into ~25-minute 1080p (or 4K) documentaries in the FERN / Black Files style - with LLM-written narration scripts and shot lists, a full cast of AI characters with consistent faces, stylized locations and props, voice-cloned narration, cinematic music and SFX, and burned-in chapter cards. Headless: RSS in, rendered and uploaded episode out.
+<div align="center">
 
-## Features
+[![GitHub](https://img.shields.io/badge/GitHub-DrGekoz%2Fsplit--node-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/DrGekoz/split-node)
+[![Releases](https://img.shields.io/badge/releases-v1.6.0-0891b2?style=for-the-badge)](https://github.com/DrGekoz/split-node/releases)
+
+<a href="https://www.buymeacoffee.com/drgekoz" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" style="height: 60px !important;width: 217px !important;"></a>
+
+</div>
+
+> 🎥 **AI documentary generator.** Turns "beat the system" news stories (hacks, lottery wins, loopholes, scams) into ~25-minute 1080p (or 4K) documentaries in the FERN / Black Files style - with LLM-written narration scripts and shot lists, a full cast of AI characters with consistent faces, stylized locations and props, voice-cloned narration, cinematic music and SFX, and burned-in chapter cards. Headless: RSS in, rendered and uploaded episode out.
+
+## ✨ Features
 
 - **Script generation** - two-stage LLM: Stage 1 writes the narration script (target ~115 paragraphs / ~25 min), Stage 2 writes a shot list for every beat with camera logic (EWS / WS / MS / CU / ECU), angles and character prompts
 - **Director's bible** - before any image is made, the LLM plans the episode: deeper problem, protagonist transformation, chapter moods, hero paragraphs for close-up magnification
@@ -22,7 +31,7 @@ AI documentary generator. Turns "beat the system" news stories (hacks, lottery w
 - **YouTube upload + Discord announcements**
 - **Easter eggs** - hide a tiny background element in exactly ONE shot per episode (subtle, easy to miss). Duck Pope is built-in (from the Union of the Peking Duck lore), or add your own; the exact timecode of the hidden shot is reported after render AND after upload
 
-## The look
+## 🎨 The look
 
 The channel style is now a selectable **style profile** - a plain-text descriptor that is injected into every prompt (shots, character panels, locations, props). No style image refs, no LoRA training, no reference-copy bug.
 
@@ -39,7 +48,30 @@ python system_breakers.py --remove-style vhs     # remove a custom style
 
 Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `synthwave`, `editorial`, `watercolor`. Custom styles persist in `style_sheets/custom_styles.json` and become selectable on every future run. When you resume an episode it keeps the exact style it was generated with (unless you override with `STYLE=`).
 
-## Easter eggs
+### 🖼️ See the look
+
+Every built-in style, previewed on the same face (Elon Musk - real-photo identity ref + that style injected) so you can compare before you pick:
+
+| 🎨 **Arcane** *(default)* | ✏️ **Bold outline** | 🎭 **Artsy** |
+|---|---|---|
+| ![Arcane style](docs/images/style_previews/elon_musk_face_arcane.jpg) | ![Bold outline style](docs/images/style_previews/elon_musk_face_bold-outline.jpg) | ![Artsy style](docs/images/style_previews/elon_musk_face_artsy.jpg) |
+
+| 📷 **Photoreal** | 🌑 **Noir** | 🌆 **Synthwave** |
+|---|---|---|
+| ![Photoreal style](docs/images/style_previews/elon_musk_face_photoreal.jpg) | ![Noir style](docs/images/style_previews/elon_musk_face_noir.jpg) | ![Synthwave style](docs/images/style_previews/elon_musk_face_synthwave.jpg) |
+
+| 🗞️ **Editorial** | 🎨 **Watercolor** |
+|---|---|
+| ![Editorial style](docs/images/style_previews/elon_musk_face_editorial.jpg) | ![Watercolor style](docs/images/style_previews/elon_musk_face_watercolor.jpg) |
+
+> 💡 **Want your own look?** The style is just plain text injected into every prompt - so add your own and it becomes a first-class option on every future run:
+> ```
+> python system_breakers.py --add-style vhs "grainy 90s VHS camcorder, scanlines, oversaturated, handheld"
+> python system_breakers.py --list-styles     # 'vhs' now appears in the list
+> STYLE=vhs python system_breakers.py          # and is selectable like the built-ins
+> ```
+
+## 🥚 Easter eggs
 
 Every episode can hide one tiny background element in exactly ONE shot of the video - a subtle, easy-to-miss easter egg. At startup the pipeline asks *"Hide an easter egg in one shot?"*; pick one from the list, or choose *add new* to write your own prompt (it's saved and selectable on future runs too).
 
@@ -56,13 +88,13 @@ EASTER_EGG="duck pope" python system_breakers.py                     # select wi
 
 Custom eggs persist in `style_sheets/easter_eggs.json`. The hidden shot is picked once and kept on resume.
 
-## How it works
+## ⚙️ How it works
 
-### 1. Story discovery
+### 1. 🔍 Story discovery
 
 RSS "beat the system" stories (hack / lottery / loophole keywords) -> article -> junk filtering -> LLM relevance scoring (0-10, off-topic beats discarded). A trend scoring toolkit (SerpAPI + YouTube competition analysis) helps pick topics with actual demand.
 
-### 2. Script generation
+### 2. 📜 Script generation
 
 Four LLM passes build the plan before a single image is made:
 
@@ -74,7 +106,7 @@ Four LLM passes build the plan before a single image is made:
 - **Chapter breaks** - 10 duration-aligned breaks estimated from word counts, LLM-written chapter titles
 - **Style test frame** - a Krea 2 test frame is generated and human-reviewed before the run commits; reject it and the bible is rebuilt with a fresh perspective
 
-### 3. Cast & likeness
+### 3. 🧑🎤 Cast & likeness
 
 Every named character maps to one of 20 metahuman archetypes (role / gender / age matching, everyman fallback). For real-world subjects, a real photo is found via SerpAPI (Openverse fallback) and audited locally (person + text/logo/watermark checks), then fed through the Krea 2 identity chain to produce **six individual 1280x1280 reference panels** (no grid merge):
 
@@ -82,7 +114,7 @@ Every named character maps to one of 20 metahuman archetypes (role / gender / ag
 
 Identity prompts are view-descriptions only plus the selected style injected as text - embedding long style blocks in identity prompts flips the model into copy mode and breaks likeness. Grounding is tuned (768px) to prevent duplicate figures.
 
-### 3b. Panel selection per shot
+### 3b. 🎯 Panel selection per shot
 
 For each shot the pipeline discovers which panel(s) to reference from the framing and the scene text:
 
@@ -92,7 +124,7 @@ For each shot the pipeline discovers which panel(s) to reference from the framin
 - **multiple people** -> one panel per character (they can mismatch: face for one, body for another, different facing each)
 - **business HQ / interior shot** -> the real brand logo is added as a ref alongside the character panel(s)
 
-### 4. Locations & props
+### 4. 🏙️ Locations & props
 
 Each unique place in the episode gets a 6-panel location sheet - establishing, front-left, front-right, interior, detail, overhead:
 
@@ -102,7 +134,7 @@ Props are generated front + back. Generic props (katana, pistol, lantern, book, 
 
 ![Prop asset - katana](docs/images/prop_katana.jpg) ![Prop asset - silver pistol](docs/images/prop_pistol.jpg)
 
-### 5. Brands & AI logos
+### 5. 🏢 Brands & AI logos
 
 When the article talks about a real business or AI company, the pipeline notices and does three things:
 
@@ -121,27 +153,27 @@ Pre-cache logos anytime without a full run:
 python system_breakers.py --cache-logos OpenAI Claude Tesla
 ```
 
-### 6. From panel to screen
+### 6. 🎞️ From panel to screen
 
 Each shot is generated straight to the selected output resolution (1080p by default, 4K if chosen - in-graph 4x-FaceUpDAT upscale) from a text prompt + the selected style injected, with the discovered reference panel(s) locking character identity and any brand logo locking the business mark. This is the pipeline's core promise: one set of character panels, one style, any number of consistent shots - face-locked, angle-aware and facing-aware:
 
 ![Shot generated from character panels](docs/images/shot_from_sheet.jpg)
 
-### 7. Voice, music & SFX
+### 7. 🎙️ Voice, music & SFX
 
 - **Voice** - cloned narration voice via PocketTTS (0dB normalized), generated in parallel with image generation
 - **Music** - one continuous bed: suspense for the first 65%, crossfading (2s) into triumphant, mixed at -18dB
 - **SFX** - 130+ cinematic sounds pre-analyzed for build / hit / decay times, hit-aligned at -14dB; camera shutter at -4dB; every video opens with a glitchy suspense hit
 
-### 8. Render & titles
+### 8. 🎬 Render & titles
 
 hevc_nvenc at the selected resolution (1080p or 4K) with stream-copy concat and +faststart. Chapter cards ("CHAPTER N" kicker + title, Bahnschrift with glow-pop) and typewriter location/person cards (Consolas) are burned in via the ASS title engine. Pick the output resolution with the `RESOLUTION` env var or the startup prompt (`RESOLUTION=4k` / `RESOLUTION=1080p`); it is persisted to resume state so a resumed episode keeps the same output size.
 
-### 9. Upload
+### 9. ☁️ Upload
 
 YouTube upload (native scheduling, per-channel credentials) + Discord announcement with description, hype wrap and link.
 
-## Requirements
+## 🛠️ Requirements
 
 - Python 3.11+
 - LM Studio on localhost:1234
@@ -151,7 +183,7 @@ YouTube upload (native scheduling, per-channel credentials) + Discord announceme
 - SerpAPI key for real-photo references + trend scoring - set `SERPAPI_API_KEY=...` in `.env`
 - YouTube OAuth: `client_secret_*.json` + `oauth_split_node.py`
 
-## Usage
+## 📖 Usage
 
 | Command | Purpose |
 |---------|---------|
@@ -179,7 +211,7 @@ YouTube upload (native scheduling, per-channel credentials) + Discord announceme
 | `--remove-easter-egg <name>` | Remove a custom easter egg |
 | `oauth_split_node.py` | YouTube OAuth authorization |
 
-## Project layout
+## 🗂️ Project layout
 
 | Path | Purpose |
 |------|---------|
@@ -193,8 +225,8 @@ YouTube upload (native scheduling, per-channel credentials) + Discord announceme
 | `voice_refs/` | TTS narration voice clone reference |
 | `.env` | API keys (gitignored - never commit) |
 
-## Notes
+## 📝 Notes
 
 - Episodes numbered (epNNN), per-episode shot folders under `shots/epN/`
 - AI-generated content disclaimer included on uploads
-- Winning episode formula (bible + template) is saved for reuse on future episodes
+- Every episode is written fresh from the article - the script pipeline is fully dynamic, no template reuse between episodes
