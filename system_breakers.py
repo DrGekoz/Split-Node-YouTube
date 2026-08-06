@@ -4244,60 +4244,69 @@ CHAR_PANEL_W, CHAR_PANEL_H = 1280, 1280
 CHAR_PANEL_VIEWS = ["face", "face_side", "face_back",
                     "body_front", "body_side", "body_back"]
 
-# Mannequin-style panels (NO image ref - high prompt adherence over identity).
-# Each is generated as a pure text-to-image with the person's HAIR described
-# as TEXT (via _describe_hair_text) + the mannequin descriptor injected. The
-# porcelain face is fully prompt-controlled; only the hair carries over from
-# the real person. (view, ref_src, denoise, prompt-template, method)
+# Mannequin-style panels - REAL-FACE method (canonical, Joe-approved 2026-08-06):
+# Use the real person's photo as the ONE identity ref (krea2edit identity mode)
+# but render the result as a glossy PORCELAIN mannequin whose facial features
+# (bone structure, brow, nose, lips, jaw) match the ref EXACTLY. The face reads
+# as a polished museum mannequin that strongly resembles the person - not
+# realistic human skin. Hair is coloured and matches the ref. When NO real
+# photo exists, fall back to text-only hair injection (_describe_hair_text).
+# (view, ref_src, denoise, prompt-template, method)
 MANNEQUIN_PANELS = [
-    ("face", "txt", 1.0,
-     "Close-up portrait of a seamless glossy porcelain mannequin head and "
-     "face, full face centered, facing the camera. Featureless smooth blank "
-     "porcelain face - NO eyes, NO nose, NO mouth, NO eyebrows, NO facial "
-     "hair, NO human facial features. Smooth matte off-white cream porcelain "
-     "surface. The mannequin HAS rich, COLOURED, clearly visible sculpted "
-     "hair styled exactly as: {hair} - full realistic hair colour that "
-     "stands out vividly against the blank white porcelain face. The hair is "
-     "the ONLY coloured part of the mannequin. Nothing else in frame - no "
-     "shoulders, no neck, no body. Plain light grey studio background, flat "
-     "even neutral lighting, no rim light, one mannequin head only.",
+    ("face", "real", 1.0,
+     "A seamless glossy porcelain mannequin head and face, full face centered, "
+     "facing the camera. The mannequin's facial structure matches the "
+     "reference person EXACTLY - same bone structure, same brow ridge, same "
+     "nose shape, same lips, same jawline, same eyes. BUT the whole face is "
+     "rendered in smooth glossy off-white porcelain like a museum display "
+     "mannequin - polished ceramic skin, no skin pores, no realistic skin "
+     "texture, no stubble, no wrinkles, no skin blemishes. Glossy porcelain "
+     "eyes, porcelain nose, porcelain lips - all in matching smooth ceramic "
+     "finish, face of a high-end display mannequin that strongly resembles "
+     "the reference person. Rich COLOURED sculpted hair styled exactly as in "
+     "the reference: {hair}. Nothing else in frame - no shoulders, no neck, "
+     "no body. Plain light grey studio background, flat even neutral lighting, "
+     "no rim light, one mannequin head only.",
      "index_timestep_zero"),
-    ("face_side", "txt", 1.0,
+    ("face_side", "face", 1.0,
      "Show the SAME seamless glossy porcelain mannequin in left side profile, "
-     "head only. Featureless smooth blank porcelain face - NO eyes, nose or "
-     "mouth, no human facial features. The mannequin's HAIR is sculpted "
-     "exactly as: {hair}. No body, no shoulders. EXACTLY ONE single figure, "
-     "no duplicate, no mirror image. Plain light grey studio background, "
-     "flat even neutral lighting, no rim light.",
+     "head only. Glossy porcelain face matching the reference person's "
+     "features (brow, nose, lips, jaw) rendered in smooth ceramic - no skin "
+     "texture, no stubble. Rich COLOURED sculpted hair matching the reference: "
+     "{hair}. No body, no shoulders. EXACTLY ONE single figure, no duplicate, "
+     "no mirror image. Plain light grey studio background, flat even neutral "
+     "lighting, no rim light.",
      "uxo/uno"),
-    ("face_back", "txt", 1.0,
+    ("face_back", "face", 1.0,
      "Show the back of a seamless glossy porcelain mannequin head, rear view. "
-     "Smooth blank porcelain, no face visible. The mannequin's HAIR is "
-     "sculpted exactly as: {hair} - visible from behind. No body. EXACTLY "
+     "Smooth blank porcelain, no face visible. Rich COLOURED sculpted hair "
+     "matching the reference: {hair} - visible from behind. No body. EXACTLY "
      "ONE single figure, no duplicate. Plain light grey studio background, "
      "flat even neutral lighting, no rim light.",
      "uxo/uno"),
-    ("body_front", "txt", 1.0,
+    ("body_front", "face", 1.0,
      "Show a seamless glossy porcelain mannequin full body standing facing "
      "the camera, entire body head to feet, both feet on the ground, arms "
-     "relaxed at sides. Featureless smooth blank porcelain head (no eyes, "
-     "nose or mouth). The mannequin's HAIR is sculpted exactly as: {hair}. "
-     "Fully clothed head-to-toe in: {outfit}. EXACTLY ONE single figure, no "
-     "duplicate, no mirror image. Plain light grey studio background, flat "
-     "even neutral lighting, no rim light.",
+     "relaxed at sides. Glossy porcelain head with facial features matching "
+     "the reference person, rendered in smooth ceramic. Rich COLOURED "
+     "sculpted hair matching the reference: {hair}. Fully clothed head-to-toe "
+     "in: {outfit}. EXACTLY ONE single figure, no duplicate, no mirror image. "
+     "Plain light grey studio background, flat even neutral lighting, no rim "
+     "light.",
      "index_timestep_zero"),
-    ("body_side", "txt", 1.0,
+    ("body_side", "body_front", 1.0,
      "Show a seamless glossy porcelain mannequin full body side profile view "
-     "facing left, entire body head to feet. Featureless smooth blank "
-     "porcelain head. The mannequin's HAIR is sculpted exactly as: {hair}. "
-     "Fully clothed head-to-toe in: {outfit}. EXACTLY ONE single figure, no "
-     "duplicate, no mirror image, no shadow clone. Plain light grey studio "
-     "background, flat even neutral lighting, no rim light.",
+     "facing left, entire body head to feet. Glossy porcelain head with "
+     "features matching the reference person. Rich COLOURED sculpted hair "
+     "matching the reference: {hair}. Fully clothed head-to-toe in: {outfit}. "
+     "EXACTLY ONE single figure, no duplicate, no mirror image, no shadow "
+     "clone. Plain light grey studio background, flat even neutral lighting, "
+     "no rim light.",
      "uxo/uno"),
-    ("body_back", "txt", 1.0,
-     "Show a seamless glossy porcelain mannequin full body rear view, back "
-     "of head and full outfit visible, standing, entire body head to feet. "
-     "The mannequin's HAIR is sculpted exactly as: {hair} - visible from "
+    ("body_back", "body_front", 1.0,
+     "Show a seamless glossy porcelain mannequin full body rear view, back of "
+     "head and full outfit visible, standing, entire body head to feet. Rich "
+     "COLOURED sculpted hair matching the reference: {hair} - visible from "
      "behind. Fully clothed head-to-toe in: {outfit}. EXACTLY ONE single "
      "figure, no duplicate, no mirror image. Plain light grey studio "
      "background, flat even neutral lighting, no rim light.",
@@ -4618,36 +4627,71 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
 
 def _generate_mannequin_panels(char_name: str, sheet: dict, seed: int,
                                sheets_dir: Path, existing: dict) -> dict:
-    """Generate a character's SIX mannequin panels with NO image reference.
+    """Generate a character's SIX mannequin panels.
 
-    High prompt adherence over identity: each panel is a pure text-to-image
-    (Krea reference-mode off / txt2img) of a seamless glossy porcelain
-    mannequin. The ONLY trait carried from the real person is their HAIR,
-    injected as TEXT - fetched via a quick web search (_describe_hair_text,
-    archetype fallback) rather than from a photo. The porcelain face is fully
-    prompt-controlled. Returns {view -> panel path}.
+    Canonical REAL-FACE method (Joe-approved): use the real person's photo as
+    the ONE identity ref and render a glossy porcelain mannequin whose facial
+    features match the ref EXACTLY (bone structure, brow, nose, lips, jaw).
+    The face reads as a polished museum mannequin resembling the person, not
+    realistic human skin. Hair is coloured and matches the ref.
+
+      face      = [real_photo] ONLY (ONE tight identity ref, ref_boost 4.0)
+      all other = [face-front] ONLY (ref_boost 2.0 - prompt controls pose)
+
+    When NO real photo exists, fall back to text-only hair injection: hair is
+    fetched as TEXT (_describe_hair_text) and the panels are pure text-to-image
+    of a porcelain mannequin with that described hair. Returns {view -> path}.
     """
-    print(f"  [SHEET] {char_name}: mannequin style - NO image ref, "
-          f"hair via text injection")
     safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
     hair = _describe_hair_text(char_name, sheet.get("role", ""), sheet)
     outfit = (sheet.get("outfit") or "").strip()
+    ref_photo = _find_real_reference(char_name, sheet.get("role", ""))
+    use_ref = ref_photo is not None
+    if use_ref:
+        print(f"  [SHEET] {char_name}: mannequin REAL-FACE method "
+              f"(real photo ref -> porcelain face matching ref)")
+    else:
+        print(f"  [SHEET] {char_name}: mannequin text-hair fallback "
+              f"(no real photo)")
     panels: dict[str, str] = {}
     _pan_iter = (tqdm(MANNEQUIN_PANELS, desc=f"  [SHEET] {char_name} mannequin",
                       unit="panel", leave=False)
                  if _HAS_PROGRESS else MANNEQUIN_PANELS)
-    for view, _src, denoise, view_desc, _method in _pan_iter:
+    for view, _src, denoise, view_desc, ref_method in _pan_iter:
         pan = sheets_dir / f"{safe}_{view}.png"
         if pan.is_file():
             panels[view] = str(pan)
             continue
         p = view_desc.format(hair=hair, outfit=outfit) + " " + _style_inject()
-        print(f"  [SHEET] {view} mannequin panel for {char_name} "
-              f"(txt2img, hair: '{hair[:50]}')...")
-        ok = _krea_generate(p, seed + 111 * len(view), str(pan),
-                            ref_images=None, denoise=denoise, upscale=False,
-                            steps=14, width=CHAR_PANEL_W, height=CHAR_PANEL_H,
-                            ref_mode="img2img")
+        if use_ref:
+            # Real-face: face panel uses the real photo (boost 4.0); all other
+            # panels chain off the face-front panel (boost 2.0, 768 grounding).
+            if view == "face":
+                refs_full = [ref_photo]
+                boost, g_px = 4.0, 1024
+            else:
+                if "face" not in panels:
+                    print(f"  [SHEET] skip {view} (face panel missing)")
+                    continue
+                refs_full = [panels["face"]]
+                boost = float(os.environ.get("SHEET_CHAIN_BOOST", "2.0"))
+                g_px = int(os.environ.get("SHEET_CHAIN_GROUNDING", "768"))
+            print(f"  [SHEET] {view} mannequin panel for {char_name} "
+                  f"(real-face, refs={len(refs_full)}, boost={boost})...")
+            ok = _krea_generate(p, seed + 111 * len(view), str(pan),
+                                ref_images=refs_full, denoise=denoise,
+                                upscale=False, steps=14,
+                                width=CHAR_PANEL_W, height=CHAR_PANEL_H,
+                                ref_mode="identity", ref_boost=boost,
+                                grounding_px=g_px)
+        else:
+            # Text-hair fallback: no ref, prompt controls the whole mannequin.
+            print(f"  [SHEET] {view} mannequin panel for {char_name} "
+                  f"(txt2img, hair: '{hair[:50]}')...")
+            ok = _krea_generate(p, seed + 111 * len(view), str(pan),
+                                ref_images=None, denoise=denoise, upscale=False,
+                                steps=14, width=CHAR_PANEL_W, height=CHAR_PANEL_H,
+                                ref_mode="img2img")
         if ok:
             panels[view] = str(pan)
     if "face" not in panels:
@@ -6054,7 +6098,12 @@ YOUTUBE_SETUP_INSTRUCTIONS = f"""
   4. Click the DOWNLOAD icon on the client you just made - a .json
      file downloads. Save it as  client_secret_*.json  in this folder:
         {PROJECT_DIR}
-  5. Then run:  python oauth_split_node.py   to authorize once.
+  5. ADD THE CHANNEL EMAIL AS A TEST USER (required - without this the
+     auth URL refuses to log in until your project is verified):
+     OAuth consent screen -> "Test users" -> + Add users -> enter the
+     email address of the YouTube CHANNEL itself (the account that owns
+     the channel you upload to).
+  6. Then run:  python oauth_split_node.py   to authorize once.
 ====================================================================
 """
 

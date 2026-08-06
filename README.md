@@ -192,7 +192,7 @@ Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `sy
 |---|---|---|
 | ![Editorial style](docs/images/style_previews/elon_musk_face_editorial.jpg) | ![Watercolor style](docs/images/style_previews/elon_musk_face_watercolor.jpg) | ![Mannequin style](docs/images/style_previews/elon_musk_face_mannequin.jpg) |
 
-> 🧍 **Mannequin look:** unlike the other styles, the mannequin style is engineered for **high prompt adherence over identity transfer** — the porcelain face is *fully prompt-controlled* (blank glossy head, no eyes/nose/mouth, no human features) and it uses **no image reference at all**. Instead, the person's **hair** is fetched as *text* — a quick web search (with a character-archetype fallback) — and injected into the character panel prompts. So the only trait that carries over from the real person is their **hair** (same cut, colour and texture), described in words rather than copied from a photo. That's exactly what makes it read as a mannequin rather than the person.
+> 🧍 **Mannequin look:** the mannequin style uses the **real-face method** — it takes the real person's photo as the single identity reference and renders a glossy **porcelain mannequin whose facial features match that person exactly** (bone structure, brow, nose, lips, jaw). The face reads as a polished museum mannequin resembling the person, *not* realistic human skin — coloured hair matches the reference. When no real photo is available it falls back to a text-hair injection. It's fully prompt-controlled and license-safe, so it renders clean, consistent characters without depicting altered human likenesses.
 
 > 💡 **Want your own look?** The style is just plain text injected into every prompt — so add your own and it becomes a first-class option on every future run:
 > ```
@@ -339,12 +339,18 @@ instructions + the link in the terminal log. The one-time setup:
 4. Click the **DOWNLOAD** icon on that client — a `.json` file downloads.
 5. **Save it into the Split Node project folder** as `client_secret_*.json`
    (keep the Google-generated name). The pipeline detects it automatically.
-6. Run `python oauth_split_node.py` once — it prints an auth URL; open it,
-   authorize with the account that owns your YouTube channel, and paste the
-   code back. Credentials are saved to `~/.youtube-upload-credentials.json`.
+6. **Add the channel's email as a test user.** Until your Google Cloud project
+   is verified, Google only lets *listed* test users authorize. Go to the
+   project's **OAuth consent screen → "Test users"** → **+ Add users** and
+   enter the **email address of the YouTube channel itself** (the account
+   that owns the channel you upload to, e.g. your `@gmail.com`). Without this,
+   the authorization URL will refuse to log in.
+7. Run `python oauth_split_node.py` once — it prints an auth URL; open it,
+   authorize with that same channel-owner account, and paste the code back.
+   Credentials are saved to `~/.youtube-upload-credentials.json`.
 
 After that, uploads are fully automatic. If the token later expires, the
-pipeline refreshes it itself; only a re-authorization (step 6) is ever needed
+pipeline refreshes it itself; only a re-authorization (step 7) is ever needed
 manually.
 
 ### Common Commands

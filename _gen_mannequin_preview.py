@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Regenerate ONLY the mannequin style preview with NO image reference.
+"""Regenerate the mannequin style preview using the CANONICAL REAL-FACE method.
 
-The mannequin look is fully prompt-driven: the porcelain face is
-text-controlled and the ONLY trait carried from the real person is their
-HAIR, injected as TEXT (quick web search -> archetype fallback), exactly like
-the mannequin character panels in the pipeline.
+Uses the real Elon photo as the ONE identity ref and renders a glossy
+porcelain mannequin whose facial features (bone structure, brow, nose, lips,
+jaw) match the ref EXACTLY - the face reads as a polished museum mannequin
+resembling the person, not realistic human skin. Hair is coloured and matches
+the ref. This is the method the pipeline uses (MANNEQUIN_PANELS).
 
 Output: style_previews/elon_musk_face_mannequin.png  (forced overwrite)
 """
@@ -17,40 +18,42 @@ sb = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sb)
 import krea2_splitnode as krea
 
+REF = HERE / "cast_refs" / "real" / "elon_musk.jpg"
 OUT = HERE / "style_previews"
 OUT.mkdir(exist_ok=True)
+assert REF.is_file(), "elon real photo missing"
 
 NAME = "mannequin"
 os.environ["STYLE"] = NAME
 
-# Text hair description (NO image ref) - same path the character panels use.
-# Use a specific, COLOURED hair description so the hair clearly stands out
-# against the blank porcelain (dark black-brown, greying, styled short).
-hair = "short dark black-brown hair with grey at the temples, neatly styled, slicked-back modern cut"
-print(f"[STYLEGEN] hair text: '{hair}'", flush=True)
+hair = ("short dark black-brown hair with grey at the temples, neatly "
+        "styled, slicked-back modern cut")
 
+# Canonical real-face mannequin prompt (identical to MANNEQUIN_PANELS['face']).
 MANNEQUIN_FACE = (
-    "Close-up portrait of a seamless glossy porcelain mannequin head and "
-    "face, full face centered, facing the camera. Featureless smooth blank "
-    "porcelain face - NO eyes, NO nose, NO mouth, NO eyebrows, NO facial "
-    "hair, NO human facial features, NO skin texture. Smooth matte off-white "
-    "cream porcelain surface, completely blank and featureless. "
-    "The mannequin HAS rich, COLOURED, clearly visible sculpted hair styled "
-    "exactly as: {hair} - full realistic dark hair colour that stands out "
-    "vividly against the blank white porcelain face. The hair is the ONLY "
-    "coloured part of the mannequin. Nothing else in frame - no shoulders, "
-    "no neck, no body. Plain light grey studio background, flat even neutral "
-    "lighting, no rim light, one mannequin head only."
+    "A seamless glossy porcelain mannequin head and face, full face centered, "
+    "facing the camera. The mannequin's facial structure matches the "
+    "reference person EXACTLY - same bone structure, same brow ridge, same "
+    "nose shape, same lips, same jawline, same eyes. BUT the whole face is "
+    "rendered in smooth glossy off-white porcelain like a museum display "
+    "mannequin - polished ceramic skin, no skin pores, no realistic skin "
+    "texture, no stubble, no wrinkles, no skin blemishes. Glossy porcelain "
+    "eyes, porcelain nose, porcelain lips - all in matching smooth ceramic "
+    "finish, face of a high-end display mannequin that strongly resembles "
+    "the reference person. Rich COLOURED sculpted hair styled exactly as in "
+    "the reference: {hair}. Nothing else in frame - no shoulders, no neck, "
+    "no body. Plain light grey studio background, flat even neutral lighting, "
+    "no rim light, one mannequin head only."
 ).format(hair=hair)
 
 p = MANNEQUIN_FACE + " " + sb._style_inject()
 out = str(OUT / f"elon_musk_face_{NAME}.png")
-print(f"[STYLEGEN] {NAME}: regenerating (NO image ref, text hair)...", flush=True)
+print(f"[STYLEGEN] {NAME}: regenerating (real-face method, real photo ref)...", flush=True)
 t0 = time.time()
 ok = krea.generate(p, seed=70001 + 9, out_path=out,
-                   ref_images=None, denoise=1.0, upscale=False,
+                   ref_images=[str(REF)], denoise=1.0, upscale=False,
                    steps=14, width=1280, height=1280,
-                   ref_mode="img2img",
+                   ref_mode="identity", ref_boost=2.0, grounding_px=768,
                    prefix="elonface_mannequin")
 print(f"[STYLEGEN] {NAME}: {'OK' if ok else 'FAIL'} in {time.time()-t0:.0f}s -> {out}", flush=True)
 print("[STYLEGEN] DONE", flush=True)

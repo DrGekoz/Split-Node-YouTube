@@ -55,6 +55,12 @@ INSTRUCTIONS = f"""
   6. SAVE THAT FILE INTO THIS PROJECT FOLDER:
         {PROJECT_DIR}
      It must be named  client_secret_*.json  (keep the google-generated name).
+  7. ADD THE CHANNEL EMAIL AS A TEST USER (REQUIRED - until your project is
+     verified, Google only lets LISTED test users authorize). Go to:
+        OAuth consent screen -> "Test users" -> + Add users
+     and enter the email address of the YouTube CHANNEL itself (the account
+     that owns the channel you upload to). Without this the auth URL will
+     refuse to log in.
 ========================================================================
 """
 

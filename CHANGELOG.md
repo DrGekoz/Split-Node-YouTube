@@ -2,6 +2,19 @@
 
 All notable changes to Split Node.
 
+## [1.11.0] - 2026-08-06
+
+### Mannequin style - canonical real-face method
+
+- The mannequin style now uses the **real-face method** (Joe-approved): it takes the real person's photo as the single identity reference (krea2edit identity mode) and renders a glossy **porcelain mannequin whose facial features match that person exactly** (bone structure, brow, nose, lips, jaw) - polished museum-mannequin look, not realistic human skin; coloured hair matches the reference
+- `MANNEQUIN_PANELS` rewritten to the real-face prompts (face = real photo ref boost 4.0, chained panels = face ref boost 2.0 / 768 grounding)
+- `_generate_mannequin_panels` uses the real photo when available, and falls back to text-hair injection when no real photo exists
+- Mannequin preview regenerated with the real-face method
+
+### YouTube auto-upload setup - add channel email as test user
+
+- Setup instructions (README + terminal prompt + `oauth_split_node.py`) now include adding the **YouTube channel's email as a test user** in the OAuth consent screen - required until the Google Cloud project is verified, otherwise the auth URL refuses to log in
+
 ## [1.10.0] - 2026-08-06
 
 ### Foley pipeline - action-driven sound effects
