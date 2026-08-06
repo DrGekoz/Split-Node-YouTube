@@ -3407,11 +3407,19 @@ def _audit_real_photo(image_path: str, char_name: str, role: str) -> bool:
         ans = out["choices"][0]["message"]["content"].strip()
         person = re.search(r"PERSON:\s*(YES|NO)", ans, re.I)
         text = re.search(r"TEXT:\s*(YES|NO)", ans, re.I)
-        person_ok = bool(person and person.group(1).upper() == "YES")
-        text_ok = bool(text and text.group(1).upper() == "NO")
-        print(f"  [REALREF] audit: person={person.group(1) if person else '?'} "
-              f"text/logo/watermark={'PRESENT' if text and text.group(1).upper()=='YES' else 'clean'}")
-        return person_ok and text_ok
+        # REJECT ONLY ON EXPLICIT NO. When the vision model returns something
+        # unparseable or uncertain (person=? / blank / no match), accept best
+        # effort - the model often fails to render the strict format, and
+        # rejecting on uncertainty means NO real ref is ever accepted (and the
+        # pipeline burns 99 candidate downloads trying). Only a clear
+        # "PERSON: NO" or "TEXT: YES" rejects.
+        person_rejected = bool(person and person.group(1).upper() == "NO")
+        text_rejected = bool(text and text.group(1).upper() == "YES")
+        p_label = person.group(1) if person else "?"
+        t_label = "PRESENT" if text_rejected else ("clean" if text else "?")
+        print(f"  [REALREF] audit: person={p_label} "
+              f"text/logo/watermark={t_label}")
+        return not (person_rejected or text_rejected)
     except Exception:
         return True
 
@@ -3604,6 +3612,42 @@ def _is_real_image(path: str) -> bool:
         return False
 
 
+# Domains/CDNs that routinely serve HTML/redirect/403 instead of a usable
+# real-photo image (Instagram widget, TikTok API, gstatic thumbnails, Google
+# image proxies). Skipped before any download to avoid burning candidates.
+_BAD_REALREF_DOMAINS = (
+    "lookaside.instagram.com", "tiktok.com/api", "encrypted-tbn0.gstatic.com",
+    "googleusercontent.com", "ytimg.com", "imgur.com", "redd.it",
+    "pbs.twimg.com", "facebook.com", "fbcdn.net", "gstatic.com",
+)
+
+
+def _bad_realref_url(u: str) -> bool:
+    return any(d in u.lower() for d in _BAD_REALREF_DOMAINS)
+
+
+_REALREF_FAIL_FILE = PROJECT_DIR / "cast_refs" / "real" / "_failures.json"
+
+
+def _load_realref_failures() -> set:
+    try:
+        if _REALREF_FAIL_FILE.is_file():
+            return set(json.loads(_REALREF_FAIL_FILE.read_text()))
+    except Exception:
+        pass
+    return set()
+
+
+def _save_realref_failure(char_name: str):
+    try:
+        fails = _load_realref_failures()
+        fails.add(char_name.lower())
+        _REALREF_FAIL_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _REALREF_FAIL_FILE.write_text(json.dumps(sorted(fails)))
+    except Exception:
+        pass
+
+
 def _find_real_reference(char_name: str, role: str) -> Optional[str]:
     """Search GOOGLE IMAGES (SerpAPI, Openverse fallback) for a photo of the
     REAL person from the story and cache it to cast_refs/real/. Returns None
@@ -3621,12 +3665,25 @@ def _find_real_reference(char_name: str, role: str) -> Optional[str]:
             out.unlink()
         except OSError:
             pass
+    # If a prior run already failed to find a real ref for this person (no
+    # usable image), skip the whole 99-candidate search and go straight to
+    # the txt2img fallback. Avoids re-burning the search every run.
+    if char_name.lower() in _load_realref_failures():
+        print(f"  [REALREF] {char_name}: cached no-real-ref (skipping search)")
+        return None
     urls = _google_images_candidates(char_name, role)
     if not urls:
         urls = _openverse_candidates(char_name, role)
+    tried = 0
+    MAX_CANDIDATES = int(os.environ.get("REALREF_MAX_CANDIDATES", "12"))
     for u in urls:
-        if not u:
-            continue
+        if not u or _bad_realref_url(u):
+            continue  # known-bad CDN - skip before downloading
+        tried += 1
+        if tried > MAX_CANDIDATES:
+            print(f"  [REALREF] stopped after {MAX_CANDIDATES} candidates "
+                  f"(REALREF_MAX_CANDIDATES)")
+            break
         for attempt in (1, 2):
             try:
                 req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
@@ -3658,6 +3715,8 @@ def _find_real_reference(char_name: str, role: str) -> Optional[str]:
             except Exception as e:
                 if attempt == 2:
                     print(f"  [REALREF] download failed {u[:50]} ({str(e)[:50]})")
+    # No usable ref found this run - cache it so future runs skip the search.
+    _save_realref_failure(char_name)
     return None
 
 

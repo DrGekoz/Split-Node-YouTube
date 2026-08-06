@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.27.0] - 2026-08-06
+
+### Harden real-photo reference search (audit + CDN filtering)
+
+- **Audit no longer rejects on uncertainty.** `_audit_real_photo()` previously required `PERSON: YES` to pass, so when the local vision model returned an unparseable/`?` response every candidate was rejected — meaning NO real ref was ever accepted and the pipeline burned all 99 candidate downloads. It now **only rejects on an explicit `PERSON: NO` or `TEXT: YES`**; an uncertain/`?` response is accepted best-effort (the real photo is kept for identity)
+- **Known-bad CDNs skipped before download** — `lookaside.instagram.com`, `tiktok.com/api`, `encrypted-tbn0.gstatic.com`, `ytimg.com`, `redd.it`, `pbs.twimg.com`, `googleusercontent.com`, `facebook.com`/`fbcdn.net`, `gstatic.com` (all routinely serve HTML redirects / 403 / thumbnails) via new `_bad_realref_url()`
+- **Candidate cap** — `REALREF_MAX_CANDIDATES` (default 12) stops the search after N real candidates instead of looping 99
+- **Failure cache** — when no usable ref is found for a person, the name is written to `cast_refs/real/_failures.json` so future runs skip the search entirely and go straight to the txt2img fallback (no repeat 99-download burn)
+- README: updated the real-photo feature bullet
+
 ## [1.26.0] - 2026-08-06
 
 ### Fix corrupt real-photo refs killing character face panels
