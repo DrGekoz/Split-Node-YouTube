@@ -2,11 +2,17 @@
 """Split Node YouTube OAuth helper - file-based code handoff.
 
 Flow:
-  1. Run this script -> writes auth URL to oauth_url.txt and waits.
-  2. User opens URL, authorizes, gets a code, pastes it into oauth_code.txt
-     (or tells the agent, who writes it there).
+  1. Run this script -> finds/waits for your YouTube API secret .json, writes
+     an auth URL to oauth_url.txt, and waits.
+  2. You open the URL, authorize, get a code, and paste it into oauth_code.txt
+     (or tell the agent, who writes it there).
   3. Script polls for oauth_code.txt, exchanges the code, saves credentials
      to ~/.youtube-upload-credentials.json, prints CREDS_SAVED.
+
+The secret .json file is your OAuth client credentials downloaded from Google
+Cloud (create an "OAuth client ID" of type "Desktop app" under the YouTube
+Data API v3 project). Place it in the Split Node project folder. It must be
+named  client_secret_*.json
 """
 import json
 import os
@@ -14,11 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, r"C:\Users\josep\AppData\Local\hermes\hermes-agent\venv\Lib\site-packages")
-from google_auth_oauthlib.flow import InstalledAppFlow
-
 PROJECT_DIR = Path(r"F:\aaaaaVIBECODING\System Breakers")
-SECRETS_FILE = PROJECT_DIR / "client_secret_874421706318-sl7gg802bovuib9h2q95hq9lvlb661oi.apps.googleusercontent.com.json"
 URL_FILE = PROJECT_DIR / "oauth_url.txt"
 CODE_FILE = PROJECT_DIR / "oauth_code.txt"
 CREDS_FILE = Path.home() / ".youtube-upload-credentials.json"
@@ -28,16 +30,85 @@ SCOPES = [
     "https://www.googleapis.com/auth/youtube",
 ]
 
+SETUP_LINK = "https://console.cloud.google.com/apis/credentials"
+
+INSTRUCTIONS = f"""
+========================================================================
+  YouTube UPLOAD SETUP - you need your YouTube API secret .json
+========================================================================
+  Split Node auto-uploads finished episodes to YouTube. To do that it
+  needs TWO things, in this order:
+
+  1) Your OAuth client secret .json (one-time, ~5 min to get)
+  2) One browser authorization (one-time, ~30 sec)
+
+  >>> GETTING THE SECRET .json <<<
+  1. Open:  {SETUP_LINK}
+  2. Make sure the correct Google Cloud PROJECT is selected (top bar).
+     If you haven't created one: + NEW PROJECT -> name it -> CREATE.
+  3. In the left menu: "APIs & Services" -> "Library"
+     -> search "YouTube Data API v3" -> ENABLE it.
+  4. Left menu: "APIs & Services" -> "Credentials"
+     -> "+ CREATE CREDENTIALS" -> "OAuth client ID"
+     -> Application type = "Desktop app" -> name it -> CREATE.
+  5. On the created client, click the DOWNLOAD icon (a .json downloads).
+  6. SAVE THAT FILE INTO THIS PROJECT FOLDER:
+        {PROJECT_DIR}
+     It must be named  client_secret_*.json  (keep the google-generated name).
+========================================================================
+"""
+
+
+def _find_secret() -> Path | None:
+    for p in sorted(PROJECT_DIR.glob("client_secret_*.json")):
+        return p
+    return None
+
 
 def main():
-    secrets = json.loads(SECRETS_FILE.read_text())
-    flow = InstalledAppFlow.from_client_config(secrets, SCOPES, redirect_uri="http://localhost")
+    if CREDS_FILE.is_file():
+        try:
+            json.loads(CREDS_FILE.read_text())
+            print("CREDS_ALREADY_SAVED")
+            return
+        except Exception:
+            pass
+
+    # Wait for the secret .json if it isn't present yet.
+    secret = _find_secret()
+    if secret is None:
+        print("NO_SECRET_FOUND")
+        print(INSTRUCTIONS)
+        print("Waiting for client_secret_*.json in the project folder "
+              "(check the instructions above)...", flush=True)
+        deadline = time.time() + 3600
+        while time.time() < deadline:
+            secret = _find_secret()
+            if secret is not None:
+                print(f"FOUND_SECRET {secret.name}")
+                break
+            time.sleep(3)
+        else:
+            print("TIMEOUT: no secret file received")
+            sys.exit(1)
+
+    # Include the venv's google libs if available (fall back to whatever is
+    # on PYTHONPATH if this exact venv path doesn't exist on this machine).
+    _venv = Path(r"C:\Users\josep\AppData\Local\hermes\hermes-agent\venv\Lib\site-packages")
+    if _venv.is_dir():
+        sys.path.insert(0, str(_venv))
+    from google_auth_oauthlib.flow import InstalledAppFlow
+
+    secrets = json.loads(secret.read_text(encoding="utf-8"))
+    flow = InstalledAppFlow.from_client_config(secrets, SCOPES,
+                                               redirect_uri="http://localhost")
     auth_url, _ = flow.authorization_url(access_type="offline", prompt="consent")
     URL_FILE.write_text(auth_url)
     print("AUTH_URL_READY")
+    print("Open this URL, authorize, then paste the code into oauth_code.txt:")
+    print(auth_url)
     print("Waiting for code in oauth_code.txt ...", flush=True)
 
-    # Poll for the code file (up to 60 min)
     deadline = time.time() + 3600
     while time.time() < deadline:
         if CODE_FILE.is_file():

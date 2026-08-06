@@ -308,13 +308,36 @@ cd split-node
 
 # Set API keys in .env (never commit)
 # SERPAPI_API_KEY=...
-# YouTube OAuth: client_secret_*.json + oauth_split_node.py
 
 # Run the full pipeline (story → upload)
 SystemBreakers.bat
 # or
 python system_breakers.py
 ```
+
+### 🎬 YouTube auto-upload setup
+
+When uploads are enabled, Split Node auto-uploads every finished episode to
+YouTube. The first time you run it (or when your token expires) the pipeline
+will ask you for your **YouTube API secret `.json`** — and print step-by-step
+instructions + the link in the terminal log. The one-time setup:
+
+1. **Get the secret `.json`** — open the Google Cloud Credentials page
+   (the exact link is printed in the terminal during setup):
+   <https://console.cloud.google.com/apis/credentials>
+2. In "APIs & Services → Library", **enable the YouTube Data API v3**.
+3. Click **+ CREATE CREDENTIALS → OAuth client ID → Desktop app**, name it,
+   and **Create**.
+4. Click the **DOWNLOAD** icon on that client — a `.json` file downloads.
+5. **Save it into the Split Node project folder** as `client_secret_*.json`
+   (keep the Google-generated name). The pipeline detects it automatically.
+6. Run `python oauth_split_node.py` once — it prints an auth URL; open it,
+   authorize with the account that owns your YouTube channel, and paste the
+   code back. Credentials are saved to `~/.youtube-upload-credentials.json`.
+
+After that, uploads are fully automatic. If the token later expires, the
+pipeline refreshes it itself; only a re-authorization (step 6) is ever needed
+manually.
 
 ### Common Commands
 

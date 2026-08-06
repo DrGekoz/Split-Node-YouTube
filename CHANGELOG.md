@@ -2,6 +2,27 @@
 
 All notable changes to Split Node.
 
+## [1.9.0] - 2026-08-06
+
+### YouTube auto-upload setup - prompts for your API secret .json
+
+- When uploads are enabled and no token is authorized yet, the pipeline now **prompts for your YouTube API secret `.json`** before uploading - it prints step-by-step instructions and the link to the Google Cloud Credentials page directly in the terminal log
+- `_ensure_youtube_secret()` waits for `client_secret_*.json` to be placed in the project folder (up to 60 min), then upload proceeds once authorized
+- `oauth_split_node.py` rewritten to be self-setup: auto-discovers the secret `.json`, prints the auth URL + link, handles the file-based code handoff, and saves credentials to `~/.youtube-upload-credentials.json`
+- README: new "YouTube auto-upload setup" section with the full one-time setup (create OAuth Desktop-app client, enable YouTube Data API v3, download secret, save, authorize)
+
+### Mannequin style - text hair injection, no image reference
+
+- The `mannequin` style no longer uses an image reference at all - the porcelain face is fully prompt-controlled and the person's **hair** is fetched as **text** (quick SerpAPI web search -> local LLM extracts one hair sentence -> character-archetype fallback) and injected into each character panel prompt
+- New `_is_mannequin_style()`, `_serpapi_web_snippets()`, `_describe_hair_text()`, `MANNEQUIN_PANELS`, and `_generate_mannequin_panels()`; `_generate_character_sheet` routes to the text-hair path automatically when the style is active
+- Character panels render as pure text-to-image blank porcelain mannequins with only the described hair carried over - high prompt adherence over identity transfer
+- Mannequin preview regenerated through the text-hair path (no image ref)
+
+### Docs - how a tiny local model writes the whole script + free on 8GB VRAM
+
+- README now explains the injection architecture (RSS feed injection, paragraph injection with sliding window, covered-beat dedupe, style injection, single-purpose prompts) that lets a 7.5B local model at 12,222-token context write an entire ~25-min documentary
+- New "Run it for free on 8GB VRAM" section: everything runs local on one RTX 3070 8GB (images + LLM + voice + music + render); the only optional paid step is AI video generation for low-end PCs
+
 ## [1.8.0] - 2026-08-06
 
 ### Provider backends - local / RunPod / fal.ai for images AND video

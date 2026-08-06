@@ -5903,6 +5903,53 @@ def _generate_tags(topic: str, episode_num: int) -> list[str]:
 
 # -- YouTube upload --------------------------------------------------
 
+YOUTUBE_SETUP_LINK = "https://console.cloud.google.com/apis/credentials"
+
+YOUTUBE_SETUP_INSTRUCTIONS = f"""
+====================================================================
+  YOUTUBE UPLOAD SETUP - your API secret .json is required
+====================================================================
+  Split Node auto-uploads finished episodes to YouTube. To enable that
+  you need your OAuth client secret .json (one-time, ~5 min) and one
+  browser authorization (~30 sec).
+
+  GET THE SECRET .json HERE:
+  {YOUTUBE_SETUP_LINK}
+
+  1. Open the link above (Google Cloud console, Credentials page).
+  2. Select the project you use for YouTube (or create a new one,
+     then in "APIs & Services > Library" ENABLE the "YouTube Data API v3").
+  3. Click "+ CREATE CREDENTIALS" -> "OAuth client ID"
+     -> Application type = "Desktop app" -> name it -> CREATE.
+  4. Click the DOWNLOAD icon on the client you just made - a .json
+     file downloads. Save it as  client_secret_*.json  in this folder:
+        {PROJECT_DIR}
+  5. Then run:  python oauth_split_node.py   to authorize once.
+====================================================================
+"""
+
+
+def _ensure_youtube_secret() -> Optional[str]:
+    """Ensure a YouTube API secret .json exists in the project folder.
+    If creds are already saved, return immediately. Otherwise prompt the
+    user to place client_secret_*.json here (with a link + instructions in
+    the terminal log) and wait for it. Returns the secret path or None."""
+    if YOUTUBE_CREDENTIALS.is_file():
+        return None  # already authorized - no setup needed
+    for p in sorted(PROJECT_DIR.glob("client_secret_*.json")):
+        return str(p)
+    print(YOUTUBE_SETUP_INSTRUCTIONS)
+    print(f"  [YOUTUBE] Waiting for client_secret_*.json in {PROJECT_DIR} ...")
+    print(f"  [YOUTUBE] Get it here: {YOUTUBE_SETUP_LINK}")
+    deadline = time.time() + 3600
+    while time.time() < deadline:
+        for p in sorted(PROJECT_DIR.glob("client_secret_*.json")):
+            return str(p)
+        time.sleep(3)
+    print("  [YOUTUBE] Timed out waiting for the secret .json - upload skipped")
+    return None
+
+
 def _get_youtube_creds():
     if not YOUTUBE_CREDENTIALS.is_file():
         return None
@@ -6901,6 +6948,9 @@ def main():
         print(f"  Video: {video_path}")
         title = titles[0] if titles else f"#{episode_num:03d} - {topic[:60]}"
         print(f"  Title: {title}")
+        # Auto-upload setup: if the user hasn't authorized yet, prompt for
+        # their YouTube API secret .json (instructions + link in the log).
+        _ensure_youtube_secret()
         video_id = _upload_video_with_progress(video_path, title, description, tags_str)
         if video_id and thumb_ok:
             _upload_thumbnail(video_id, thumb_path)
