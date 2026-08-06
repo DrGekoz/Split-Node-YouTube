@@ -863,6 +863,110 @@ def _sfx_path(name: str) -> Optional[Path]:
     return p if p.is_file() else None
 
 
+# ---------------------------------------------------------------------------
+# Foley pipeline - map ACTION words in a shot's scene text to matching sounds.
+# Whenever a character is doing something (typing, driving, walking, knocking,
+# etc) the matching foley sound plays under that clip. Each rule lists
+# (keywords, candidate sfx names) - the first candidate that exists in the
+# library wins. Keywords are matched case-insensitively against the scene.
+# ---------------------------------------------------------------------------
+FOLEY_MAP: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
+    # typing / keyboard / typewriter
+    (("typing", "types", "typewriter", "keyboard", "keys on", "at the keyboard",
+      "tapping", "taps on", "types on", "hits the keys"),
+     ("foley-typewriter-style-sound", "typewriter-clicks")),
+    # boat / ship - BEFORE driving so 'boat engine' matches the boat rule
+    (("boat", "ship", "sailing", "sailor", "vessel", "canoe", "rowing",
+      "speedboat", "ferry", "boat engine", "ship's engine"),
+     ("foley-old-boat-engine", "foley-speed-boat-in-the-jungle")),
+    # driving / car / engine
+    (("driving", "drives", "drove", "driver", "car", "vehicle", "road",
+      "motorway", "highway", "engine", "accelerat", "vroom", "traffic"),
+     ("foley-2-motorbikes-driving-past", "sweep-engine-start-up",
+      "foley-yangon-traffic")),
+    # walking / footsteps
+    (("walking", "walks", "walked", "footsteps", "footsteps", "steps",
+      "paces", "strides", "marches", "runs", "ran", "treads", "treading"),
+     ("foley-footsteps-in-fake-versace-sliders",)),
+    # door / knocking
+    (("door", "doorway", "knock", "knocks", "knocked", "opens the door",
+      "closes the door", "slams", "slams the door", "enters the room",
+      "leaves the room"),
+     ("foley-door-closing",)),
+    # fire / burning / crackle
+    (("fire", "burn", "burning", "burns", "flames", "flame", "fireplace",
+      "crackle", "campfire", "arson", "lit the fire"),
+     ("foley-crackle",)),
+    # rain
+    (("rain", "raining", "rainfall", "downpour", "storm outside",
+      "pouring rain", "rain on"),
+     ("nature-rain-on-the-road", "nature-rain-pattering")),
+    # thunder
+    (("thunder", "thunderstorm", "lightning", "storm brewing"),
+     ("nature-close-thunder", "nature-distant-thunder")),
+    # ocean / waves / sea / beach
+    (("ocean", "sea", "waves", "beach", "shore", "coast", "surf", "tide",
+      "sailing the sea"),
+     ("nature-waves-breaking", "nature-distant-ocean-with-a-few-birds",
+      "nature-beach-with-distant-chatter")),
+    # river / flowing water
+    (("river", "creek", "stream", "flowing water", "water flowing", "brook",
+      "babbling"),
+     ("nature-fast-flowing-river", "nature-trickling-water")),
+    # waterfall
+    (("waterfall", "falls", "cascade"),
+     ("nature-heavy-waterfall-close",)),
+    # city / street / construction
+    (("city", "street", "downtown", "urban", "construction", "building site",
+      "busy city", "market", "bazaar"),
+     ("foley-busy-city-with-construction", "foley-yangon-traffic")),
+    # jungle / forest / grass
+    (("jungle", "forest", "woods", "bushland", "tall grass", "long grass",
+      "undergrowth", "treeline"),
+     ("nature-jungles-of-sarawak", "foley-rustling-long-grass")),
+    # crickets / night insects
+    (("crickets", "insects", "cicadas", "night sounds", "frogs"),
+     ("nature-crickets-v-s-cockerel",)),
+    # cave / bats
+    (("cave", "bats", "cavern", "underground"),
+     ("nature-bats-in-a-cave",)),
+    # church / prayer / bell
+    (("church", "prayer", "praying", "bell", "bells", "mosque", "temple",
+      "chanting", "hymn"),
+     ("foley-multiple-prayer-calls", "foley-bell-with-delay")),
+    # cooking / gas / stove
+    (("cook", "cooking", "stove", "oven", "gas burner", "kitchen", "frying",
+      "boiling water", "kettle"),
+     ("foley-gas-cooker-gas",)),
+    # paddy field / farmland
+    (("paddy", "field", "farm", "farmland", "plantation", "rice"),
+     ("nature-paddy-fields", "nature-paddy-fields-early-morning")),
+    # market street performers
+    (("street performer", "busker", "musician playing", "crowd", "crowds"),
+     ("foley-barcelona-street-performers",)),
+]
+
+# Lowest-priority foley: any scene that clearly describes an action but has no
+# specific match falls back to a gentle sweep / whoosh so it isn't silent.
+_FOLEY_FALLBACK = ("sweep-gentle", "whoosh-light")
+
+
+def _foley_for_scene(scene: str) -> Optional[str]:
+    """Return the best foley sound for an action described in the scene text,
+    or None when the scene has no clear action sound. Picks the first rule
+    whose keywords match AND whose candidate file actually exists."""
+    if not scene:
+        return None
+    s = scene.lower()
+    for keywords, candidates in FOLEY_MAP:
+        if any(k in s for k in keywords):
+            for cand in candidates:
+                if _sfx_path(cand):
+                    return cand
+            # rule matched but no file - fall through to next rule
+    return None
+
+
 def _sfx_llm_choices() -> str:
     """Full categorized SFX list for the shot-list prompt. Every category in
     cinematic_sounds/ is exposed with a usage hint so the model can pick
@@ -5028,6 +5132,30 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             if src:
                 cap = min(SFX_LIBRARY.get(name, {}).get("dur", 8.0), 10.0)
                 placements.append((str(src), start + 0.2, cap))
+        # 2b) FOLEY PIPELINE - detect the ACTION in each shot's scene text and
+        #     bed the matching sound for the whole clip (typing -> typewriter,
+        #     driving -> engine/traffic, walking -> footsteps, etc). Only runs
+        #     when the LLM didn't already pick an sfx for that shot, so we
+        #     don't stack a foley bed on top of a chosen dramatic hit.
+        for pos, (shot, start) in enumerate(zip(valid, clip_starts)):
+            if shot.get("is_chapter"):
+                continue
+            if shot.get("sfx", "NONE") != "NONE":
+                continue  # LLM already scored this shot with an sfx
+            foley = _foley_for_scene(shot.get("scene", ""))
+            if not foley:
+                continue
+            fsrc = _sfx_path(foley)
+            if not fsrc:
+                continue
+            # Bed the foley for the length of this clip (bounded to the sound's
+            # own duration, so a long ambience doesn't bleed into the next shot).
+            end = (clip_starts[pos + 1] if pos + 1 < len(clip_starts)
+                   else start + 6.0)
+            bed = max(1.5, min(end - start - 0.2, 8.0))
+            placements.append((str(fsrc), start + 0.2, bed))
+            print(f"  [AUDIO] FOLEY '{foley}' @{start + 0.2:.1f}s "
+                  f"(bed {bed:.1f}s) for action in shot {pos + 1}")
         # 3) Camera shutter + whoosh: new character introduced OR new location
         #    (whoosh only when the LLM didn't already pick an sfx for the shot,
         #    so we never triple-stack sounds on one beat).

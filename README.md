@@ -138,6 +138,7 @@ RSS / URL story
 │  6. VOICE, MUSIC & SFX                                   │
 │     PocketTTS cloned narration (parallel) · one music bed │
 │     (suspense→triumphant) · 130+ hit-aligned SFX          │
+│     · action-driven FOLEY (typing, driving, footsteps)    │
 └──────────────────────────────────────────────────────────┘
     │
     ▼
@@ -267,6 +268,7 @@ python providers.py --list-videos   # show every video backend/model
 |---|---|
 | **Local** | One continuous music bed (suspense crossfading into triumphant, -18dB) composed to fit the exact video length |
 | **SFX library** | 130+ cinematic sounds (Nikko Hunt) with pre-analyzed build/hit/decay times, hit-aligned at -14dB; camera shutter at -4dB |
+| **Foley pipeline** | Auto-detects the **action** in each shot's scene text and beds the matching sound for the whole clip — typing → typewriter, driving → engine/traffic, walking → footsteps, rain → downpour, fire → crackle, boat → engine, and more |
 
 ### Video
 

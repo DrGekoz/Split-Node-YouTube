@@ -2,6 +2,15 @@
 
 All notable changes to Split Node.
 
+## [1.10.0] - 2026-08-06
+
+### Foley pipeline - action-driven sound effects
+
+- New `FOLEY_MAP` + `_foley_for_scene()`: each shot's scene text is scanned for the action being performed, and the matching sound is bedded under the whole clip
+- Typing → typewriter clicks, driving → engine/traffic, walking → footsteps, rain → downpour, thunder → thunderclap, ocean → waves, river/waterfall → flowing water, boat → boat engine, fire → crackle, door → door close, city → street/construction, jungle → jungle ambience, church/prayer → bells, cooking → gas stove, and more - all mapped to the existing 130+ Nikko Hunt library
+- Foley only fires when the LLM didn't already pick an SFX for that shot, so a dramatic hit and an action bed never double-stack on the same beat; beds run for the clip length (bounded to ~8s so long ambience doesn't bleed into the next shot)
+- Boat rule moved above driving so "boat engine" maps correctly
+
 ## [1.9.0] - 2026-08-06
 
 ### YouTube auto-upload setup - prompts for your API secret .json
