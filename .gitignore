@@ -40,6 +40,6 @@ trend_scan_cache.json
 # Real-person likeness photos (privacy/copyright - never commit)
 cast_refs/real/
 
-# Brand logos + generated brand assets (cached, re-downloaded on demand)
-cast_refs/logos/
+# Generated brand assets (hacker screens / buildings - cached, re-downloaded)
+# NOTE: cast_refs/logos/ PNGs ARE committed (pre-mapped 1000+ brand logos).
 image-assets/

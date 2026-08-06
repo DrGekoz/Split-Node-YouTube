@@ -3643,6 +3643,20 @@ OFFICIAL_LOGOS: dict[str, str] = {
     "Nike":         "File:Logo NIKE.svg",
 }
 
+# Pre-mapped 1000+ brand logos (premap_logos.py) -> Commons file titles.
+# Loaded at startup so every brand in the manifest resolves via the OFFICIAL
+# Wikimedia source (no SerpAPI search needed). Manifest is committed to the
+# repo; regenerate/extend with:  python premap_logos.py
+_OFFICIAL_LOGOS_MANIFEST = PROJECT_DIR / "cast_refs" / "logos" / "OFFICIAL_LOGOS_MANIFEST.json"
+if _OFFICIAL_LOGOS_MANIFEST.is_file():
+    try:
+        _m = json.loads(_OFFICIAL_LOGOS_MANIFEST.read_text(encoding="utf-8"))
+        if isinstance(_m, dict):
+            for _k, _v in _m.items():
+                OFFICIAL_LOGOS.setdefault(_k, _v)
+    except Exception as _e:
+        print(f"  [LOGO] premap manifest load failed: {_e}")
+
 
 def _commons_logo_bytes(brand: str) -> Optional[bytes]:
     """Official logo from Wikimedia Commons, rasterized to a 512px PNG thumb.
