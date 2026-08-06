@@ -653,9 +653,20 @@ def _describe_style_from_sheets() -> str:
 
 
 def _style_inject() -> str:
-    """'Rendered in the visual style of: ...' - appended to b-roll / location
-    / prop prompts. Text-only style transfer (no image refs)."""
-    return f"Rendered in the visual style of: {_get_style_prompt().rstrip('.')}."
+    """CRITICAL style injection appended to every image prompt (shots, b-roll,
+    location/prop sheets, character panels). The style is a NON-NEGOTIABLE
+    hard requirement, framed emphatically so the model can't drop or dilute it.
+    Text-only style transfer (no image refs)."""
+    desc = _get_style_prompt().rstrip(".")
+    return (
+        f"CRITICAL - THIS IMAGE MUST BE RENDERED STRICTLY IN THE FOLLOWING "
+        f"VISUAL STYLE AND NOTHING ELSE: '{desc}'. DO NOT deviate from, "
+        f"dilute, or replace this style with any other art direction, "
+        f"painting style, or rendering style - the chosen style is mandatory "
+        f"and overrides all other stylistic choices. Apply it to the ENTIRE "
+        f"frame, every element, the background, the lighting, the color grade "
+        f"and the rendering finish without exception."
+    )
 
 
 # B-roll image cache (DEPRECATED 2026-08-04 - no longer used by the pipeline;

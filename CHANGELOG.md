@@ -2,6 +2,14 @@
 
 All notable changes to Split Node.
 
+## [1.22.0] - 2026-08-06
+
+### CRITICAL style enforcement on all image prompts
+
+- `_style_inject()` hardened: the selected style profile is now injected into every shot / character-panel / location / prop prompt as a **CRITICAL, non-negotiable requirement** — emphatic framing that the style is mandatory, overrides all other art direction, and must be applied to the entire frame (background, lighting, color grade, rendering finish)
+- Stops shots from dropping, diluting, or drifting to a generic look when the style profile is `arcane`, `noir`, `mannequin`, `roman-statue`, etc.
+- README: updated the style-injection feature bullet to document the CRITICAL framing
+
 ## [1.21.0] - 2026-08-06
 
 ### Codex CLI image backend (local GPT Image 2)
