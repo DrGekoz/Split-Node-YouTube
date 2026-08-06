@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.24.0] - 2026-08-06
+
+### Style selection on resume - new style auto re-generates
+
+- On resume, the pipeline now **asks which style profile to use** (numbered list, Enter keeps the current/resume style) via new `_ask_style_selection()`
+- Picking a style **different from the current/resume style automatically forces `REGEN_IMAGES=1`** — so the new look actually applies to every image instead of keeping stale shots
+- The resume image loop now regenerates **all** shots when `REGEN_IMAGES=1` (was: only missing ones); the fresh-run path got the same style selection coupled to its resume/re-gen prompt
+- `STYLE`/`STYLE_PROFILE` env still override the prompt
+- README: updated the Resume-safe feature bullet to document the on-resume style prompt + auto-regen on style change
+
 ## [1.23.0] - 2026-08-06
 
 ### Image-generation resume vs re-generate prompt

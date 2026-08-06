@@ -3206,6 +3206,35 @@ def _ask_image_regen() -> bool:
         print(f"  [WARN] '{resp}' not recognised - enter R (resume) or E (regenerate)")
 
 
+def _ask_style_selection(current_style: str = "") -> str:
+    """Ask which style profile to use for this run's images. Shows the current
+    (resume) style as the default. Returns the chosen style NAME (lowercase).
+    A chosen style that differs from `current_style` means the images must be
+    re-generated (handled by the caller via REGEN_IMAGES). STYLE env override."""
+    profiles = _load_style_profiles()
+    names = sorted(profiles.keys())
+    if os.environ.get("STYLE") or os.environ.get("STYLE_PROFILE"):
+        return _active_style_name()
+    cur = current_style.lower() if current_style else _active_style_name()
+    print("\n  Style profile for this run's images:")
+    print(f"  current: {cur or 'default (arcane)'}")
+    for i, n in enumerate(names, 1):
+        print(f"    {i:2}. {n:16} {profiles[n][:50]}{'...' if len(profiles[n]) > 50 else ''}")
+    print("  Enter a number, a style name, or press Enter to keep current.")
+    while True:
+        resp = input(f"  Style (Enter = {cur or 'arcane'}): ").strip().lower()
+        if not resp:
+            return cur or "arcane"
+        if resp.isdigit():
+            i = int(resp)
+            if 1 <= i <= len(names):
+                return names[i - 1]
+        elif resp in names:
+            return resp
+        print(f"  [WARN] '{resp}' is not a known style - enter a number or name "
+              f"(or Enter to keep '{cur or 'arcane'}')")
+
+
 def _ask_thumbnail_backend() -> tuple[str, str]:
     """Ask which image-gen provider to use for the YouTube THUMBNAIL.
     Sets THUMBNAIL_BACKEND / THUMBNAIL_MODEL (env override skips the prompt).
@@ -6866,10 +6895,22 @@ def _resume_episode(state: dict) -> None:
     print(f"{'='*60}\n")
 
     # Resume keeps the exact style the episode was generated with (unless the
-    # user overrides with STYLE=<profile>).
+    # user overrides with STYLE=<profile>) OR picks a new style interactively.
     if state.get("style"):
         global _RESUME_STYLE
         _RESUME_STYLE = state.get("style")
+    # If the user didn't force a style via env, ask which style to use for the
+    # resumed images. Picking a style DIFFERENT from the resume style forces a
+    # full re-generate (overwrite) so the new look actually applies.
+    if not (os.environ.get("STYLE") or os.environ.get("STYLE_PROFILE")):
+        _cur = _active_style_name()
+        _chosen = _ask_style_selection(_cur)
+        if _chosen and _chosen.lower() != _cur.lower():
+            print(f"  [STYLE] changed {_cur or 'default'} -> {_chosen} - "
+                  f"forcing full re-generate so the new look applies")
+            os.environ["REGEN_IMAGES"] = "1"
+        if _chosen:
+            os.environ["STYLE"] = _chosen
     # Resume keeps the episode's output resolution too (unless RESOLUTION set).
     if state.get("resolution") and not os.environ.get("RESOLUTION"):
         os.environ["RESOLUTION"] = str(state.get("resolution"))
@@ -6882,11 +6923,18 @@ def _resume_episode(state: dict) -> None:
                            location_sheets, prop_assets,
                            target_paras=target_paras)
 
-    # 1. Images: regenerate only the missing ones (same seeds -> same look)
+    # 1. Images: regenerate only the missing ones (same seeds -> same look),
+    #    or ALL of them when REGEN_IMAGES=1 (a style change forces this so the
+    #    new look applies to every shot).
     ep_shot_dir = SHOTS_DIR / f"ep{episode_num:03d}"
-    missing_img = [s for s in shots
-                   if not (s.get("is_chapter") or
-                           (s.get("image_path") and os.path.isfile(s["image_path"])))]
+    _force_regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
+    if _force_regen:
+        missing_img = [s for s in shots if not s.get("is_chapter")]
+        print(f"\n[IMAGES] REGEN - re-generating ALL {len(missing_img)} shots (overwrite)")
+    else:
+        missing_img = [s for s in shots
+                       if not (s.get("is_chapter") or
+                               (s.get("image_path") and os.path.isfile(s["image_path"])))]
     if missing_img:
         print(f"\n[IMAGES] Regenerating {len(missing_img)} missing shots...")
         # ---- Rebuild the episode world assets the fresh run never finished ----
@@ -7236,7 +7284,18 @@ def main():
     print(f"  [THUMB] Thumbnail provider: {thumb_backend} ({thumb_model})\n")
 
     # 1d. Image generation mode: resume existing or re-generate (overwrite).
+    #     Then pick the style; a style DIFFERENT from the current/resume style
+    #     forces re-generate so the new look actually applies to the images.
+    _cur_style = _active_style_name()
     regen_images = _ask_image_regen()
+    chosen_style = _ask_style_selection(_cur_style)
+    if chosen_style:
+        os.environ["STYLE"] = chosen_style
+    _style_changed = chosen_style and chosen_style.lower() != _cur_style.lower()
+    if _style_changed:
+        print(f"  [STYLE] changed {_cur_style or 'default'} -> {chosen_style} - "
+              f"forcing re-generate so the new look applies")
+        regen_images = True
     os.environ["REGEN_IMAGES"] = "1" if regen_images else "0"
     print(f"  [IMAGES] mode: {'RE-GENERATE (overwrite all)' if regen_images else 'resume (keep existing)'}\n")
 
