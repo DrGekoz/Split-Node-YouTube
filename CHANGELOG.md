@@ -2,6 +2,15 @@
 
 All notable changes to Split Node.
 
+## [1.20.0] - 2026-08-06
+
+### Custom article URL input
+
+- At startup the pipeline now asks **"Enter a URL, or press Enter for RSS"** - paste any `http(s)` article link to skip RSS entirely and run the full pipeline (script → images → render → upload) on that specific article
+- New `_fetch_page_title()` fetches the article's `<title>` tag for the story label (URL-derived fallback if the fetch/title parse fails); the custom URL is recorded as used so it won't be re-suggested
+- Invalid non-URL input falls back to the normal RSS scan
+- README: added the custom-URL option to the Story Discovery features
+
 ## [1.19.0] - 2026-08-06
 
 ### Thumbnail provider selection + YouTube metadata docs

@@ -1357,9 +1357,35 @@ def _collect_candidate_stories(used: set, skip: set,
     return matches
 
 
+def _fetch_page_title(url: str) -> str:
+    """Fetch an article's <title> tag for the custom-URL story source.
+    Falls back to a URL-derived label if the fetch or title parse fails."""
+    try:
+        ssl_ctx = ssl._create_unverified_context()
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"})
+        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as r:
+            html = r.read().decode("utf-8", errors="replace")
+        m = re.search(r"<title[^>]*>(.*?)</title>", html, re.DOTALL | re.IGNORECASE)
+        if m:
+            t = re.sub(r"\s+", " ", m.group(1)).strip()
+            if t:
+                return t[:200]
+    except Exception as e:
+        print(f"  [URL] could not fetch title ({str(e)[:50]}) - using URL label")
+    import urllib.parse as _up
+    label = _up.unquote(url.rstrip("/").split("/")[-1] or url)
+    label = label.replace("-", " ").replace("_", " ")
+    return label[:200] or url
+
+
 def _pick_story() -> tuple[str, str]:
     """Pick a story with user confirmation. Asks Y/n per candidate;
     re-polls RSS when the candidate pool runs out.
+
+    Optionally accepts a CUSTOM article URL instead of the RSS feed: type
+    'u' (or paste a URL) at the prompt and the pipeline fetches that article
+    directly, skipping RSS entirely.
 
     Before collecting candidates, runs the trend-research-toolkit scan so each
     candidate is shown with its RISING (Google Trends) and UNDER-SERVED (YouTube
@@ -1372,6 +1398,20 @@ def _pick_story() -> tuple[str, str]:
     pool: list[dict] = []
     pool_idx = 0
     rounds = 0
+
+    print("\n[STORY] Pick a topic source:")
+    print("  [RSS]  scan feeds for a 'beat the system' story")
+    print("  [URL]  enter your own article URL (skip RSS entirely)")
+    src = input("  Enter a URL, or press Enter for RSS: ").strip()
+    if src:
+        src = src.strip().strip('"\'')
+        if src.lower().startswith(("http://", "https://")):
+            title = _fetch_page_title(src)
+            print(f"  [URL] Using custom article: {title}")
+            print(f"        {src}")
+            _save_used_article(src)
+            return (src, title)
+        print(f"  [WARN] '{src[:40]}' is not a valid http(s) URL - falling back to RSS")
 
     print("\n[RSS] Scraping feeds for a 'beat the system' story...")
     print("  [TREND] scanning rising + under-served topics (trend-research-toolkit)...")
