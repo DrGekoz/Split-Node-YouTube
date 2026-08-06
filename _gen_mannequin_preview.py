@@ -24,18 +24,22 @@ NAME = "mannequin"
 os.environ["STYLE"] = NAME
 
 # Text hair description (NO image ref) - same path the character panels use.
-hair = sb._describe_hair_text("Elon Musk", "CEO", {
-    "hair": "short dark hair", "outfit": "dark suit", "role": "CEO"})
+# Use a specific, COLOURED hair description so the hair clearly stands out
+# against the blank porcelain (dark black-brown, greying, styled short).
+hair = "short dark black-brown hair with grey at the temples, neatly styled, slicked-back modern cut"
 print(f"[STYLEGEN] hair text: '{hair}'", flush=True)
 
 MANNEQUIN_FACE = (
     "Close-up portrait of a seamless glossy porcelain mannequin head and "
     "face, full face centered, facing the camera. Featureless smooth blank "
     "porcelain face - NO eyes, NO nose, NO mouth, NO eyebrows, NO facial "
-    "hair, NO human facial features. Smooth matte off-white cream porcelain "
-    "surface. The mannequin's HAIR is sculpted exactly as: {hair} - same "
-    "cut, colour and texture. Nothing else in frame - no shoulders, no "
-    "neck, no body. Plain light grey studio background, flat even neutral "
+    "hair, NO human facial features, NO skin texture. Smooth matte off-white "
+    "cream porcelain surface, completely blank and featureless. "
+    "The mannequin HAS rich, COLOURED, clearly visible sculpted hair styled "
+    "exactly as: {hair} - full realistic dark hair colour that stands out "
+    "vividly against the blank white porcelain face. The hair is the ONLY "
+    "coloured part of the mannequin. Nothing else in frame - no shoulders, "
+    "no neck, no body. Plain light grey studio background, flat even neutral "
     "lighting, no rim light, one mannequin head only."
 ).format(hair=hair)
 

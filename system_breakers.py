@@ -4151,10 +4151,12 @@ MANNEQUIN_PANELS = [
      "face, full face centered, facing the camera. Featureless smooth blank "
      "porcelain face - NO eyes, NO nose, NO mouth, NO eyebrows, NO facial "
      "hair, NO human facial features. Smooth matte off-white cream porcelain "
-     "surface. The mannequin's HAIR is sculpted exactly as: {hair} - same "
-     "cut, colour and texture. Nothing else in frame - no shoulders, no "
-     "neck, no body. Plain light grey studio background, flat even neutral "
-     "lighting, no rim light, one mannequin head only.",
+     "surface. The mannequin HAS rich, COLOURED, clearly visible sculpted "
+     "hair styled exactly as: {hair} - full realistic hair colour that "
+     "stands out vividly against the blank white porcelain face. The hair is "
+     "the ONLY coloured part of the mannequin. Nothing else in frame - no "
+     "shoulders, no neck, no body. Plain light grey studio background, flat "
+     "even neutral lighting, no rim light, one mannequin head only.",
      "index_timestep_zero"),
     ("face_side", "txt", 1.0,
      "Show the SAME seamless glossy porcelain mannequin in left side profile, "
