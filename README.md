@@ -49,6 +49,43 @@ Built for **content creators, documentary-makers, and automated channel operator
 
 ---
 
+## 🧠 How a tiny local model writes the whole script
+
+Split Node is deliberately engineered to do **all of the LLM work on a small local model** — it currently runs the entire pipeline on **Gemma 4 (7.5B) at a 12,222-token context window** in LM Studio. No giant context, no huge model, no cloud LLM bills. The secret is that the pipeline never asks the model to hold the whole episode in its head at once. Instead it **chunks the work and injects exactly the context each step needs** — so a 7.5B model comfortably produces a full ~25-minute documentary script, beat by beat.
+
+Here's the injection architecture that makes that possible:
+
+- **📰 RSS feed injection (story discovery)** — instead of asking the model "what should I make a video about?", the pipeline pulls *real* stories from RSS feeds (hacker / lottery / loophole / AI / tech) plus Hacker News Algolia search. Each candidate article is passed to the LLM to be **relevance-scored 0–10 against the niche**; off-topic beats are discarded before they ever reach the script stage. The model is never generating topics from thin air — it's *filtering and judging* curated input, which is far easier and cheaper than generating.
+
+- **📃 Paragraph injection (narration script)** — the biggest win. The pipeline does **not** hand the model a full article and ask for a script. It splits the article into paragraphs and, for **each** paragraph, injects a tight sliding window (that paragraph plus its neighbours) as `STORY CONTEXT`, then asks for exactly N narration paragraphs. So at any moment the model only holds **~3 paragraphs of source material**, not a whole article. A 7.5B model easily expands a single paragraph into cinematic narration — and it scales to arbitrarily long episodes because the context window never grows.
+
+- **🚫 Covered-beat dedupe injection** — alongside each window, the pipeline injects a short `ALREADY COVERED in earlier narration - do NOT repeat these beats` list (the last couple of beats it already wrote). This stops the small model from looping or repeating ideas across paragraphs, which is the classic failure mode of small-context generation.
+
+- **🎨 Style injection (images)** — every image prompt (shots, character panels, locations, props) gets the selected **style profile injected as plain text** — e.g. `arcane`, `noir`, `mannequin`, or your own custom descriptor. There are **no style image refs and no LoRA training**, so the visual look is driven by a single text string that any image model understands. That's what lets 9 built-in looks (plus unlimited custom ones) exist with zero retraining.
+
+- **🎬 Prompt injection for everything else** — each LLM pass (director's bible, episode world, scene board, shot list, chapter titles, brand extraction) is a **focused single-purpose prompt** with only the data it needs. The shot list, for example, is built one beat at a time with camera logic injected as structured constraints (EWS/WS/MS/CU/ECU, angles, facing, SFX). No stage sees more context than it can chew.
+
+The result: **a 7.5B local model writes the entire ~25-minute documentary script** — bible, narration, shot list, chapters — because the pipeline is doing the hard orchestration (chunking, windowing, deduping, scoring) and the model is only ever asked to do one small, well-scoped creative task at a time.
+
+---
+
+## 💸 Run it for free on 8GB VRAM
+
+Here's the part that separates Split Node from the other "content machine" tools out there:
+
+- **Images are 100% free and local.** Krea 2 Turbo (or Z-Image) runs in ComfyUI on a **single RTX 3070 8GB** card — no per-image cloud bill. Every shot, character panel, location and prop is generated on your own GPU. The only cloud cost in the whole image pipeline is **SerpAPI at ~$0.01/query** for real-photo references (and it's cached — logos from Wikimedia cost nothing, and real-photo refs are reused).
+- **The LLM is free and local.** LM Studio + a 7.5B model on 12K context writes the entire script. No tokens, no API key, no rate limits.
+- **Voice is free and local.** PocketTTS voice-clones the narrator on your own GPU (or use a built-in catalog voice).
+- **Music, SFX and rendering are free and local.** One continuous music bed, 130+ hit-aligned SFX, and FFmpeg `hevc_nvenc` output to 1080p/4K — all on your machine.
+
+So a full episode costs **basically nothing** — just the handful of SerpAPI queries for real-photo references (a few dollars worst case, often less).
+
+**The only thing a low-end PC can't do locally is video generation.** AI image-to-video (Hailuo, Veo, Kling, LTX — via RunPod or fal.ai) needs a beefy GPU that most machines don't have. Split Node handles this gracefully: **on 8GB+ VRAM you can run the whole thing end-to-end for free**, and on a weaker PC the only external overhead is the optional video-clip step (~$0.23/clip via RunPod). You can even **skip AI video entirely** — Split Node's documentary style renders still shots with motion, music and SFX, so a fully cinematic episode still works without any video-generation API.
+
+> **Bottom line:** one 8GB GPU = a completely free, self-contained documentary channel (images + script + voice + music + render + upload). The moment you add video generation, it's the *only* paid step — and it's optional. That's a lower overhead than any of the other "content machine" pipelines, most of which charge per image, per token, and per clip.
+
+---
+
 ## The Pipeline
 
 Split Node runs a step-by-step pipeline. Every stage is resume-safe — crash, restart, and it picks up exactly where it left off (it never re-uploads a finished video).
