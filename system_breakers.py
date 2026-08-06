@@ -3137,6 +3137,35 @@ def _ask_resolution() -> str:
         print(f"  [WARN] '{resp}' not recognised - enter 1080p or 4K")
 
 
+def _ask_thumbnail_backend() -> tuple[str, str]:
+    """Ask which image-gen provider to use for the YouTube THUMBNAIL.
+    Sets THUMBNAIL_BACKEND / THUMBNAIL_MODEL (env override skips the prompt).
+    Returns (backend, model)."""
+    if os.environ.get("THUMBNAIL_BACKEND"):
+        b = os.environ["THUMBNAIL_BACKEND"].strip().lower()
+        m = os.environ.get("THUMBNAIL_MODEL", "").strip().lower() or None
+        if b in ("local", "runpod", "fal"):
+            try:
+                import providers
+                _, _m = providers._resolve_thumbnail()
+                return b, m or _m
+            except Exception:
+                return b, m or "flux-schnell"
+    print("\n  Thumbnail image-gen provider (for the YouTube thumbnail):")
+    print("    1. local     - ComfyUI (free, your GPU)")
+    print("    2. fal       - fal.ai GPT Image 2 (default, best text rendering)")
+    print("    3. runpod    - RunPod z-image-turbo")
+    while True:
+        resp = input("  Pick 1-3 [2]: ").strip().lower()
+        if resp in ("", "2", "fal"):
+            return "fal", "gpt-image-2"
+        if resp in ("1", "local"):
+            return "local", "krea2-turbo"
+        if resp in ("3", "runpod"):
+            return "runpod", "z-image-turbo"
+        print(f"  [WARN] '{resp}' not recognised - enter 1, 2 or 3")
+
+
 def _black_placeholder(episode_num: int) -> str:
     """WxH pure-black PNG used for chapter title placeholder clips."""
     W_RES, H_RES = _get_output_resolution()
@@ -6100,7 +6129,7 @@ def _thumbnail_headline(topic: str) -> str:
     return " ".join(words[:3]).upper()
 
 def _generate_thumbnail(topic: str, output_path: str) -> bool:
-    print(f"  [THUMB] GPT Image 2 thumbnail for: {topic[:60]}...")
+    print(f"  [THUMB] Generating thumbnail for: {topic[:60]}...")
     headline = _thumbnail_headline(topic)
     prompt = (
         "YouTube documentary thumbnail, bold animated animation style "
@@ -6114,25 +6143,15 @@ def _generate_thumbnail(topic: str, output_path: str) -> bool:
         "lower third. Crisp legible text, high-impact YouTube thumbnail, FERN "
         "documentary channel style."
     )
-    data = json.dumps({
-        "prompt": prompt,
-        "image_size": "landscape_16_9",
-        "num_images": 1,
-    }).encode()
-    headers = {"Authorization": f"Key {FAL_API_KEY}", "Content-Type": "application/json"}
     try:
-        req = urllib.request.Request("https://fal.run/openai/gpt-image-2", data=data, headers=headers)
-        with urllib.request.urlopen(req, timeout=300) as r:
-            result = json.loads(r.read())
-        image_url = result.get("images", [{}])[0].get("url", "")
-        if image_url:
-            urllib.request.urlretrieve(image_url, output_path)
-            if os.path.isfile(output_path) and os.path.getsize(output_path) > 1000:
-                print(f"  [OK] Thumbnail: {os.path.getsize(output_path)//1024}KB -> {output_path}")
-                return True
-        print("  [FAIL] GPT Image 2 returned no image")
+        import providers
+        ok = providers.generate_thumbnail(prompt, output_path, seed=70001)
+        if ok and os.path.isfile(output_path) and os.path.getsize(output_path) > 1000:
+            print(f"  [OK] Thumbnail: {os.path.getsize(output_path)//1024}KB -> {output_path}")
+            return True
+        print("  [FAIL] Thumbnail provider returned no usable image")
     except Exception as e:
-        print(f"  [FAIL] GPT Image 2 error: {e}")
+        print(f"  [FAIL] Thumbnail error: {e}")
     return False
 
 # -- Titles / description --------------------------------------------
@@ -7125,6 +7144,13 @@ def main():
     os.environ["RESOLUTION"] = res
     print(f"  [RES] Output resolution: {res.upper()} "
           f"({_get_output_resolution()[0]}x{_get_output_resolution()[1]})\n")
+
+    # 1c. Thumbnail provider: local / fal / runpod (sets THUMBNAIL_BACKEND).
+    thumb_backend, thumb_model = _ask_thumbnail_backend()
+    os.environ["THUMBNAIL_BACKEND"] = thumb_backend
+    if thumb_model:
+        os.environ["THUMBNAIL_MODEL"] = thumb_model
+    print(f"  [THUMB] Thumbnail provider: {thumb_backend} ({thumb_model})\n")
 
     # Reusable episode template: load the last episode's winning formula
     tpl = _load_episode_template()

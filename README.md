@@ -219,14 +219,20 @@ Built-ins: `arcane` (default), `bold-outline`, `artsy`, `photoreal`, `noir`, `sy
 | `IMAGE_MODEL` | see table below (per backend) |
 | `VIDEO_BACKEND` | `runpod` · `fal` · `local` |
 | `VIDEO_MODEL` | see table below (per backend) |
+| `THUMBNAIL_BACKEND` | `fal` *(default)* · `local` · `runpod` |
+| `THUMBNAIL_MODEL` | `gpt-image-2` *(default, fal)* · `krea2-turbo` (local) · `z-image-turbo` (runpod) |
 
 ```bash
 IMAGE_BACKEND=runpod python system_breakers.py        # shots via RunPod z-image-turbo
 IMAGE_BACKEND=fal IMAGE_MODEL=flux-dev python system_breakers.py
 VIDEO_BACKEND=runpod VIDEO_MODEL=veo3-1-fast python system_breakers.py
+THUMBNAIL_BACKEND=local python system_breakers.py      # thumbnails on your GPU (free)
+THUMBNAIL_BACKEND=fal THUMBNAIL_MODEL=gpt-image-2 python system_breakers.py  # default (best text)
 python providers.py --list-images   # show every image backend/model
 python providers.py --list-videos   # show every video backend/model
 ```
+
+> **Note:** thumbnails default to **fal.ai GPT Image 2** (best text rendering for the "SPLIT NODE" + headline text). The pipeline **asks which thumbnail provider you want** at startup (1. local / 2. fal / 3. runpod) — or set `THUMBNAIL_BACKEND` / `THUMBNAIL_MODEL` to skip the prompt.
 
 > **Note:** local rendering needs ComfyUI + the Krea 2 / Z-Image models. `comfy_manager.py` auto-starts ComfyUI and downloads any missing model files. Cloud backends ignore character/location ref panels (text-to-image) but need no local GPU.
 
@@ -535,8 +541,15 @@ split-node/
 ### Reliability & Automation
 - **Resume-safe** — every stage skips already-completed work, persistent batch clips; a crash rebuilds the episode world, not just the images
 - **Crash-resilient image gen** — retry wrapper with ComfyUI recovery (polls `/system_stats` up to 240s), ref re-encode, 4 crash-retries per image
-- **YouTube upload + Discord announcements** — native scheduling, per-channel credentials, AI-generated content disclaimer
 - **tqdm progress bars** with per-item ETA on every stage
+
+### 📦 YouTube metadata & publishing
+- **Chapterizing** — the ~10 chapter breaks are written by the LLM, pinned to **faster-whisper word timings**, and burned into the video as Bahnschrift chapter cards. On upload they're also written into the description as **YouTube chapter timestamps** (`00:00 …`, `02:15 …`) so viewers get an auto chaptered playback bar
+- **Title generation** — 3 clickbait titles scored against Google Trends + YouTube competition; each starts with `#XXX -` (episode number), under 70 chars, curiosity-gap driven
+- **Description generation** — the LLM writes a full SEO description, then the chapter timestamps are appended; the Discord invite pitch is stripped for the in-app announcement
+- **Tag generation** — 12 LLM-generated topic tags merged with the channel's persistent base tags
+- **Thumbnail generation** — a clickbait headline + "SPLIT NODE" branding rendered by your chosen provider (default fal.ai GPT Image 2 for crisp text; local ComfyUI or RunPod selectable). The pipeline **asks which thumbnail provider** at startup
+- **Upload** — native scheduling, per-channel credentials, AI-generated content disclaimer, then a Discord announcement (multi-server/multi-channel)
 
 ---
 

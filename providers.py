@@ -84,6 +84,7 @@ IMAGE_MODELS = {
         "flux-schnell": "fal-ai/flux/schnell",
         "nano-banana-2": "fal-ai/nano-banana-2",
         "z-image-turbo": "fal-ai/z-image-turbo",
+        "gpt-image-2": "openai/gpt-image-2",
     },
 }
 
@@ -303,16 +304,21 @@ class Fal:
 
     def generate_image(self, model: str, prompt: str, seed: int,
                        out_path: str, num_steps: int = 4,
-                       image_url: str | None = None) -> bool:
+                       image_url: str | None = None,
+                       image_size: str | None = None) -> bool:
         payload = {"prompt": prompt, "num_inference_steps": num_steps,
                    "enable_safety_checker": False}
-        if "nano-banana" in model:
+        if "gpt-image-2" in model:
+            # GPT Image 2: no steps, uses image_size + num_images
+            payload = {"prompt": prompt, "image_size": image_size or "landscape_16_9",
+                       "num_images": 1}
+        elif "nano-banana" in model:
             payload["image_url"] = image_url if image_url else \
                 "https://image.runpod.ai/assets/google/veo3-1-fast-i2v.png"
             payload["image_size"] = "square_hd"
-        if image_url and "nano-banana" not in model:
+        if image_url and "nano-banana" not in model and "gpt-image-2" not in model:
             payload["image_url"] = image_url
-        if seed:
+        if seed and "gpt-image-2" not in model:
             payload["seed"] = seed
         r = _http_json(f"{FAL_SYNC}/{model}", payload=payload,
                        headers=self._headers(), timeout=180)
@@ -372,7 +378,8 @@ def generate_image(prompt: str, seed: int, out_path: str,
                    ref_boost: float = 4.0, grounding_px: int = 1024,
                    ref_images_b: list | None = None,
                    out_dir: str | None = None,
-                   image_url: str | None = None) -> bool:
+                   image_url: str | None = None,
+                   image_size: str | None = None) -> bool:
     """Generate one image on the selected backend. Returns True on success."""
     backend, model = _resolve_image(backend, model)
 
@@ -417,12 +424,48 @@ def generate_image(prompt: str, seed: int, out_path: str,
         try:
             endpoint = IMAGE_MODELS["fal"][model]  # key -> fal model id
             return f.generate_image(endpoint, prompt, seed, out_path,
-                                    num_steps=steps)
+                                    num_steps=steps, image_url=image_url,
+                                    image_size=image_size)
         except Exception as e:
             print(f"  [FAL] {str(e)[:140]}")
             return False
 
     return False
+
+
+# ---------------------------------------------------------------------------
+# Thumbnail generation - routed through the same provider backends but with a
+# separate backend/model selection (THUMBNAIL_BACKEND / THUMBNAIL_MODEL) and
+# 16:9 landscape sizing (YouTube thumbnails). Falls back to IMAGE_* when the
+# thumbnail vars aren't set.
+# ---------------------------------------------------------------------------
+def _resolve_thumbnail() -> tuple[str, str]:
+    backend = (os.environ.get("THUMBNAIL_BACKEND", "").strip()
+               or _env_backend("IMAGE") or "local").lower()
+    if backend not in IMAGE_BACKENDS:
+        backend = "local"
+    model = (os.environ.get("THUMBNAIL_MODEL", "").strip()
+             or _env_model("IMAGE", backend)).lower()
+    if model not in IMAGE_MODELS[backend]:
+        model = IMAGE_DEFAULTS[backend]
+    return backend, model
+
+
+def generate_thumbnail(prompt: str, out_path: str,
+                       seed: int = 70001,
+                       backend: str | None = None,
+                       model: str | None = None) -> bool:
+    """Generate a 16:9 landscape YouTube thumbnail on the selected backend."""
+    if (backend or model) is None:
+        backend, model = _resolve_thumbnail()
+    else:
+        b, m = _resolve_thumbnail()
+        backend, model = backend or b, model or m
+    # route through the shared image path with landscape sizing
+    return generate_image(
+        prompt, seed, out_path, backend=backend, model=model,
+        upscale=False, size="1280*720", width=1280, height=720,
+        steps=6, image_size="landscape_16_9")
 
 
 def generate_video(prompt: str, out_path: str,
