@@ -1670,6 +1670,10 @@ TARGET_NARRATION_PARAS = 115
 # Measured narration pace for length estimates (ep8: 120 paras -> 1712.7s
 # voice timeline incl. 0.3s pads between clips => ~14.3s per paragraph).
 SECONDS_PER_NARRATION_PARA = 14.3
+# Default requested video length in minutes (maps to ~115 paragraphs).
+DEFAULT_VIDEO_MINUTES = 25
+# Clamp the derived paragraph count so a bad/typo'd length can't blow up.
+MIN_PARAS, MAX_PARAS = 10, 400
 
 NARRATION_SYSTEM_PROMPT = (
     "You are a documentary scriptwriter for a YouTube channel called SPLIT NODE. "
@@ -6864,34 +6868,46 @@ def _resume_episode(state: dict) -> None:
 
 
 def _ask_paragraph_target() -> int:
-    """Interactive paragraph-count prompt with estimated runtime + confirm.
+    """Ask for the DESIRED VIDEO LENGTH in minutes, then work backwards to
+    the narration paragraph count.
 
     Fresh runs ask once; the confirmed count is persisted to resume state so
-    a resumed job sticks with the same target (never re-asks). The estimate
-    uses the measured narration pace (~14.3s per paragraph incl. pads).
+    a resumed job sticks with the same target (never re-asks). The conversion
+    uses the measured narration pace (~14.3s per paragraph incl. pads):
+        paragraphs = round(minutes * 60 / 14.3)
+    The user can also type a raw number to set paragraphs directly, or enter
+    a new minute length to re-estimate.
     """
-    n = TARGET_NARRATION_PARAS
+    minutes = DEFAULT_VIDEO_MINUTES
+    n = max(MIN_PARAS, min(round(minutes * 60 / SECONDS_PER_NARRATION_PARA),
+                           MAX_PARAS))
+    print("\n  Episode length:")
     while True:
-        resp = input(f"  How many narration paragraphs? (enter for {n}): ").strip()
+        resp = input(f"  Video length in minutes? (enter for {minutes}): ").strip()
         if resp:
             try:
-                n = int(resp)
+                minutes = float(resp)
+                n = max(MIN_PARAS, min(round(minutes * 60 /
+                                            SECONDS_PER_NARRATION_PARA),
+                                       MAX_PARAS))
             except ValueError:
-                print(f"  [LENGTH] '{resp}' isn't a number")
+                print(f"  [LENGTH] '{resp}' isn't a number (minutes)")
                 continue
-        n = max(10, min(n, 400))
-        # estimate + confirm/change loop (typing a number here re-estimates)
+        # estimate + confirm/change loop (typing a number re-estimates)
         while True:
             est = n * SECONDS_PER_NARRATION_PARA
-            print(f"  [LENGTH] {n} paragraphs -> estimated video length "
-                  f"~{int(est // 60)}m {int(est % 60)}s")
-            resp2 = input("  Confirm? [Y/n] or type a new number: ").strip().lower()
+            print(f"  [LENGTH] {minutes:g} min -> {n} narration paragraphs "
+                  f"(~{int(est // 60)}m {int(est % 60)}s of narration)")
+            resp2 = input("  Confirm? [Y/n] or type a new length in minutes: ").strip().lower()
             if resp2 in ("", "y", "yes"):
                 return n
             if resp2 in ("n", "no"):
-                break   # back to the count prompt
+                break   # back to the length prompt
             try:
-                n = max(10, min(int(resp2), 400))
+                minutes = float(resp2)
+                n = max(MIN_PARAS, min(round(minutes * 60 /
+                                            SECONDS_PER_NARRATION_PARA),
+                                       MAX_PARAS))
             except ValueError:
                 continue
 

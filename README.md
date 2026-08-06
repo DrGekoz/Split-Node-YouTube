@@ -105,7 +105,7 @@ RSS / URL story
 ┌──────────────────────────────────────────────────────────┐
 │  2. SCRIPT GENERATION (4 LLM passes)                     │
 │     Director's bible → episode world → scene board        │
-│     → narration script (~115 paras / ~25 min) → shot list │
+│     → narration script (length in minutes) → shot list  │
 │     (EWS/WS/MS/CU/ECU + angles) + 10 chapter breaks      │
 │     Human review gate on the Krea 2 test frame            │
 └──────────────────────────────────────────────────────────┘
@@ -410,7 +410,7 @@ split-node/
 - **Director's bible** — before any image is made: deeper problem, transformation arc, chapter moods, hero paragraphs for ECU magnification
 - **Episode world** — works for any topic / environment / location
 - **Scene board** — one storyboard card per narration beat, saved to the episode folder for human review
-- **Stage 1 — narration script** — each article paragraph expanded into multiple narration paragraphs (target ~115 total for ~25 min), with covered-beat dedupe and a strict OUTPUT CONTRACT
+- **Stage 1 — narration script** — you pick the **video length in minutes**, and the pipeline works backwards (at ~14.3s per paragraph) to the target narration-paragraph count; each article paragraph is then expanded into multiple narration paragraphs, with covered-beat dedupe and a strict OUTPUT CONTRACT
 - **Stage 2 — shot list** — every narration paragraph gets a shot entry: character archetype, camera logic (EWS/WS/MS/CU/ECU), angle, action, facing, SFX category
 - **10 chapter breaks** — duration-aligned from word counts, LLM-written titles
 - **Style test frame** — a Krea 2 test frame is generated and human-reviewed before the run commits

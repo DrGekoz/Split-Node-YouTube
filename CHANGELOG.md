@@ -2,6 +2,15 @@
 
 All notable changes to Split Node.
 
+## [1.13.0] - 2026-08-06
+
+### Video-length prompt - ask minutes, work backwards to paragraphs
+
+- The episode-length prompt now asks for the **video length in minutes** instead of a raw paragraph count
+- It works backwards from the chosen length (at ~14.3s per narration paragraph, measured pace) to the target paragraph count: `paragraphs = round(minutes * 60 / 14.3)` - e.g. 25 min -> ~105 paras, 30 min -> ~126 paras
+- Default length 25 minutes (`DEFAULT_VIDEO_MINUTES`); the loop lets you confirm, change the length in minutes, or type a raw paragraph count; derived count clamped 10-400 (`MIN_PARAS`/`MAX_PARAS`)
+- Confirmed target still persisted to resume state so a resumed job sticks with the job-start count and never re-asks
+
 ## [1.12.0] - 2026-08-06
 
 ### Hardened RSS article selection - recency-first + rejection cooldown
