@@ -520,6 +520,7 @@ split-node/
 - **Real-photo reference search** (SerpAPI + Openverse) with local vision audit (person + text/logo/watermark checks)
 - **Six individual 1280x1280 identity panels** per character (face, face-side, face-back, body-front, body-side, body-back) — no grid merge
 - **Smart per-shot ref selection** — wide shot → body panel, close-up → face panel, facing left → side panel as-is, facing right → side panel MIRRORED, back → back panel, hand/object close-up → no person ref, multi-person → one panel per character
+- **Panels-first generation** — every character's six identity panels are built in a **dedicated pass before any shot renders** (in both fresh and resume runs), with face-panel failure retries, so a ComfyUI hiccup can't cascade into every shot missing a face
 
 ### Style & Look
 - **Selectable style profiles** — 10 built-ins (incl. `mannequin`, `roman-statue`) + unlimited custom styles, injected as text into every prompt (no style-plate refs, no reference-copy bug)

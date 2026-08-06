@@ -2,6 +2,15 @@
 
 All notable changes to Split Node.
 
+## [1.25.0] - 2026-08-06
+
+### Panels-first character generation
+
+- Character identity panels are now generated in a **dedicated pass before any shot renders** — in both the fresh run (`_generate_all_shots`) and the resume run (`_resume_episode`)
+- New `_build_all_character_sheets()` collects every character across all shots, builds their six panels up front, reuses panels already on disk, and **retries face-panel failures** before moving on to shots
+- Fixes the cascade where a mid-loop ComfyUI hiccup left the face panel (and therefore the whole character) missing across all ~111 shots — panels are resolved first, then shots reuse them
+- README: added the Panels-first feature bullet
+
 ## [1.24.0] - 2026-08-06
 
 ### Style selection on resume - new style auto re-generates

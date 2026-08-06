@@ -5041,6 +5041,66 @@ def _generate_material_panels(char_name: str, sheet: dict, seed: int,
     return panels
 
 
+def _build_all_character_sheets(shots: list[dict],
+                                character_sheets: Optional[dict],
+                                sheets_dir: Path,
+                                seed: int,
+                                sheets_cache: Optional[dict] = None,
+                                max_retries: int = 2) -> dict:
+    """DEDICATED 'panels first' pass: generate every character's six identity
+    panels BEFORE any shot renders. Doing this up front (instead of lazily
+    inside the shot loop) means a face-panel failure is retried and resolved
+    before shots are drawn, and all shots reuse the same panels - so a mid-loop
+    ComfyUI hiccup can't cascade into sheets (and therefore faces) being missing
+    across every shot. Returns {char_name -> {view: panel_path}}."""
+    sheets_cache = sheets_cache if sheets_cache is not None else {}
+    if not character_sheets:
+        character_sheets = {}
+    # Collect every character that appears across ALL shots being (re)generated.
+    seen_names: list[str] = []
+    for shot in shots:
+        for ch in _parse_shot_characters(shot):
+            nm = ch["name"]
+            if nm not in sheets_cache and nm not in seen_names:
+                seen_names.append(nm)
+    if not seen_names:
+        return sheets_cache
+    print(f"\n  [SHEET] building character panels first "
+          f"({len(seen_names)} character(s), then shots)...")
+    for nm in seen_names:
+        if nm in sheets_cache:
+            continue
+        sheet_obj = _sheet_for_name(character_sheets, nm) or {}
+        if not sheet_obj:
+            defs = _build_character_sheets(
+                shots, [s.get("narration", "") for s in shots])
+            sheet_obj = defs.get(nm) or {}
+        # Reuse panels already on disk (a prior run may have finished them).
+        safe = re.sub(r"[^A-Za-z0-9]+", "_", nm.lower()).strip("_") or "char"
+        existing = {v: str(sheets_dir / f"{safe}_{v}.png")
+                    for v in CHAR_PANEL_VIEWS}
+        if all(os.path.isfile(p) for p in existing.values()):
+            sheets_cache[nm] = existing
+            print(f"  [SHEET] reuse {nm} individual panels (on disk)")
+            continue
+        panels: dict = {}
+        for attempt in range(1, max_retries + 1):
+            panels = _generate_character_sheet(
+                nm, sheet_obj or {}, seed, sheets_dir) or {}
+            if panels.get("face") and os.path.isfile(panels["face"]):
+                break
+            if attempt < max_retries:
+                print(f"  [SHEET] {nm} face panel failed (attempt "
+                      f"{attempt}/{max_retries}) - retrying...")
+                time.sleep(2)
+        if panels.get("face") and os.path.isfile(panels["face"]):
+            sheets_cache[nm] = panels
+        else:
+            print(f"  [SHEET] {nm}: face panel failed after {max_retries} "
+                  f"attempts - shots will render without a face ref")
+    return sheets_cache
+
+
 def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = None,
                         episode_num: int = 0,
                         context: Optional[dict] = None,
@@ -5086,7 +5146,15 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
     prop_assets = prop_assets or {}
     print(f"\n[IMAGES] Generating {len(shots)} 3D shots via local Krea 2 Turbo "
           f"(1280x720 -> in-graph FaceUpDAT 1920x1080)...")
+    # ---- PANELS FIRST (dedicated pass) ----
+    # Generate EVERY character's six identity panels up front, before any shot
+    # renders. A face-panel failure is retried and resolved here so it can't
+    # cascade into every shot missing a face.
     sheets: dict[str, dict] = {}
+    if face_lock and sheets_dir:
+        sheets = _build_all_character_sheets(
+            shots, character_sheets, sheets_dir, 70000 + episode_num,
+            sheets_cache=sheets)
     _img_iter = (tqdm(shots, desc="  [IMAGES] rendering shots", unit="shot",
                       leave=False) if _HAS_PROGRESS else shots)
     for idx, shot in enumerate(_img_iter):
@@ -5104,20 +5172,10 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             print(f"  [SHOT {idx+1}/{len(shots)}] resume: keep "
                   f"{os.path.basename(shot['image_path'])}")
             continue
-        chars = _parse_shot_characters(shot)
         seed = 10000 + idx * 137 + random.randint(0, 999)
         prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
-        # Build each character's SIX individual 1280x1280 panels once, then let
-        # _select_shot_refs pick the PERFECT panel(s) for this shot (framing,
-        # facing, mirrored sides, multi-person, business logo).
-        if face_lock and sheets_dir:
-            for ch in chars:
-                name = ch["name"]
-                if name in sheets:
-                    continue
-                sheet_obj = _sheet_for_name(character_sheets, name) or {}
-                sheets[name] = _generate_character_sheet(
-                    name, sheet_obj, seed, sheets_dir) or {}
+        # Panels were built up front by _build_all_character_sheets (before the
+        # shot loop); _select_shot_refs just picks the PERFECT panel(s) here.
         refs, notes = _select_shot_refs(shot, sheets, brand_assets)
         out_path = str((ep_dir or SHOTS_DIR) / f"shot_{seed}.png")
         n = len(refs)
@@ -6947,6 +7005,15 @@ def _resume_episode(state: dict) -> None:
         sheets_cache: dict[str, dict] = {}   # char -> {view: panel path}
         face_lock = os.environ.get("FACE_LOCK", "1") != "0"
         brand_assets = _scan_brand_assets()
+        # ---- PANELS FIRST (dedicated pass) ----
+        # Generate EVERY character's six identity panels up front, before any
+        # shot renders. A face-panel failure is retried here and resolved here,
+        # so it can't cascade into every shot missing a face (a lazy in-loop
+        # build would leave sheets empty across all 111 shots on a hiccup).
+        if face_lock:
+            sheets_cache = _build_all_character_sheets(
+                missing_img, character_sheets, sheets_dir, 70000 + episode_num,
+                sheets_cache=sheets_cache)
         # ---- Smart shot regen (matches the fresh loop) ----
         # Each character's SIX individual 1280x1280 panels are built once and
         # _select_shot_refs picks the PERFECT panel(s) per shot (framing,
@@ -6961,26 +7028,12 @@ def _resume_episode(state: dict) -> None:
             prompt = (_build_shot_prompt(shot, character_sheets)
                       + " " + _style_inject())
             if face_lock:
+                # Panels were built up front by _build_all_character_sheets -
+                # just confirm every char in this shot is present.
                 for ch in chars:
-                    name = ch["name"]
-                    if name in sheets_cache:
-                        continue
-                    sheet_obj = _sheet_for_name(character_sheets, name) or {}
-                    if not sheet_obj:
-                        defs = _build_character_sheets(
-                            shots, [s.get("narration", "") for s in shots])
-                        sheet_obj = defs.get(name) or {}
-                    # A prior run may already have written the individual
-                    # panels - reuse before spending ~7 min regenerating them.
-                    safe = re.sub(r"[^A-Za-z0-9]+", "_", name.lower()).strip("_") or "char"
-                    existing = {v: str(sheets_dir / f"{safe}_{v}.png")
-                                for v in CHAR_PANEL_VIEWS}
-                    if all(os.path.isfile(p) for p in existing.values()):
-                        sheets_cache[name] = existing
-                        print(f"  [SHEET] reuse {name} individual panels (on disk)")
-                    else:
-                        sheets_cache[name] = _generate_character_sheet(
-                            name, sheet_obj or {}, seed, sheets_dir) or {}
+                    if ch["name"] not in sheets_cache:
+                        print(f"  [SHEET] {ch['name']} not in pre-built cache "
+                              f"(face panel had failed) - shot renders w/o face ref")
             refs, notes = _select_shot_refs(shot, sheets_cache, brand_assets)
             out_path = str(ep_shot_dir / f"shot_{seed}.png")
             n = len(refs)
