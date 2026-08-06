@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.18.0] - 2026-08-06
+
+### Discord multi-server / multi-channel support
+
+- The `discord_bot.py` setup wizard now lets you pick **multiple servers and multiple channels** at once (comma-separated numbers, or by pasting names/IDs), and re-running `--setup` **adds** channels instead of replacing them
+- New management commands: `--list` (shows configured channels with their server/channel names), `--remove <id>` (drops a channel)
+- `--send` and `--test` now act on **all** configured channels; `send_to_all()` posts the announcement across every server/channel in `DISCORD_ANNOUNCE_CHANNELS`
+- The pipeline announcement already iterates every channel in `DISCORD_ANNOUNCE_CHANNELS`, so a single bot token now fans out to any number of servers + channels
+- README: updated Discord setup section + Common Commands to document multi-server/multi-channel
+
 ## [1.17.0] - 2026-08-06
 
 ### Roman-statue style

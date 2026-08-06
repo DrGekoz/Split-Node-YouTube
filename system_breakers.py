@@ -4895,9 +4895,9 @@ def _generate_material_panels(char_name: str, sheet: dict, seed: int,
         if ok:
             panels[view] = str(pan)
     if "face" not in panels:
-        print(f"  [SHEET] {char_name}: mannequin face panel failed - no panels usable")
+        print(f"  [SHEET] {char_name}: {look} face panel failed - no panels usable")
         return {}
-    print(f"  [SHEET] {char_name}: {len(panels)} mannequin 1280x1280 panels "
+    print(f"  [SHEET] {char_name}: {len(panels)} {look} 1280x1280 panels "
           f"-> {sheets_dir}")
     return panels
 

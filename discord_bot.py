@@ -6,9 +6,16 @@ REST API - no pip install needed, no discord.py. You provide your own bot
 token + a channel and Split Node posts episode announcements there.
 
 Quick start:
-    python discord_bot.py --setup        # guided one-time setup (token + channel)
-    python discord_bot.py --test         # verify token + reach the channel
-    python discord_bot.py --send "hi"    # send a one-off test message
+    python discord_bot.py --setup        # guided setup (token + channels)
+    python discord_bot.py --test         # verify token + reach channels
+    python discord_bot.py --list         # list configured announce channels
+    python discord_bot.py --remove <id>  # remove a channel
+    python discord_bot.py --send "hi"    # test-send to ALL configured channels
+
+MULTI-SERVER / MULTI-CHANNEL: the same bot token can post to as many servers
+and channels as you like. `--setup` lets you pick several servers and several
+channels in one go (comma-separated), and re-running `--setup` ADDS more.
+Channels are stored comma-separated in .env as DISCORD_ANNOUNCE_CHANNELS.
 
 Setup flow (also in the README):
     1. Create a bot at https://discord.com/developers/applications
@@ -58,6 +65,18 @@ _load_env()
 
 def _token() -> str:
     return (os.environ.get("DISCORD_BOT_TOKEN") or "").strip()
+
+
+def _load_channels() -> list[str]:
+    """Return the list of announce channels (IDs or #names) from .env. Supports
+    multiple servers + multiple channels via comma-separated DISCORD_ANNOUNCE_CHANNELS."""
+    raw = (os.environ.get("DISCORD_ANNOUNCE_CHANNELS")
+           or os.environ.get("DISCORD_CHANNEL") or "")
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
+def _set_channels(channels: list[str]):
+    _set_env("DISCORD_ANNOUNCE_CHANNELS", ",".join(c.strip() for c in channels if c.strip()))
 
 
 def _set_env(key: str, value: str):
@@ -199,7 +218,7 @@ def setup():
         return False
     print(f"  [SETUP] Connected as bot '{t['bot']}'.")
 
-    # Guild selection
+    # Guild selection - can pick MULTIPLE servers and MULTIPLE channels.
     guilds = get_guilds(tok)
     if not guilds:
         print("""
@@ -209,34 +228,124 @@ def setup():
    + View Channels). After inviting, re-run:  python discord_bot.py --setup
 """.format(INVITE_LINK=INVITE_LINK))
         return False
-    print("\n  [SETUP] Your bot is in these servers:")
+
+    # Start from existing channels so re-running ADDS, not replaces.
+    current = _load_channels()
+    print(f"\n  [SETUP] Existing channels ({len(current)}): "
+          f"{', '.join(current) or 'none'}")
+
+    print("\n  [SETUP] Pick servers (the bot is in these):")
     for i, g in enumerate(guilds, 1):
         print(f"    {i}. {g.get('name')} ({g.get('id')})")
-    gi = input("  Pick a server number [1]: ").strip() or "1"
-    try:
-        guild = guilds[int(gi) - 1]
-    except Exception:
-        print("  [SETUP] Invalid server selection")
+    print("  Enter one or more numbers, comma-separated, e.g. '1,2'.")
+    gsel = input("  Servers (or Enter to keep existing): ").strip()
+    if not gsel:
+        print("  [SETUP] No servers selected - keeping existing channels.")
+        return True
+    picks = set()
+    for part in gsel.replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            try:
+                picks.add(guilds[int(part) - 1]["id"])
+            except Exception:
+                pass
+        else:
+            # allow pasting a server name / id directly
+            for g in guilds:
+                if part.lower() in (g["name"] or "").lower() or part == g["id"]:
+                    picks.add(g["id"])
+    if not picks:
+        print("  [SETUP] No valid servers selected.")
         return False
 
-    # Channel selection
-    chans = [c for c in get_channels(guild["id"], tok) if c.get("type") in (0, 5)]
-    if not chans:
-        print(f"  [SETUP] No text channels found in '{guild.get('name')}'.")
+    new_ids = []
+    for gid in picks:
+        guild = next((g for g in guilds if g["id"] == gid), None)
+        if not guild:
+            continue
+        chans = [c for c in get_channels(gid, tok) if c.get("type") in (0, 5)]
+        if not chans:
+            print(f"  [SETUP] No text channels found in '{guild.get('name')}'.")
+            continue
+        print(f"\n  [SETUP] Text channels in '{guild.get('name')}':")
+        for i, c in enumerate(chans, 1):
+            print(f"    {i}. #{c.get('name')} ({c.get('id')})")
+        csel = input("  Pick channels (numbers, comma-separated) [1]: ").strip() or "1"
+        for part in csel.replace(";", ",").split(","):
+            part = part.strip()
+            if part.isdigit():
+                try:
+                    ch = chans[int(part) - 1]
+                except Exception:
+                    continue
+            else:
+                low = part.lstrip("#").lower()
+                ch = next((c for c in chans
+                           if (c["name"] or "").lower() == low or c["id"] == part), None)
+            if ch and ch["id"] not in new_ids:
+                new_ids.append(ch["id"])
+                print(f"    -> added #{ch.get('name')} ({ch['id']})")
+
+    if not new_ids:
+        print("  [SETUP] No channels added.")
         return False
-    print(f"\n  [SETUP] Text channels in '{guild.get('name')}':")
-    for i, c in enumerate(chans, 1):
-        print(f"    {i}. #{c.get('name')} ({c.get('id')})")
-    ci = input("  Pick a channel number [1]: ").strip() or "1"
-    try:
-        ch = chans[int(ci) - 1]
-    except Exception:
-        print("  [SETUP] Invalid channel selection")
-        return False
-    _set_env("DISCORD_ANNOUNCE_CHANNELS", ch["id"])
-    print(f"\n  [OK] Saved to .env: channel #{ch.get('name')} ({ch['id']})")
-    print("  [OK] Discord setup complete! Announcements will post here.")
+    merged = [c for c in current if c not in new_ids] + new_ids
+    _set_channels(merged)
+    print(f"\n  [OK] Saved {len(new_ids)} new channel(s) to .env.")
+    print(f"  [OK] Total announce channels: {len(merged)}")
+    print("  [OK] Run `python discord_bot.py --list` to see them, "
+          "or `--remove <id>` to drop one.")
     return True
+
+
+def list_channels():
+    """Print the currently configured announce channels with friendly names."""
+    tok = _token()
+    chans = _load_channels()
+    if not chans:
+        print("[LIST] No announce channels configured. Run `--setup` to add some.")
+        return 0
+    # Build id -> (guild_name, channel_name) map across all the bot's servers.
+    id2name = {}
+    if tok:
+        for g in get_guilds(tok):
+            for ch in get_channels(g["id"], tok):
+                id2name[ch["id"]] = (g["name"], ch["name"])
+    print(f"[LIST] {len(chans)} announce channel(s):")
+    for c in chans:
+        cid = c.lstrip("#")
+        info = id2name.get(cid)
+        loc = f"{info[0]} / #{info[1]}" if info else "resolved"
+        resolved = resolve_channel(c, tok)
+        print(f"  - {c}  ({loc}; id={resolved or 'N/A'})")
+    return 0
+
+
+def remove_channel(spec: str):
+    """Remove a channel by ID or #name from the announce list."""
+    chans = _load_channels()
+    target = spec.lstrip("#")
+    kept = [c for c in chans if c.lstrip("#") != target]
+    if len(kept) == len(chans):
+        print(f"[REMOVE] '{spec}' not in the announce list.")
+        return 1
+    _set_channels(kept)
+    print(f"[REMOVE] Removed '{spec}'. {len(kept)} channel(s) remain.")
+    return 0
+
+
+def send_to_all(content: str, token: str | None = None) -> list[dict]:
+    """Send a message to every configured announce channel (multi-server)."""
+    results = []
+    for ch in _load_channels():
+        r = send_message(content, ch, token)
+        results.append((ch, r))
+        if r.get("error"):
+            print(f"  [SEND] FAILED {ch}: {r.get('message', r.get('error'))}")
+        else:
+            print(f"  [SEND] OK -> {ch} (id={r.get('id', '?')})")
+    return results
 
 
 def main():
@@ -248,22 +357,32 @@ def main():
         if t.get("ok"):
             print(f"[OK] Bot connected: {t['bot']}")
             print(f"[OK] Servers: {', '.join(t['guilds']) or 'none'}")
-            ch = os.environ.get("DISCORD_ANNOUNCE_CHANNELS") or os.environ.get("DISCORD_CHANNEL")
-            if ch:
-                r = resolve_channel(ch)
-                print(f"[OK] Channel '{ch}' -> ID {r if r else 'NOT FOUND'}")
+            chans = _load_channels()
+            if chans:
+                for ch in chans:
+                    r = resolve_channel(ch)
+                    print(f"[OK] Channel '{ch}' -> ID {r if r else 'NOT FOUND'}")
             sys.exit(0)
         print(f"[FAIL] {t.get('message', t.get('error', '?') )}")
         sys.exit(1)
+    if "--list" in args:
+        sys.exit(list_channels())
+    if "--remove" in args:
+        i = args.index("--remove")
+        spec = args[i + 1] if i + 1 < len(args) else ""
+        if not spec:
+            print("[REMOVE] usage: python discord_bot.py --remove <channel_id_or_#name>")
+            sys.exit(2)
+        sys.exit(remove_channel(spec))
     if "--send" in args:
         i = args.index("--send")
         content = args[i + 1] if i + 1 < len(args) else "Hello from Split Node!"
-        ch = os.environ.get("DISCORD_ANNOUNCE_CHANNELS") or os.environ.get("DISCORD_CHANNEL")
-        r = send_message(content, ch)
-        if r.get("error"):
-            print(f"[FAIL] {r.get('message', r.get('error'))}")
+        chans = _load_channels()
+        if not chans:
+            print("[FAIL] No announce channels configured. Run `--setup` first.")
             sys.exit(1)
-        print(f"[OK] Sent to channel {ch}")
+        print(f"[SEND] Posting to {len(chans)} channel(s)...")
+        send_to_all(content)
         sys.exit(0)
     # No args - print instructions
     print(__doc__)

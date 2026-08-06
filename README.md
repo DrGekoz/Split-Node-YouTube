@@ -390,17 +390,19 @@ manually.
 
 ### 🤖 Discord announcements setup (your own bot)
 
-Split Node can post a "new episode is live" announcement to a Discord channel
-through a bot **you** create and own. Everything is self-contained in this
-repo — no pip installs, no discord.py. It uses the Discord REST API via the
-standard library.
+Split Node can post a "new episode is live" announcement to **any number of
+Discord servers and channels** through a bot **you** create and own. Everything
+is self-contained in this repo — no pip installs, no discord.py. It uses the
+Discord REST API via the standard library.
 
 The easiest way is the guided setup:
 
 ```bash
-python discord_bot.py --setup          # walks you through token + channel
-python discord_bot.py --test           # verify the bot + channel
-python discord_bot.py --send "hello"   # send a one-off test message
+python discord_bot.py --setup          # guided: token + pick servers/channels
+python discord_bot.py --test           # verify the bot + all channels
+python discord_bot.py --list           # list configured announce channels
+python discord_bot.py --remove <id>    # remove a channel
+python discord_bot.py --send "hello"   # test-send to ALL channels
 ```
 
 That's the same as running `python system_breakers.py --setup-discord`.
@@ -413,22 +415,27 @@ Manual steps:
 2. **Copy the token** — under the Bot tab, click **Reset Token** / **Copy**.
 3. **Invite it to your server** — the setup prints the invite URL (or use
    `https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=3072&scope=bot`).
-   It needs **Send Messages** + **View Channels** permissions.
-4. **Pick a channel** — the setup lists your servers + channels and saves your
-   choice to `.env`.
+   It needs **Send Messages** + **View Channels** permissions. Invite it to as
+   many servers as you like.
+4. **Pick servers + channels** — the setup lists all your servers and lets you
+   pick several servers and several channels at once (comma-separated numbers).
+   Re-running `--setup` **adds** more channels — it never replaces what you've
+   configured. The same bot token can post across all of them.
 
 Config lives in `.env` (never committed):
 
 ```bash
 # .env
 DISCORD_BOT_TOKEN=your_bot_token_here
-DISCORD_ANNOUNCE_CHANNELS=123456789012345678,#my-channel   # comma-separated IDs or #names
+# Comma-separated IDs or #names - can span MULTIPLE servers:
+DISCORD_ANNOUNCE_CHANNELS=123456789012345678,987654321098765432,#my-channel
 # or just: DISCORD_CHANNEL=123456789012345678
 ```
 
-When a video is uploaded, Split Node posts the announcement to every channel
-in `DISCORD_ANNOUNCE_CHANNELS`. If no token/channel is configured, it skips
-the announcement gracefully (the video still uploads to YouTube).
+When a video is uploaded, Split Node posts the announcement to **every
+channel** in `DISCORD_ANNOUNCE_CHANNELS` — across all the servers you've added.
+If no token/channel is configured, it skips the announcement gracefully (the
+video still uploads to YouTube).
 
 ### Common Commands
 
@@ -441,9 +448,11 @@ the announcement gracefully (the video still uploads to YouTube).
 | `EASTER_EGG="duck pope" python system_breakers.py` | Hide an easter egg in one shot, no prompt |
 | `python system_breakers.py --cache-logos OpenAI Claude` | Pre-cache brand logos without a full run |
 | `python oauth_split_node.py` | YouTube OAuth authorization |
-| `python discord_bot.py --setup` | Guided Discord bot + channel setup |
-| `python discord_bot.py --test` | Verify the Discord bot + channel |
-| `python discord_bot.py --send "hi"` | Send a one-off Discord test message |
+| `python discord_bot.py --setup` | Guided Discord bot + servers/channels setup (adds to existing) |
+| `python discord_bot.py --test` | Verify the Discord bot + all channels |
+| `python discord_bot.py --list` | List configured announce channels (with server names) |
+| `python discord_bot.py --remove <id>` | Remove a channel from the announce list |
+| `python discord_bot.py --send "hi"` | Test-send to ALL configured channels |
 
 ---
 
