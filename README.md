@@ -26,7 +26,7 @@
 ## 🎥 Example Output
 
 <p align="center">
-  <a href="https://github.com/DrGekoz/split-node">
+  <a href="https://github.com/DrGekoz/Split-Node-YouTube">
     <img src="https://img.shields.io/badge/Full_Episodes_Uploaded-YouTube-FF0000?style=for-the-badge&logo=youtube" alt="Split Node episodes">
   </a>
 </p>
@@ -303,8 +303,8 @@ python providers.py --list-videos   # show every video backend/model
 
 ```bash
 # Clone
-git clone https://github.com/DrGekoz/split-node
-cd split-node
+git clone https://github.com/DrGekoz/Split-Node-YouTube
+cd Split-Node-YouTube
 
 # Set API keys in .env (never commit)
 # SERPAPI_API_KEY=...
@@ -453,4 +453,4 @@ Private project — © 2026 DrGekoz (AdsDoctorMelbourne). All rights reserved. S
 
 ---
 
-[![GitHub](https://img.shields.io/badge/GitHub-DrGekoz%2Fsplit--node-181717?style=flat-square&logo=github)](https://github.com/DrGekoz/split-node)
+[![GitHub](https://img.shields.io/badge/GitHub-DrGekoz%2FSplit--Node--YouTube-181717?style=flat-square&logo=github)](https://github.com/DrGekoz/Split-Node-YouTube)
