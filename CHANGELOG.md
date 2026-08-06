@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.16.0] - 2026-08-06
+
+### Pre-mapped brand logos from Wikimedia Commons
+
+- `premap_logos.py` auto-resolves 1000+ curated brand names (AI/tech, autos, banks, food, retail, airlines, media, gaming, pharma, energy, telecom, insurance, etc) to their Wikimedia Commons logo via the Commons search API, downloads the 512px rasterized PNG, and writes them to `cast_refs/logos/`
+- ~450 logos downloaded and **committed to the repo** (cast_refs/logos/ no longer gitignored) - each brand resolves cache-first via `_find_logo`, so no network or SerpAPI needed for pre-mapped brands
+- `OFFICIAL_LOGOS` now loads the committed manifest at startup, extending the hand-curated 36-brand registry with the full pre-mapped set
+- `_find_logo` verified resolving committed logos (Netflix, Tesla, Nike, Adidas, Walmart, ...) without network
+- Re-run `python premap_logos.py` anytime to fill remaining brands (it skips already-downloaded ones)
+
 ## [1.15.0] - 2026-08-06
 
 ### Docs - system storage requirements
