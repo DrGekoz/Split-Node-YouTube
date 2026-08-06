@@ -380,7 +380,6 @@ split-node/
 ├── analyze_sfx.py              Analyze SFX library (build/hit/decay)
 ├── trend_scorer.py             Score topic ideas (demand/room/trajectory)
 ├── upscale_4k.py               Optional standalone SPAN 4x upscaler
-├── mini_test.py                End-to-end pipeline test
 │
 ├── style_sheets/               Style profiles + custom_styles.json + easter_eggs.json
 ├── style_previews/             One 1280x1280 preview panel per selectable style

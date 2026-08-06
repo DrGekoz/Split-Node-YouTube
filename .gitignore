@@ -29,6 +29,10 @@ m2_*/
 cd_frames_*/
 batch_temp/
 test_output/
+# Standalone test scripts (keep them local, don't commit)
+test_*.py
+mini_test.py
+reconstruct_*.py
 
 # Trend toolkit cache
 trend_scan_cache.json
