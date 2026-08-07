@@ -2,6 +2,14 @@
 
 All notable changes to Split Node.
 
+## [1.31.1] - 2026-08-07
+
+### Fresh run now asks for the episode image provider too
+
+- New **`_ask_image_backend()`** prompt on every fresh run asks which provider to use for the **actual episode shot images** (local / fal / runpod / codex), just like the thumbnail provider prompt. Writes `IMAGE_BACKEND` / `IMAGE_MODEL`.
+- Default is **local** (ComfyUI Krea 2 Turbo) because the shots use character-identity panels as reference images, which only the local backend honours. Cloud backends (fal / runpod / codex) are text-to-image only and drop the identity/face refs.
+- Thumbnail and episode images are asked separately and can use different backends.
+
 ## [1.31.0] - 2026-08-07
 
 ### Interactive resume (regenerate anything, tweak as you go)

@@ -3913,6 +3913,54 @@ def _ask_thumbnail_backend() -> tuple[str, str]:
         print(f"  [WARN] '{resp}' not recognised - enter 1, 2, 3 or 4")
 
 
+def _ask_image_backend() -> tuple[str, str]:
+    """Ask which image-gen provider to use for the EPISODE IMAGES (all shots).
+    Sets IMAGE_BACKEND / IMAGE_MODEL (env override skips the prompt).
+    Returns (backend, model).
+
+    Default is local (ComfyUI Krea 2 Turbo) because the shots use the
+    character-identity panels as reference images, which only the local backend
+    honours. Cloud backends (fal / runpod / codex) are text-to-image, so they
+    drop the identity/face refs.
+    """
+    if os.environ.get("IMAGE_BACKEND"):
+        b = os.environ["IMAGE_BACKEND"].strip().lower()
+        m = os.environ.get("IMAGE_MODEL", "").strip().lower() or None
+        if b in ("local", "runpod", "fal", "codex"):
+            try:
+                import providers
+                _, _m = providers._resolve_image(b, m or None)
+                return b, m or _m
+            except Exception:
+                return b, m or "krea2-turbo"
+    print("\n  Episode image-gen provider (for ALL shot images):")
+    print("    1. local     - ComfyUI Krea 2 Turbo (default, free, keeps face/identity refs)")
+    print("    2. fal       - fal.ai (flux / gpt-image-2, text-to-image only)")
+    print("    3. runpod    - RunPod z-image-turbo (text-to-image only)")
+    print("    4. codex     - Codex CLI /imagegen (text-to-image only)")
+    while True:
+        resp = input("  Pick 1-4 [1]: ").strip().lower()
+        if resp in ("", "1", "local"):
+            return "local", "krea2-turbo"
+        if resp in ("2", "fal"):
+            print("  fal models: flux-dev, flux-schnell, nano-banana-2, z-image-turbo, gpt-image-2")
+            m = input("  fal model? [flux-schnell]: ").strip().lower() or "flux-schnell"
+            if m not in ("flux-dev", "flux-schnell", "nano-banana-2", "z-image-turbo", "gpt-image-2"):
+                print(f"  [WARN] '{m}' unknown - using flux-schnell")
+                m = "flux-schnell"
+            return "fal", m
+        if resp in ("3", "runpod"):
+            print("  runpod models: z-image-turbo, nano-banana-2")
+            m = input("  runpod model? [z-image-turbo]: ").strip().lower() or "z-image-turbo"
+            if m not in ("z-image-turbo", "nano-banana-2"):
+                print(f"  [WARN] '{m}' unknown - using z-image-turbo")
+                m = "z-image-turbo"
+            return "runpod", m
+        if resp in ("4", "codex"):
+            return "codex", "gpt-image-2"
+        print(f"  [WARN] '{resp}' not recognised - enter 1, 2, 3 or 4")
+
+
 def _black_placeholder(episode_num: int) -> str:
     """WxH pure-black PNG used for chapter title placeholder clips."""
     W_RES, H_RES = _get_output_resolution()
@@ -8391,6 +8439,14 @@ def main():
     if thumb_model:
         os.environ["THUMBNAIL_MODEL"] = thumb_model
     print(f"  [THUMB] Thumbnail provider: {thumb_backend} ({thumb_model})\n")
+
+    # 1c1. Episode image provider: local / fal / runpod / codex (sets
+    #      IMAGE_BACKEND / IMAGE_MODEL for ALL shot images). Ask separately
+    #      from the thumbnail provider - they can use different backends.
+    img_backend, img_model = _ask_image_backend()
+    os.environ["IMAGE_BACKEND"] = img_backend
+    os.environ["IMAGE_MODEL"] = img_model
+    print(f"  [IMG] Episode image provider: {img_backend} ({img_model})\n")
 
     # 1d. Image generation mode: resume existing or re-generate (overwrite).
     #     Then pick the style; a style DIFFERENT from the current/resume style
