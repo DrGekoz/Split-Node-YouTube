@@ -22,6 +22,8 @@ All notable changes to Split Node.
 
 
 
+## [1.30.0] - 2026-08-07
+
 ### Establishing shots (new place/person gets a proper intro)
 
 - **`_inject_establishing_shots()`** injects a dedicated establishing narration line immediately BEFORE the first paragraph that mentions each unique **location** and each unique **character** (from the story bible's `key_places` + character roster). Each becomes its own shot rendered as a **wide/full establishing frame**: `EWS` (extreme wide) for a location, `WS` (full-body) for a character.
