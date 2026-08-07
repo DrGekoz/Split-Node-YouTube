@@ -1575,6 +1575,51 @@ _NARRATION_PREFIX_RE = re.compile(
 )
 
 
+_STAGE_DIR_KEYWORDS = (
+    "shot", "screen", "cut ", "cut to", "camera", "glow", "close-up",
+    "closeup", "close up", "interior", "exterior", "transition", "pov",
+    "zoom", "pan ", "montage", "establishing", "flashback", "slow motion",
+    "we see", "showing", "scan", "hover", "dolly", "tracking", "insert",
+    "cutaway", "b-roll", "b roll", "the scene", "the camera", "frame",
+    "freeze", "voiceover", "sfx", "though ", "but wait", "shifting",
+    "fade", "dissolve", "the screen", "cutaway", "over the shoulder",
+    "extreme close", "wide shot", "split screen", "title card",
+)
+
+
+def _strip_stage_directions(text: str) -> str:
+    """Remove parenthetical/bracketed stage directions the LLM sneaks into
+    narration (e.g. '(Waitshifting context slightly to...)' or '[cut to
+    interior of the office]').
+
+    Only strips a (...) / [...] group when it actually reads like a direction:
+    it is LONG (>=5 words) and either starts with a lowercase word or contains
+    a stage-direction keyword. Short parentheticals that are real content
+    (dates, names, figures like '(OTC)' or '(1992)') are always kept.
+    Returns the text with those groups removed and whitespace tidied.
+    """
+    if not text:
+        return text
+
+    def _is_dir(m: re.Match) -> bool:
+        inner = m.group(1).strip()
+        if len(inner.split()) < 5:
+            return False
+        low = inner.lower()
+        return inner[0].islower() or any(k in low for k in _STAGE_DIR_KEYWORDS)
+
+    text = re.sub(
+        r"[(\[]([^()\[\]]{0,200})[)\]]",
+        lambda m: "" if _is_dir(m) else m.group(0), text)
+    text = re.sub(r"\s+", " ", text).strip()
+    text = text.strip(" \t,;:()[]")
+    text = re.sub(r"[,;:]{1,}\s*$", "", text)      # drop dangling punctuation
+    text = re.sub(r"([.!?]){2,}", r"\1", text)      # collapse ".." / "!!"
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    return text.strip()
+
+
 def _strip_narration_meta(text: str) -> str:
     """Strip LLM meta-commentary so it never lands in the script or TTS.
 
@@ -1600,7 +1645,7 @@ def _strip_narration_meta(text: str) -> str:
     m = re.match(r"^(\d{1,2})[.)]\s+(.+)", text)
     if m and int(m.group(1)) <= 30:
         text = m.group(2).strip()
-    return text
+    return _strip_stage_directions(text)
 
 def _llm_score_batch(messages: list[dict], max_tokens: int = 300) -> str:
     """Minimal LM Studio call for relevance scoring (no stop tokens, low temp)."""
@@ -2234,6 +2279,21 @@ def _inject_establishing_shots(narration_paras: list[str],
                 return i
         return -1
 
+    # Cap the number of LOCATION establishing shots so an episode doesn't
+    # fragment across too many places. Keep the EARLIEST-mentioned ones (the
+    # most central to the story) and drop the rest. Characters are uncapped.
+    MAX_ESTABLISH_LOCATIONS = 4
+    if len(locations) > MAX_ESTABLISH_LOCATIONS:
+        ranked = [(i, loc) for loc in locations
+                  if (i := _first_mention(loc, narration_paras)) >= 0]
+        ranked.sort()
+        keep = {loc for _, loc in ranked[:MAX_ESTABLISH_LOCATIONS]}
+        dropped = [loc for loc in locations if loc not in keep]
+        locations = [loc for loc in locations if loc in keep]
+        if dropped:
+            print(f"  [ESTABLISH] capped locations {len(locations)} (kept "
+                  f"earliest mentions); skipped: {', '.join(dropped)}")
+
     inserts: list[tuple[int, str, dict]] = []  # (position, line, meta)
     for loc in locations:
         idx = _first_mention(loc, narration_paras)
@@ -2494,11 +2554,16 @@ def _build_episode_context(topic: str, paragraphs: list[str]) -> dict:
         {"role": "system", "content":
             "You are a documentary production researcher. From the article "
             "excerpt, extract the story's world as STRICT JSON only: "
-            '{"era": "one era descriptor", "places": ["3-5 real places"], '
-            '"environments": ["3-5 environments/settings where scenes happen"], '
+            '{"era": "one era descriptor", '
+            '"places": ["2-4 places EXPLICITLY named in the article: cities, '
+            'venues, regions. Empty list if the article names no specific '
+            'place - NEVER invent a city, street or venue"], '
+            '"environments": ["2-4 environments/settings where scenes happen, '
+            "described generically if the article doesn't name one\"], "
             '"props": ["4-8 objects central to the story"], '
             '"time_of_day": "when most scenes happen"}. '
-            "Say NOTHING outside the JSON."},
+            "Use ONLY places literally written in the article. Never invent "
+            "location names. Say NOTHING outside the JSON."},
         {"role": "user", "content": f"TOPIC: {topic}\n\nARTICLE:\n{sample}"}
     ], max_tokens=700, temp=0.3)
     defaults = {"era": "modern", "places": [], "environments": [],
@@ -2548,7 +2613,9 @@ def _build_story_bible(topic: str, paragraphs: list[str]) -> dict:
             '"characters": [{"name": "exact name from article", "role": "their role in the story", "gender": "male|female", "age": "their best-guess age written descriptively from the article: e.g. early 20s, mid 40s, late 60s, or a specific 23-year-old if the article states it. INFER from context (a suspect described as young, a founder with 30 years experience, a retiree, a student). Never leave blank - always give a concrete age descriptor even if you have to estimate", "relation": "how they relate to the protagonist"}], '
             '"hero_journey": {"status_quo": "...", "call": "...", "assistance": "...", "departure": "...", "trials": "...", "approach": "...", "crisis": "...", "reward": "...", "return": "...", "new_life": "..."}, '
             '"key_numbers": ["exact figures from the article"], '
-            '"key_places": ["real places"], '
+            '"key_places": ["real places EXPLICITLY named in the article; '
+            'empty list if the article names no specific place - NEVER invent '
+            'a city, street or venue"], '
             '"chapter_moods": [{"n": 1, "title": "chapter title", "mood": "suspense|triumphant|neutral"}]}. '
             "Use ONLY real names, places and figures from the article. Do NOT invent "
             "characters. If the article gives no name for a person, use a role label "
@@ -7724,6 +7791,139 @@ def _clear_resume_state() -> None:
         pass
 
 
+def _yn(prompt: str, default: bool = False) -> bool:
+    """Simple yes/no prompt. Returns the default on empty/unknown input."""
+    while True:
+        resp = input(prompt).strip().lower()
+        if not resp:
+            return default
+        if resp in ("y", "yes"):
+            return True
+        if resp in ("n", "no"):
+            return False
+        print("  [WARN] enter y or n")
+
+
+def _ask_image_model_swap() -> None:
+    """Interactively pick the image backend + model for this run's shots.
+
+    Sets IMAGE_BACKEND / IMAGE_MODEL env vars, which are read by
+    _krea_generate -> providers.generate_image. A model change forces image
+    regeneration (caller handles that). Existing IMAGE_BACKEND / IMAGE_MODEL
+    env vars are shown as the current values and used as defaults.
+    """
+    try:
+        import providers
+    except Exception as e:
+        print(f"  [IMG] providers import failed: {e}")
+        return
+    cur = (os.environ.get("IMAGE_BACKEND", "").strip().lower()
+           or providers._env_backend("IMAGE"))
+    cur_model = providers._env_model("IMAGE", cur)
+    print("\n  Image generation model swap:")
+    print(f"  current: backend={cur}, model={cur_model}")
+    print(f"  backends: {', '.join(providers.IMAGE_BACKENDS)}")
+    while True:
+        b = input(f"  Backend? (enter for {cur}): ").strip().lower()
+        if not b:
+            b = cur
+        if b not in providers.IMAGE_BACKENDS:
+            print(f"  [WARN] unknown backend '{b}' - "
+                  f"choose one of: {', '.join(providers.IMAGE_BACKENDS)}")
+            continue
+        break
+    models = list(providers.IMAGE_MODELS[b].keys())
+    default_model = providers.IMAGE_DEFAULTS.get(b, models[0] if models else "")
+    print(f"  {b} models: {', '.join(models)}")
+    while True:
+        m = input(f"  Model? (enter for {default_model}): ").strip().lower()
+        if not m:
+            m = default_model
+        if m not in providers.IMAGE_MODELS[b]:
+            print(f"  [WARN] unknown model '{m}' for {b} - "
+                  f"choose: {', '.join(models)}")
+            continue
+        break
+    os.environ["IMAGE_BACKEND"] = b
+    os.environ["IMAGE_MODEL"] = m
+    print(f"  [IMG] image model -> backend={b}, model={m}")
+
+
+def _rebuild_script_for_resume(state: dict) -> dict:
+    """Re-fetch the article and rebuild the ENTIRE script pipeline so the user
+    can regenerate an episode's script on resume.
+
+    Mirrors the fresh-run path: story bible -> narration -> relevance rating ->
+    chapter markers -> anchors -> establishing shots -> episode context ->
+    directors bible -> scene board -> shot list -> character sheets -> brand
+    assets -> location sheets -> prop assets. Returns a dict of updated state
+    fields (empty dict on failure). The caller then forces image + TTS
+    regeneration for the fresh shots.
+    """
+    episode_num = int(state.get("episode_num", 0))
+    article_url = state.get("article_url", "")
+    topic = state.get("topic", "")
+    target_paras = int(state.get("target_paras", 0) or TARGET_NARRATION_PARAS)
+    if not article_url:
+        print("  [SCRIPT] No article_url in state - cannot rebuild script")
+        return {}
+
+    print(f"\n[SCRIPT] Rebuilding narration script from: {article_url}")
+    paragraphs = fetch_article_paragraphs(article_url)
+    if paragraphs:
+        paragraphs = _rate_paragraph_relevance(topic, paragraphs)
+    if not paragraphs:
+        print("  [HALT] Could not re-fetch article content - script rebuild aborted")
+        return {}
+
+    story_bible = _build_story_bible(topic, paragraphs)
+    narration = _build_narration_script(paragraphs, target_paras, bible=story_bible)
+    if narration:
+        narration = _rate_paragraph_relevance(topic, narration)
+        if not narration:
+            print("  [FILTER] All rebuilt narration off-topic, retrying...")
+            narration = _build_narration_script(paragraphs, target_paras, bible=story_bible)
+    narration, chapter_events = _insert_chapter_markers(narration)
+    anchor_events = _extract_anchor_events(narration)
+    establishing_map = {}
+    if story_bible:
+        narration, establishing_map = _inject_establishing_shots(
+            narration, bible=story_bible, anchor_events=anchor_events)
+    context = _build_episode_context(topic, paragraphs)
+    bible = _build_directors_bible(topic, narration)
+    _build_scene_board(narration, topic, episode_num)
+    _plan_durations(narration)
+
+    _shot_bible = dict(bible or {})
+    if story_bible and story_bible.get("characters"):
+        _shot_bible["characters"] = story_bible["characters"]
+    shots = _build_shot_list(narration, bible=_shot_bible, context=context,
+                             establishing_map=establishing_map)
+
+    character_sheets = _build_character_sheets(shots, narration, bible=story_bible)
+    brands = _extract_brands(topic, paragraphs, narration)
+    if brands:
+        print(f"\n  [BRAND] businesses detected: {', '.join(brands)}")
+        for _b, _ctx in brands.items():
+            _generate_brand_asset(_b, _ctx, random.randint(0, 99999))
+    brand_assets = _scan_brand_assets()
+    ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+    location_sheets = _build_location_sheets(
+        context, 42000 + episode_num * 7, ep_dir, brands=brands)
+    prop_assets = _build_prop_assets(
+        context, 43000 + episode_num * 7, ep_dir, brands=brands)
+
+    print(f"\n[SCRIPT] Rebuilt: {len(narration)} paras -> {len(shots)} shots")
+    return {
+        "shots": shots, "character_sheets": character_sheets,
+        "location_sheets": location_sheets, "prop_assets": prop_assets,
+        "brand_assets": brand_assets,
+        "chapter_events": chapter_events, "anchor_events": anchor_events,
+        "topic": topic, "article_url": article_url,
+        "target_paras": target_paras,
+    }
+
+
 def _resume_episode(state: dict) -> None:
     """Resume a partially-completed episode from saved state.
 
@@ -7754,6 +7954,48 @@ def _resume_episode(state: dict) -> None:
     print(f"  Stage: {stage} | Shots: {len(shots)}")
     print(f"  Paragraph target: {target_paras} (sticking with the job-start count)")
     print(f"{'='*60}\n")
+
+    # ---- Interactive resume options --------------------------------------
+    # Let the user decide what to rebuild on resume instead of silently only
+    # filling the gaps. SKIP_RESUME_MENU=1 restores the old gap-fill-only flow.
+    regen_tts = False
+    if not os.environ.get("SKIP_RESUME_MENU"):
+        print("  [RESUME] What would you like to rebuild? (enter for No):")
+        _regen_script = _yn("    Rebuild the narration SCRIPT from the article? [y/N]: ")
+        regen_tts = _yn("    Regenerate ALL TTS clips (re-speak every line)? [y/N]: ")
+        _regen_img = _yn("    Regenerate ALL images (overwrite)? [y/N]: ")
+        _swap_model = _yn("    Swap the image-gen model (backend/model)? [y/N]: ")
+        if _regen_script:
+            rebuilt = _rebuild_script_for_resume(state)
+            if rebuilt:
+                shots = rebuilt["shots"]
+                character_sheets = rebuilt["character_sheets"]
+                location_sheets = rebuilt["location_sheets"]
+                prop_assets = rebuilt["prop_assets"]
+                chapter_events = rebuilt["chapter_events"]
+                anchor_events = rebuilt["anchor_events"]
+                topic = rebuilt["topic"]
+                article_url = rebuilt["article_url"]
+                target_paras = rebuilt["target_paras"]
+                # New narration means every line + every image must be re-done.
+                regen_tts = True
+                os.environ["REGEN_IMAGES"] = "1"
+                # Titles/description/tags derive from the script - reset them.
+                titles, description, tags = [], "", []
+                print("  [RESUME] Script rebuilt -> forcing image + TTS regeneration")
+            else:
+                print("  [RESUME] Script rebuild failed - continuing with existing script")
+        if _swap_model:
+            _ask_image_model_swap()
+            os.environ["REGEN_IMAGES"] = "1"
+            print("  [RESUME] Model changed -> forcing image regeneration")
+        if _regen_img:
+            os.environ["REGEN_IMAGES"] = "1"
+        if _regen_script or regen_tts or _regen_img or _swap_model:
+            print("  [RESUME] Applying regeneration options...\n")
+    else:
+        print("  [RESUME] SKIP_RESUME_MENU=1 - gap-fill only\n")
+    # ---- End interactive resume options ----------------------------------
 
     # Resume keeps the exact style the episode was generated with (unless the
     # user overrides with STYLE=<profile>) OR picks a new style interactively.
@@ -7879,8 +8121,15 @@ def _resume_episode(state: dict) -> None:
     else:
         print(f"  [RESUME] All {len(shots)} images present")
 
-    # 2. TTS: regenerate only the missing narration clips
-    missing_tts = [s for s in shots if not (s.get("tts_path") and os.path.isfile(s["tts_path"]))]
+    # 2. TTS: regenerate only the missing narration clips (or ALL of them when
+    #    regen_tts). Also strip any leaked stage directions from the narration
+    #    text before speaking it, so a bracketed direction can never be read.
+    if regen_tts:
+        missing_tts = [s for s in shots
+                       if not s.get("is_chapter") and (s.get("narration") or "").strip()]
+        print(f"\n[TTS] REGEN - re-speaking ALL {len(missing_tts)} narration clips")
+    else:
+        missing_tts = [s for s in shots if not (s.get("tts_path") and os.path.isfile(s["tts_path"]))]
     if missing_tts:
         print(f"\n[TTS] Generating {len(missing_tts)} missing narration clips...")
         ep_dir = TTS_TEMP / f"ep_{episode_num}"
@@ -7889,12 +8138,13 @@ def _resume_episode(state: dict) -> None:
             nidx = shot.get("narration_idx", idx)
             out = str(ep_dir / f"narration_{nidx:02d}.wav")
             shot["tts_path"] = out
-            ok = _pocket_tts_generate(shot["narration"], out)
+            speak = _strip_stage_directions(shot.get("narration") or "")
+            ok = _pocket_tts_generate(speak, out)
             if ok:
                 _normalize_voice_0db(out)
-                print(f"  [TTS] {_get_audio_duration(out):.1f}s - {shot['narration'][:50]}...")
+                print(f"  [TTS] {_get_audio_duration(out):.1f}s - {speak[:50]}...")
             else:
-                print(f"  [TTS] FAILED - {shot['narration'][:50]}...")
+                print(f"  [TTS] FAILED - {speak[:50]}...")
             time.sleep(0.5)
         _save("tts")
     else:

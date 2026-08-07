@@ -2,7 +2,25 @@
 
 All notable changes to Split Node.
 
-## [1.30.0] - 2026-08-07
+## [1.31.0] - 2026-08-07
+
+### Interactive resume (regenerate anything, tweak as you go)
+
+- **Resume now asks what to rebuild** instead of silently only filling gaps: rebuild the narration **SCRIPT** from the article, regenerate **ALL TTS** clips, regenerate **ALL images**, and/or **swap the image-gen model**. Each is a separate `[y/N]` prompt.
+- **"Rebuild script"** re-fetches the article and re-runs the full pipeline (story bible → narration → relevance rating → chapters → anchors → establishing shots → scene board → shot list → character sheets → brand assets), then forces image + TTS regeneration. A new script resets the derived titles / description / tags so they regenerate too.
+- **"Swap image-gen model"** interactively picks a backend (`local` / `runpod` / `fal` / `codex`) and a model, writing `IMAGE_BACKEND` / `IMAGE_MODEL`, and forces image regen so the new look applies.
+- `SKIP_RESUME_MENU=1` restores the old gap-fill-only resume flow.
+
+### No more bracketed stage directions spoken aloud
+
+- New **`_strip_stage_directions()`** strips parenthetical/bracketed LLM stage directions (e.g. `(Waitshifting context slightly to the US office floor...)`) from narration **before** TTS — in both fresh runs and resumed TTS regeneration. Real content parentheticals like `(KKR)` / `(OTC)` / `(Falcon, Helix, Pink)` are kept. A lowercase lead left after a leading bracket is re-capitalised.
+
+### Locations now come from the article (no invented cities)
+
+- Episode-context and story-bible extraction prompts tightened: places must be **EXPLICITLY named in the article** (empty list if none, "NEVER invent a city, street or venue"). This stops hallucinations like "Queen Square, Sydney" / "Goulburn, NSW" / "Boston, MA" when the article only states a region (e.g. "the United States").
+- **Establishing-shot locations capped to the 4 earliest-mentioned places** so an episode stops fragmenting across too many locations (the dropped places are logged).
+
+
 
 ### Establishing shots (new place/person gets a proper intro)
 
