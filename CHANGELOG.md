@@ -2,6 +2,13 @@
 
 All notable changes to Split Node.
 
+## [1.33.0] - 2026-08-07
+
+### TTS finishes before image generation (no more GPU contention)
+
+- The fresh-run pipeline used to run TTS and image generation **concurrently** - the TTS worker kept going in the background while `_generate_all_shots` started hammering ComfyUI/Krea. Both hit the same GPU (PocketTTS and image gen), causing VRAM contention.
+- The TTS worker still **starts early** (right after the narration is written, so the clips generate while the bible / scene board / shot list / character sheets / brand + location + prop assets are being built), but the pipeline now **joins the worker and finalises every narration clip BEFORE `_generate_all_shots`** runs. Image generation only starts once all TTS (including per-character clone voices) is finished and the GPU is free.
+
 ## [1.32.0] - 2026-08-07
 
 ### Killed the "Goulburn / Queen Square, Sydney" leak at the source

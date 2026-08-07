@@ -8694,24 +8694,27 @@ def main():
                        location_sheets=location_sheets, prop_assets=prop_assets,
                        target_paras=target_paras)
 
+    # 4z. Wait for ALL TTS to finish BEFORE generating images. TTS (PocketTTS)
+    #     and image gen (ComfyUI/Krea) both hammer the GPU - running them
+    #     concurrently causes VRAM contention. Finish every narration clip
+    #     first, then free the GPU for the image pass.
+    print("\n[TTS] Waiting for ALL narration clips to finish before image generation...")
+    tts_thread.join(timeout=1800)
+    _finalize_tts(shots, tts_results, episode_num)
+    _save_resume_state("tts", episode_num, article_url, topic, shots,
+                       character_sheets, chapter_events=chapter_events,
+                       anchor_events=anchor_events,
+                       location_sheets=location_sheets, prop_assets=prop_assets,
+                       target_paras=target_paras)
+
     # 5. Generate images (Krea 2 Turbo local, character sheet prepended,
-    #    angle-matched view, face-lock portraits) - runs while the TTS worker
-    #    keeps generating in the background.
+    #    angle-matched view, face-lock portraits).
     shots = _generate_all_shots(shots, character_sheets, episode_num=episode_num,
                                 context=context,
                                 location_sheets=location_sheets,
                                 prop_assets=prop_assets,
                                 brand_assets=brand_assets)
     _save_resume_state("images", episode_num, article_url, topic, shots,
-                       character_sheets, chapter_events=chapter_events,
-                       anchor_events=anchor_events,
-                       location_sheets=location_sheets, prop_assets=prop_assets,
-                       target_paras=target_paras)
-
-    # 6. Join the TTS worker: all narration clips should be ready now
-    tts_thread.join(timeout=1800)
-    _finalize_tts(shots, tts_results, episode_num)
-    _save_resume_state("tts", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
                        anchor_events=anchor_events,
                        location_sheets=location_sheets, prop_assets=prop_assets,
