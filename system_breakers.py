@@ -2187,6 +2187,97 @@ def _llm_chapter_titles(narration_paras: list[str], breaks: list[int]) -> list[s
     return [title_map.get(b, "") for b in breaks]
 
 
+def _inject_establishing_shots(narration_paras: list[str],
+                               bible: Optional[dict] = None,
+                               anchor_events: Optional[list] = None) -> tuple[list[str], dict]:
+    """Insert a short ESTABLISHING narration line immediately BEFORE the first
+    paragraph that mentions each unique LOCATION and each unique CHARACTER.
+
+    The establishing line becomes its own shot (a wide/full establishing frame
+    rendered by the shot-list builder), so when a new place or person is first
+    introduced the camera shutter fires and the video INSTANTLY cuts to a proper
+    establishing shot of them - then into the scene. Returns (new_narration,
+    establishing_map) where establishing_map = {narration_index: {"kind":
+    "location"|"character", "name": ...}}.
+    """
+    if not narration_paras:
+        return narration_paras, {}
+
+    locations: list[str] = []
+    if bible:
+        for p in (bible.get("key_places") or []):
+            if p and p not in locations:
+                locations.append(str(p))
+    if anchor_events:
+        for e in anchor_events:
+            t = e.get("text", "")
+            if t and t not in locations:
+                locations.append(str(t))
+
+    characters: list[str] = []
+    if bible:
+        for c in (bible.get("characters") or []):
+            if isinstance(c, dict) and c.get("name"):
+                nm = str(c["name"]).strip()
+                if nm and nm.upper() != "NONE" and nm not in characters:
+                    characters.append(nm)
+
+    # Map each target to the first paragraph index that mentions it (substring).
+    def _first_mention(sub: str, paras: list[str]) -> int:
+        low = re.sub(r"\s+", " ", sub.lower())
+        toks = [t for t in low.split() if len(t) > 3]
+        for i, p in enumerate(paras):
+            pl = re.sub(r"\s+", " ", p.lower())
+            if toks and any(t in pl for t in toks):
+                return i
+            if not toks and low in pl:
+                return i
+        return -1
+
+    inserts: list[tuple[int, str, dict]] = []  # (position, line, meta)
+    for loc in locations:
+        idx = _first_mention(loc, narration_paras)
+        if idx < 0:
+            continue
+        line = f"{loc}."
+        inserts.append((idx, line, {"kind": "location", "name": loc}))
+    for ch in characters:
+        idx = _first_mention(ch, narration_paras)
+        if idx < 0:
+            # fall back to first shot that names a single-word token
+            tok = re.search(r"[A-Za-z]{4,}", ch)
+            if tok:
+                idx = _first_mention(tok.group(0), narration_paras)
+        if idx < 0:
+            continue
+        line = f"Meet {ch}."
+        inserts.append((idx, line, {"kind": "character", "name": ch}))
+
+    if not inserts:
+        return narration_paras, {}
+
+    # Insert from highest index to lowest so earlier positions stay valid.
+    inserts.sort(key=lambda x: x[0], reverse=True)
+    out = list(narration_paras)
+    establishing_map: dict[int, dict] = {}
+    for pos, line, meta in inserts:
+        out.insert(pos, line)
+        # the inserted line now sits at pos; record the (possibly shifted) index
+        establishing_map[pos] = meta
+    # Fix indices that shifted when a later insert landed before them.
+    # Simplest: re-derive by matching the inserted lines.
+    final_map: dict[int, dict] = {}
+    inserted_lines = {line for _, line, _ in inserts}
+    for i, p in enumerate(out):
+        if p in inserted_lines:
+            meta = next(m for _, l, m in inserts if l == p)
+            final_map[i] = meta
+    print(f"  [ESTABLISH] injected {len(final_map)} establishing shots "
+          f"({sum(1 for m in final_map.values() if m['kind']=='location')} loc, "
+          f"{sum(1 for m in final_map.values() if m['kind']=='character')} char) at first mention")
+    return out, final_map
+
+
 def _insert_chapter_markers(narration_paras: list[str]) -> tuple[list[str], list[dict]]:
     """Split the narration into duration-aligned chapters.
 
@@ -2454,7 +2545,7 @@ def _build_story_bible(topic: str, paragraphs: list[str]) -> dict:
             '"surface_problem": "the mechanical problem - the hack, scheme, loophole", '
             '"deeper_problem": "the emotional struggle underneath (greed, desperation, revenge, injustice, the need to prove something)", '
             '"protagonist": {"name": "the main person", "role": "their role", "transformation_start": "who they are before", "transformation_end": "who they become / the price paid"}, '
-            '"characters": [{"name": "exact name from article", "role": "their role in the story", "gender": "male|female", "age": "young|mid30s|mid40s|old", "relation": "how they relate to the protagonist"}], '
+            '"characters": [{"name": "exact name from article", "role": "their role in the story", "gender": "male|female", "age": "their best-guess age written descriptively from the article: e.g. early 20s, mid 40s, late 60s, or a specific 23-year-old if the article states it. INFER from context (a suspect described as young, a founder with 30 years experience, a retiree, a student). Never leave blank - always give a concrete age descriptor even if you have to estimate", "relation": "how they relate to the protagonist"}], '
             '"hero_journey": {"status_quo": "...", "call": "...", "assistance": "...", "departure": "...", "trials": "...", "approach": "...", "crisis": "...", "reward": "...", "return": "...", "new_life": "..."}, '
             '"key_numbers": ["exact figures from the article"], '
             '"key_places": ["real places"], '
@@ -2756,7 +2847,8 @@ def _parse_shot_response(text: str) -> dict:
 
 
 def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
-                     context: Optional[dict] = None) -> list[dict]:
+                     context: Optional[dict] = None,
+                     establishing_map: Optional[dict] = None) -> list[dict]:
     """Stage 2: for each narration paragraph, generate a shot entry.
 
     Injects the episode context (era/places/environments/props) and the
@@ -2765,7 +2857,13 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
     Chapter paragraphs get a direct black-card shot (no LLM call, no image
     generation - the render pass shows a black placeholder where the glowing
     chapter title is burned in pass 2).
+
+    establishing_map: {narration_idx: {kind: 'location'|'character', name}}
+    from _inject_establishing_shots(). Those indices render as WIDE establishing
+    frames (EWS for a location, WS/full for a character) so a new place/person
+    gets a proper establishing shot on first mention.
     """
+    establishing_map = establishing_map or {}
     print("\n[LLM] Stage 2: building shot list from narration...")
     context = context or {}
     hero_set = set(bible.get("hero_paras", []) or []) if bible else set()
@@ -2795,6 +2893,35 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
     for i, para in enumerate(narration_paras):
         if len(shots) >= 120:
             break
+        # ESTABLISHING SHOT: injected line -> wide/full establishing frame.
+        if i in establishing_map:
+            em = establishing_map[i]
+            is_loc = em.get("kind") == "location"
+            name = em.get("name", "")
+            if is_loc:
+                scene = ("An establishing extreme wide shot of the location, "
+                         "the whole place in frame, no people, cinematic atmosphere, "
+                         f"highly detailed, {RENDER_STYLE}")
+            else:
+                scene = ("An establishing wide full-body shot of the character, "
+                         "whole person in frame from head to toe, "
+                         f"highly detailed, {RENDER_STYLE}")
+            shots.append({
+                "narration": para,
+                "narration_idx": i,
+                "shot_type": "EWS" if is_loc else "WS",  # establishing wide/full
+                "angle": "eye-level",
+                "character": "NONE" if is_loc else name,
+                "character_role": "establishing" if not is_loc else "",
+                "scene": scene,
+                "sfx": "NONE",
+                "tone": "neutral",
+                "is_establishing": True,
+                "establishing_kind": em.get("kind"),
+                "establishing_name": name,
+            })
+            print(f"  [LLM] Shot {len(shots)}: [ESTABLISHING {em.get('kind')}] {name}")
+            continue
         m_chap = CHAPTER_RE.match(para)
         if m_chap:
             shots.append({
@@ -3289,36 +3416,104 @@ CHARACTER_ROSTER = [
 ]
 
 
+def _age_to_number(age: str) -> int:
+    """Turn a descriptive age ('' , 'early 20s', 'mid 40s', '23-year-old',
+    'late 60s', 'young', 'retiree') into a numeric midpoint. Returns -1 if
+    nothing parseable (unknown)."""
+    if not age:
+        return -1
+    a = str(age).lower().strip()
+    # DECADE BANDS FIRST (must run before the bare-number match, otherwise
+    # "early 20s" matches the "20" and never reaches the band logic).
+    m = re.search(r"(early|mid|late|mid-)?\s*(\d{2})s", a)
+    if m:
+        band, decade = m.group(1), int(m.group(2))
+        if band == "early":
+            return decade + 2
+        if band == "late":
+            return decade + 8
+        return decade + 5  # mid / bare "40s"
+    # specific number: "23-year-old", "aged 31", "23"
+    m = re.search(r"(\d{1,2})\s*-?\s*year", a) or re.search(r"(\d{1,2})", a)
+    if m:
+        n = int(m.group(1))
+        if 10 <= n <= 100:
+            return n
+    # words
+    if any(k in a for k in ("child", "kid", "teen", "student", "teenage")):
+        return 18
+    if any(k in a for k in ("young", "twenties", "early adult", "mid-20s")):
+        return 25
+    if any(k in a for k in ("mid-30s", "thirties", "30s")):
+        return 35
+    if any(k in a for k in ("forties", "40s", "middle-aged")):
+        return 45
+    if any(k in a for k in ("fifties", "50s")):
+        return 55
+    if any(k in a for k in ("old", "elder", "senior", "retiree", "60s", "70s", "80s", "grandmother", "grandfather")):
+        return 70
+    return -1
+
+
 def _assign_archetype(name: str, role: str = "", scene: str = "",
                       gender: str = "", age: str = "") -> dict:
     """Map a story character (name + role) to the closest fixed archetype.
 
-    Role keywords win; gender/age words in the role/scene drive the generic
-    everyman fallback. When explicit gender/age come from the STORY BIBLE
-    (more reliable than role keywords), they override the keyword sniffing so
-    e.g. a "23-year-old man" renders young, never as an elderly archetype.
+    Order of precedence:
+      1. ROLE-KEYWORD match (e.g. 'hacker', 'detective') - the specific
+         profession archetype wins, UNLESS the bible's age contradicts it
+         wildly (a 'young suspect' must never render as an elderly archetype).
+      2. GENDER + closest numeric AGE - parse the bible's descriptive age to
+         a number and pick the roster entry of the matching gender whose age
+         band is nearest. This fixes the age mismatch: a 23-year-old man and a
+         retired 70-year-old now get DIFFERENT archetypes instead of both
+         collapsing into the mid-40s default.
+      3. Generic fallback (mid40s-male / mid40s-female).
     Returns a CHARACTER_ROSTER dict (never None).
     """
     rl = f"{role} {scene}".lower()
-    for arch in CHARACTER_ROSTER:
-        if any(h in rl for h in arch["hints"]):
-            # a role-keyword match wins UNLESS the bible gives explicit age
-            # that contradicts a wildly-off archetype (e.g. young suspect vs
-            # elderly). Respect the bible's age band when present.
-            if age and "old" in str(age).lower() and "old" not in arch.get("age", ""):
-                break
-            if age and "young" in str(age).lower() and "young" not in arch.get("age", ""):
-                break
-            return arch
+    target_age = _age_to_number(age)
     female = bool(re.search(r"\b(female|woman|women|girl|she|her|madam|lady|grandmother)\b", rl)) \
         or (gender and str(gender).lower().startswith("f"))
-    old = bool(re.search(r"\b(old|elderly|60s|70s|80s|senior|retiree|grandmother|grandfather)\b", rl)) \
-        or (age and any(k in str(age).lower() for k in ("old", "elder", "60", "70", "80", "senior", "retiree")))
-    young = bool(re.search(r"\b(young|teen|student|20s|twenties|intern)\b", rl)) \
-        or (age and any(k in str(age).lower() for k in ("young", "teen", "20s", "student")))
+
+    def _age_ok(arch_age: str) -> bool:
+        """True if the archetype's age is consistent with the bible's age.
+        When we have a numeric target, require it within a loose band; otherwise
+        accept any non-contradictory match."""
+        if target_age < 0:
+            return True
+        a = _age_to_number(arch_age)
+        if a < 0:
+            return True
+        # young (<35) vs old (>55) hard veto so a young suspect never gets an
+        # elderly archetype (and vice-versa) even if a role keyword matched.
+        if target_age < 35 and a > 55:
+            return False
+        if target_age > 55 and a < 35:
+            return False
+        return True
+
+    # 1. Role-keyword match (respecting age veto)
+    for arch in CHARACTER_ROSTER:
+        if any(h in rl for h in arch["hints"]):
+            if not _age_ok(arch.get("age", "")):
+                continue
+            return arch
+
+    # 2. Gender + closest numeric age
+    candidates = [arch for arch in CHARACTER_ROSTER
+                  if (arch.get("gender", "") == "female") == female]
+    if target_age >= 0 and candidates:
+        best = min(candidates,
+                   key=lambda a: abs(_age_to_number(a.get("age", "")) - target_age))
+        # only use the age-closest match if it's meaningfully closer than the
+        # generic everyman (mid40s) fallback - otherwise stick with the generic
+        return best
+
+    # 3. Generic fallback
     if female:
-        return _roster_by_id("old-female" if old else "young-female" if young else "mid40s-female")
-    return _roster_by_id("old-male" if old else "young-male" if young else "mid40s-male")
+        return _roster_by_id("mid40s-female")
+    return _roster_by_id("mid40s-male")
 
 
 def _roster_by_id(arch_id: str) -> dict:
@@ -4846,7 +5041,7 @@ def _build_location_sheets(context: dict, seed: int, ep_dir: Path,
     """Location sheets for every unique place/environment in the episode world.
     A location that IS a business building (e.g. 'OpenAI headquarters') gets
     that business's logo baked into its sheet as an extra ref."""
-    if os.environ.get("LOCATION_SHEETS", "1") == "0":
+    if os.environ.get("LOCATION_SHEETS", "0") == "0":  # default OFF (Joe 2026-08-07): no location sheets, only establishing shots
         return {}
     names: list[str] = []
     for k in ("places", "environments"):
@@ -4876,7 +5071,7 @@ def _build_prop_assets(context: dict, seed: int, ep_dir: Path,
     """Front+back prop assets for the episode's props (T2I or real ref).
     Props that name a known brand (AI org or extracted business) use the
     brand's cached logo as the real reference."""
-    if os.environ.get("PROP_SHEETS", "1") == "0":
+    if os.environ.get("PROP_SHEETS", "0") == "0":  # default OFF (Joe 2026-08-07): no prop assets
         return {}
     props = [str(v).strip() for v in (context.get("props", []) or []) if str(v).strip()]
     if not props:
@@ -6161,6 +6356,23 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
         for pos, (shot, start) in enumerate(zip(valid, clip_starts)):
             if shot.get("is_chapter") or start < 2.0:
                 continue
+            # Establishing shot (new place/person introduced) always gets a
+            # camera shutter so the video cuts to the establishing frame.
+            if shot.get("is_establishing"):
+                shutter = SFX_DIR / TITLE_SFX["shutter"]
+                if shutter.is_file():
+                    placements.append((str(shutter), start + 0.1, None))
+                    print(f"  [AUDIO] Camera shutter @{start + 0.1:.1f}s "
+                          f"(establishing {shot.get('establishing_kind')})")
+                if shot.get("sfx", "NONE") == "NONE":
+                    wkey = _pick_sfx("sweep-")
+                    if wkey:
+                        wm = SFX_LIBRARY[wkey]
+                        placements.append((str(_sfx_path(wkey)),
+                                           start + 0.15,
+                                           wm.get("hit", 0.5) + 1.0))
+                        print(f"  [AUDIO] Sweep '{wkey}' @{start + 0.15:.1f}s")
+                continue
             ch = shot.get("character", "NONE")
             nidx = shot.get("narration_idx", pos)
             is_new_char = False
@@ -6436,6 +6648,10 @@ def _build_resolved_title_events(chapter_events: list[dict],
     for ev in chapter_events:
         pi = ev["para_idx"]
         fallback = (clip_starts[pi] + 0.4) if pi < len(clip_starts) else 0.0
+        # Chapter card END = when the TTS finishes reading the chapter title
+        # (whisper time of the last spoken word of "Chapter N - Title"), NOT the
+        # next clip start. The card must only stay up as long as the narrator
+        # reads it (Joe 2026-08-07: cards were staying on too long).
         end = (clip_starts[pi + 1] if pi + 1 < len(clip_starts) else
                (clip_starts[pi] + 5.0)) if pi < len(clip_starts) else fallback + 4.0
         t = None
@@ -6450,6 +6666,16 @@ def _build_resolved_title_events(chapter_events: list[dict],
                 if nxt in num_words.get(ev["chapter"], []):
                     t = w["start"]
                     break
+            # Find the end of the spoken title: the last word spoken within the
+            # chapter card's clip (between this card's start and the next clip's
+            # start) whose timestamp is after the "chapter N" start.
+            if t is not None:
+                clip_end = end
+                title_words = [w for w in words
+                               if w["start"] >= t and w["start"] < clip_end]
+                if title_words:
+                    # include the title's full spoken duration + a short hold
+                    end = min(title_words[-1]["end"] + 0.6, clip_end)
         resolved.append({
             "kind": "chapter", "start": round(t or fallback, 3), "end": round(end, 3),
             "chapter_num": ev["chapter"], "title": ev["title"],
@@ -6621,6 +6847,11 @@ def _camera_shutter_paras(shots: list[dict], title_events: Optional[list] = None
     prev_char = None
     for pos, shot in enumerate(shots):
         if shot.get("is_chapter"):
+            continue
+        # Establishing shots (new place/person introduced) always get the
+        # shutter + instant cut to the establishing frame.
+        if shot.get("is_establishing"):
+            out.add(shot.get("narration_idx", pos))
             continue
         ch = shot.get("character", "NONE")
         nidx = shot.get("narration_idx", pos)
@@ -7968,6 +8199,15 @@ def main():
     # 3d. Location/timeline anchors -> red/green bottom-left typewriter titles
     anchor_events = _extract_anchor_events(narration)
 
+    # 3d1. Establishing shots: inject a wide/full establishing frame shot before
+    #      the first mention of each unique location and character, so a new
+    #      place/person gets a proper establishing shot (with shutter cut) on
+    #      first introduction instead of jumping straight into the scene.
+    establishing_map = {}
+    if story_bible:
+        narration, establishing_map = _inject_establishing_shots(
+            narration, bible=story_bible, anchor_events=anchor_events)
+
     # 3e. START TTS IN PARALLEL: queue ALL narration into PocketTTS in a
     # background thread, while the main thread builds the bible, scene board
     # and images. TTS and image gen run at the same time.
@@ -8010,7 +8250,8 @@ def main():
     _shot_bible = dict(bible or {})
     if story_bible and story_bible.get("characters"):
         _shot_bible["characters"] = story_bible["characters"]
-    shots = _build_shot_list(narration, bible=_shot_bible, context=context)
+    shots = _build_shot_list(narration, bible=_shot_bible, context=context,
+                             establishing_map=establishing_map)
 
     # 4a. Easter egg: ask whether to hide one, pick the egg (duck pope built-in
     #     or add-new), and inject it into EXACTLY one shot of the episode.

@@ -59,6 +59,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: ChapCore,Bahnschrift,{chap_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,2,0,1,3,0,5,60,60,60,1
 Style: ChapGlow,Bahnschrift,{chap_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,2,0,1,0,0,5,60,60,60,1
 Style: ChapKicker,Bahnschrift,{kicker_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,8,0,1,2,0,5,60,60,60,1
+Style: ChapBg,Arial,10,&H00000000,&H00000000,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
 Style: TypeLoc,Consolas,{type_size},&H000000FF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
 Style: TypePerson,Consolas,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
 Style: TypeGhost,Consolas,{type_size},&H0000FF00,&H0000FF00,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
@@ -135,6 +136,14 @@ def _chapter_events(ev, W, H, fps) -> list[str]:
     lines = []
 
     title = ev["title"]
+
+    # ---- FULL-FRAME BLACK BACKGROUND (layer 0, under everything) ----
+    # Guarantees the chapter card never bleeds over the next scene - the card
+    # always sits on a solid black backdrop for exactly its on-screen duration.
+    bg = (f"{{\\an7\\pos(0,0)\\p1\\bord(0)\\shad(0)\\1c&H000000&\\alpha&H00&}}"
+          f"m 0 0 l {W} 0 l {W} {H} l 0 {H} l 0 0"
+          f"{{\\p0}}")
+    lines.append(_dialog(ev["start"], ev["end"], "ChapBg", bg, layer=0))
 
     # ---- KICKER "CHAPTER N" at 0.30H (big, Bahnschrift, glow-pop) ----
     kcx, kcy = W // 2, int(H * 0.30)

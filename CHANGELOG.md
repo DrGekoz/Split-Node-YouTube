@@ -2,6 +2,31 @@
 
 All notable changes to Split Node.
 
+## [1.30.0] - 2026-08-07
+
+### Establishing shots (new place/person gets a proper intro)
+
+- **`_inject_establishing_shots()`** injects a dedicated establishing narration line immediately BEFORE the first paragraph that mentions each unique **location** and each unique **character** (from the story bible's `key_places` + character roster). Each becomes its own shot rendered as a **wide/full establishing frame**: `EWS` (extreme wide) for a location, `WS` (full-body) for a character.
+- **Camera shutter + instant cut** — every establishing shot triggers a camera-shutter SFX + whoosh/sweep in the audio mix AND the 2-black-frames shutter cut in the render, so when a new place or person is first introduced the video cuts straight to a proper establishing shot of them instead of jumping into the scene. Both `_camera_shutter_paras` and the audio-mix shutter logic were updated.
+- Establishing character shots reuse the bible roster names (pass the cast-lock) and use the character's identity panels, so the intro shot shows the right person.
+
+### Age / gender now fed from the article via the story bible
+
+- **Bible schema upgraded**: the LLM now writes a descriptive best-guess **age** (e.g. "early 20s", "mid 40s", "late 60s", or a specific "23-year-old") inferred from the article, instead of the old 4 coarse buckets (`young|mid30s|mid40s|old`).
+- **New `_age_to_number()`** parses a descriptive age into a numeric midpoint (specific year, decade bands like "early/mid/late 20s", and word fallbacks).
+- **`_assign_archetype()` reworked** — precedence: role-keyword match (with an age-veto so a young suspect never gets an elderly archetype), then gender + **closest numeric age** among roster archetypes, then generic everyman. A "23-year-old man" and a "retired 70-year-old" now get DIFFERENT archetypes instead of both collapsing to mid-40s.
+
+### Props & location asset sheets OFF by default
+
+- `LOCATION_SHEETS` and `PROP_SHEETS` now **default to 0** (Joe 2026-08-07). The pipeline no longer builds 6-grid location sheets or front/back prop assets — it generates only the **6 individual non-merged character identity panels** per character, plus the new establishing shots. (Set the env var to `1` to re-enable.)
+
+### Chapter cards (black background + match the spoken title)
+
+- **Full-frame black background** behind each chapter card (a new `ChapBg` layer-0 rectangle) so the card never bleeds over the next scene.
+- **Card duration = how long the TTS reads the chapter title** — `_build_resolved_title_events` now ends the card at the whisper time of the last spoken word of "Chapter N - Title" (plus a short hold), instead of holding until the next clip's start. Cards no longer stay on too long. Font stays **Bahnschrift** (kicker + title).
+
+
+
 ## [1.29.0] - 2026-08-07
 
 ### Story Bible hardening (no empty bible, no leaked names)
