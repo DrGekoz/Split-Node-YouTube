@@ -2,6 +2,20 @@
 
 All notable changes to Split Node.
 
+## [1.29.0] - 2026-08-07
+
+### Story Bible hardening (no empty bible, no leaked names)
+
+- **Story bible now retries up to 3×** on an empty/incomplete result. A transient LM Studio timeout used to yield an empty bible (silently disabling the visual-hook + character-roster lock for the whole episode). Now `_build_story_bible()` retries fresh until it gets at least a character roster or a visual hook.
+- **Deterministic roster enforcement on the shot list (`[CAST-LOCK]`).** Even when the LLM hallucinates or leaks a name from a past episode, the shot list is now hard-filtered so only characters in the story bible's REAL roster (or `NONE`) survive. Invented/leaked names are dropped — belt-and-suspenders that kills the cross-episode 'Stefan Mandel' / 'Richard Lustig' leak for good.
+- **Character sheet archetypes are now driven by the bible's gender/age.** `_assign_archetype()` accepts explicit gender/age from the story bible (more reliable than role-keyword sniffing) so e.g. a "23-year-old man" renders young, never as an elderly archetype. The bible's age band also overrides a contradictory role-keyword match.
+- **Multi-person character sheets split into individual sheets.** A shot field like 'Name A, Name B' now produces a separate archetype sheet per person (via `_bible_meta_for()`), instead of one combined sheet.
+- **Generic shot-list example.** The `SHOT_SYSTEM_PROMPT` no longer hardcodes 'Stefan Mandel' as the example character — it uses a generic placeholder so the LLM never pattern-matches a leaked name into a real shot.
+
+### Thumbnail text fix
+
+- **No more 'FERN' baked into thumbnails.** The thumbnail prompt no longer ends with 'FERN documentary channel style' (which the image model rendered as literal on-image text). It now explicitly forbids the word FERN, channel names, logos, brands and watermarks — only 'SPLIT NODE' (top-left) and the headline (lower third) may appear as text.
+
 ## [1.28.0] - 2026-08-07
 
 ### Story Bible before script (FERN + Isaac scripting framework)

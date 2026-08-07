@@ -507,7 +507,7 @@ split-node/
 - **Trend scoring toolkit** — SerpAPI demand + YouTube competition analysis to pick topics with actual demand (cached 24h)
 
 ### Script Generation
-- **Story bible (NEW) — built from the article BEFORE the script** (FERN + Isaac framework): locks the visual hook (the thing the viewer must SEE), the deeper question the episode answers, surface + deeper problem, the protagonist's transformation arc, hero's-journey beats, and the **REAL character roster** extracted from the article. The narration script is then written to **follow this bible**, and the shot list may only use those exact character names — so every episode is written fresh from its own story (no template reuse, no leaked names from a previous episode)
+- **Story bible (NEW) — built from the article BEFORE the script** (FERN + Isaac framework): locks the visual hook (the thing the viewer must SEE), the deeper question the episode answers, surface + deeper problem, the protagonist's transformation arc, hero's-journey beats, and the **REAL character roster** extracted from the article. The narration script is then written to **follow this bible**, and the shot list may only use those exact character names — so every episode is written fresh from its own story (no template reuse, no leaked names from a previous episode). The bible **retries up to 3×** on an empty/incomplete result so a transient LM timeout can never silently disable the roster lock
 - **Director's bible** — before any image is made: deeper problem, transformation arc, chapter moods, hero paragraphs for ECU magnification
 - **Episode world** — works for any topic / environment / location
 - **Scene board** — one storyboard card per narration beat, saved to the episode folder for human review
@@ -519,7 +519,8 @@ split-node/
 - **Style test frame** — a Krea 2 test frame is generated and human-reviewed before the run commits
 
 ### Cast & Likeness
-- **20 metahuman archetypes** with exact clothing prompts; role / gender / age matching with everyman fallback
+- **20 metahuman archetypes** with exact clothing prompts; role / gender / age matching with everyman fallback. **Bible-driven age/gender** now overrides role-keyword sniffing (so a "23-year-old man" renders young, never elderly), and multi-person shots split into one sheet per character
+- **Deterministic `[CAST-LOCK]`** — after the LLM writes the shot list, every character field is hard-filtered so only the story bible's REAL roster (or `NONE`) survives; any hallucinated or cross-episode-leaked name is dropped, killing the 'Stefan Mandel' style contamination for good
 - **Real-photo reference search** (SerpAPI + Openverse) with local vision audit (person + text/logo/watermark checks) and **image-decode validation** — cached refs and downloads that turn out to be HTML redirects/error pages are discarded and re-fetched, so a bad ref can't crash the face panel. The audit **only rejects on an explicit NO** (an uncertain/`?` vision response is accepted best-effort so a real ref isn't thrown away), known-bad CDNs (Instagram widget, TikTok API, gstatic/YouTube thumbs) are skipped before download, candidate count is capped (`REALREF_MAX_CANDIDATES`, default 12), and a "no ref found" result is cached so the search isn't re-burned every run
 - **Six individual 1280x1280 identity panels** per character (face, face-side, face-back, body-front, body-side, body-back) — no grid merge
 - **Anti-duplicate figure fix** — character panels and single-character shots pass a `NO_DUPLICATE_NEGATIVE` prompt (bans "two people, duplicate, clone, mirror image, split body...") on top of `grounding_px=768`, so the side/back views never render two bodies. Krea2 takes up to **8 identity refs** at once for multi-person shots
@@ -558,7 +559,7 @@ split-node/
 - **Title generation** — 3 clickbait titles scored against Google Trends + YouTube competition; each starts with `#XXX -` (episode number), under 70 chars, curiosity-gap driven
 - **Description generation** — the LLM writes a full SEO description, then the chapter timestamps are appended; the Discord invite pitch is stripped for the in-app announcement
 - **Tag generation** — 12 LLM-generated topic tags merged with the channel's persistent base tags
-- **Thumbnail generation** — a clickbait headline + "SPLIT NODE" branding rendered by your chosen provider (default fal.ai GPT Image 2 for crisp text; local ComfyUI or RunPod selectable). The pipeline **asks which thumbnail provider** at startup
+- **Thumbnail generation** — a clickbait headline + "SPLIT NODE" branding rendered by your chosen provider (default fal.ai GPT Image 2 for crisp text; local ComfyUI or RunPod selectable). The pipeline **asks which thumbnail provider** at startup, and the prompt now explicitly forbids rendering stray channel names/logos/watermarks (so 'FERN' never gets baked into the image)
 - **Upload** — native scheduling, per-channel credentials, AI-generated content disclaimer, then a Discord announcement (multi-server/multi-channel)
 
 ---

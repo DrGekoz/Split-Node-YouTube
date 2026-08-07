@@ -2439,8 +2439,14 @@ def _build_story_bible(topic: str, paragraphs: list[str]) -> dict:
     The narration script is then written to FOLLOW this bible.
     """
     sample = "\n\n".join(paragraphs[:40])[:9000]
-    bible = _llm_json([
-        {"role": "system", "content":
+    # Retry the bible up to 3x - a transient LM Studio timeout must NEVER yield
+    # an empty bible (which would silently disable the visual-hook / roster-lock
+    # for the whole episode). If the first try comes back without characters or
+    # a visual hook, retry fresh.
+    bible = {}
+    for _attempt in range(3):
+        _b = _llm_json([
+            {"role": "system", "content":
             "You are a documentary director. From the article, build the locked "
             "story bible as STRICT JSON only, with EXACTLY these keys: "
             '{"visual_hook": "the one striking thing the viewer must SEE (person, place, object, action, event - the video topic has to be seen to be understood)", '
@@ -2456,8 +2462,13 @@ def _build_story_bible(topic: str, paragraphs: list[str]) -> dict:
             "Use ONLY real names, places and figures from the article. Do NOT invent "
             "characters. If the article gives no name for a person, use a role label "
             "like 'The Hacker'. Say NOTHING outside the JSON."},
-        {"role": "user", "content": f"TOPIC: {topic}\n\nARTICLE:\n{sample}"}
-    ], max_tokens=1400, temp=0.35)
+            {"role": "user", "content": f"TOPIC: {topic}\n\nARTICLE:\n{sample}"}
+        ], max_tokens=1400, temp=0.35)
+        if _b and (_b.get("characters") or _b.get("visual_hook")):
+            bible = _b
+            break
+        print(f"  [BIBLE] empty/incomplete on attempt {_attempt+1}, retrying...")
+        time.sleep(1)
     # Normalize shapes
     if not isinstance(bible.get("characters"), list):
         bible["characters"] = []
@@ -2646,10 +2657,10 @@ SHOT_SYSTEM_PROMPT = (
     "exact same name every time that person appears). "
     "CHARACTER NAME RULE: once a person is named, ALWAYS repeat the exact same full name "
     "verbatim in every shot they appear in. NEVER switch to first-name-only, last-name-only, "
-    "ALL CAPS, initials, or a different spelling - 'Stefan Mandel' stays 'Stefan Mandel' "
-    "in every single shot. "
+    "ALL CAPS, initials, or a different spelling - the exact name stays identical in every "
+    "single shot. "
     "If a shot contains MULTIPLE people, put ALL of their names in the character field "
-    "separated by commas (e.g. 'Stefan Mandel, Richard Lustig'). "
+    "separated by commas. "
     "The scenes must show the characters actually DOING something - an action that "
     "moves the story forward. Never static portraits. Full scenes based on the actions "
     "they take in the narration. ALWAYS state which way each character faces in the scene "
@@ -2663,8 +2674,8 @@ SHOT_SYSTEM_PROMPT = (
     "<character NAME or NONE, or comma-separated names for multiple people> | <character role, e.g. lottery mathematician> | "
     "<full scene description: setting, what the character is DOING, which way each faces, props, lighting, camera framing. 2-4 sentences, action-focused> | "
     "<SFX filename or NONE> | <suspense | neutral | triumphant>\n"
-    "Example line:\n"
-    "MS | low-angle | Stefan Mandel | lottery mathematician | Stefan sits at a candlelit desk in a cramped 1980s Bucharest apartment, hunched over a spreadsheet of every number combination, a worn calculator in hand. | mixkit-cinematic-trailer-riser-790.wav | suspense\n"
+    "Example line (generic - replace the name with an ACTUAL character from the REAL CHARACTERS list):\n"
+    "MS | low-angle | <character name> | <their role> | <character> sits at a candlelit desk in a cramped 1980s apartment, hunched over a spreadsheet of every number combination, a worn calculator in hand. | mixkit-cinematic-trailer-riser-790.wav | suspense\n"
     "SFX choices (pick ONE fitting sound, or NONE for calm shots). Match the sound to the "
     "moment - whoosh/sweep for transitions, riser before a reveal, hit for impact, "
     "nature/foley for outdoor or environment-rich scenes, soundscape for creeping tension:\n"
@@ -2876,6 +2887,41 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 "sfx": "NONE",
                 "tone": "suspense" if i < len(narration_paras) - 2 else "triumphant",
             })
+    # DETERMINISTIC roster enforcement: the LLM can still hallucinate character
+    # names despite the prompt. Hard-filter every shot so only characters in the
+    # story bible's REAL roster (or NONE) survive. Any invented/leaked name is
+    # removed - this is the belt-and-suspenders that kills the cross-episode
+    # name leak ('Stefan Mandel', 'Richard Lustig', etc.) for good.
+    if bible and bible.get("characters"):
+        allowed = {str(c.get("name", "")).strip() for c in bible["characters"]
+                   if isinstance(c, dict) and c.get("name")}
+        allowed = {a for a in allowed if a and a.upper() != "NONE"}
+        # normalized comparison: case-insensitive, collapse whitespace
+        def _norm(s):
+            return re.sub(r"\s+", " ", s.strip().lower())
+        norm_allowed = {_norm(a) for a in allowed}
+        remap = {}  # normalized alias -> canonical roster name
+        for a in allowed:
+            remap[_norm(a)] = a
+        kept, dropped = 0, 0
+        for s in shots:
+            ch = (s.get("character") or "NONE").strip()
+            if ch.upper() == "NONE":
+                continue
+            names = [n.strip() for n in ch.split(",") if n.strip()]
+            ok_names = []
+            for n in names:
+                if _norm(n) in norm_allowed:
+                    ok_names.append(remap[_norm(n)])
+            if ok_names:
+                s["character"] = ", ".join(ok_names)
+                kept += 1
+            else:
+                s["character"] = "NONE"
+                s["character_role"] = ""
+                dropped += 1
+        print(f"  [CAST-LOCK] enforced bible roster on shot list: "
+              f"{kept} shots kept roster names, {dropped} leaked/invented names dropped")
     shots = _merge_character_aliases(shots)
     print(f"  [LLM] Shot list complete: {len(shots)} shots")
     return shots
@@ -3243,20 +3289,33 @@ CHARACTER_ROSTER = [
 ]
 
 
-def _assign_archetype(name: str, role: str = "", scene: str = "") -> dict:
+def _assign_archetype(name: str, role: str = "", scene: str = "",
+                      gender: str = "", age: str = "") -> dict:
     """Map a story character (name + role) to the closest fixed archetype.
 
     Role keywords win; gender/age words in the role/scene drive the generic
-    everyman fallback. Returns a CHARACTER_ROSTER dict (never None) so every
-    story person gets a consistent, repeatable Metahuman look.
+    everyman fallback. When explicit gender/age come from the STORY BIBLE
+    (more reliable than role keywords), they override the keyword sniffing so
+    e.g. a "23-year-old man" renders young, never as an elderly archetype.
+    Returns a CHARACTER_ROSTER dict (never None).
     """
     rl = f"{role} {scene}".lower()
     for arch in CHARACTER_ROSTER:
         if any(h in rl for h in arch["hints"]):
+            # a role-keyword match wins UNLESS the bible gives explicit age
+            # that contradicts a wildly-off archetype (e.g. young suspect vs
+            # elderly). Respect the bible's age band when present.
+            if age and "old" in str(age).lower() and "old" not in arch.get("age", ""):
+                break
+            if age and "young" in str(age).lower() and "young" not in arch.get("age", ""):
+                break
             return arch
-    female = bool(re.search(r"\b(female|woman|women|girl|she|her|madam|lady|grandmother)\b", rl))
-    old = bool(re.search(r"\b(old|elderly|60s|70s|80s|senior|retiree|grandmother|grandfather)\b", rl))
-    young = bool(re.search(r"\b(young|teen|student|20s|twenties|intern)\b", rl))
+    female = bool(re.search(r"\b(female|woman|women|girl|she|her|madam|lady|grandmother)\b", rl)) \
+        or (gender and str(gender).lower().startswith("f"))
+    old = bool(re.search(r"\b(old|elderly|60s|70s|80s|senior|retiree|grandmother|grandfather)\b", rl)) \
+        or (age and any(k in str(age).lower() for k in ("old", "elder", "60", "70", "80", "senior", "retiree")))
+    young = bool(re.search(r"\b(young|teen|student|20s|twenties|intern)\b", rl)) \
+        or (age and any(k in str(age).lower() for k in ("young", "teen", "20s", "student")))
     if female:
         return _roster_by_id("old-female" if old else "young-female" if young else "mid40s-female")
     return _roster_by_id("old-male" if old else "young-male" if young else "mid40s-male")
@@ -3278,26 +3337,63 @@ def _character_sheet_from_archetype(arch: dict, name: str, role: str = "") -> di
     return sheet
 
 
-def _build_character_sheets(shots: list[dict], narration: list[str]) -> dict:
+def _build_character_sheets(shots: list[dict], narration: list[str],
+                            bible: Optional[dict] = None) -> dict:
     """Map every unique story character to a FIXED roster archetype.
 
     Deterministic (no LLM, no cost, zero per-episode variance): a character's
     look comes from the static 20-archetype roster, so 'the hacker' looks the
     same in every episode. Falls back to the generic everyman archetype.
+    When a STORY BIBLE is provided, its per-character gender/age drive the
+    archetype selection so the cast matches the article (e.g. a 21-year-old
+    suspect renders young, never as an elderly archetype).
     """
     canon = _character_canonical_map(shots)
+    # bible roster: name -> (gender, age)
+    bible_meta = {}
+    if bible:
+        for c in (bible.get("characters") or []):
+            if isinstance(c, dict) and c.get("name"):
+                bible_meta[str(c.get("name")).strip()] = (
+                    str(c.get("gender", "")), str(c.get("age", "")))
     sheets = {}
     for s in shots:
-        c = canon.get(s.get("character", "NONE"), "NONE")
-        if c == "NONE" or c in sheets:
+        raw = (s.get("character") or "NONE").strip()
+        if raw.upper() in ("NONE", "N/A", "NOBODY", "NO ONE", "-", ""):
             continue
-        role = s.get("character_role", "")
-        arch = _assign_archetype(c, role, s.get("scene", ""))
-        sheets[c] = _character_sheet_from_archetype(arch, c, role)
-        print(f"  [CAST] {c} -> {arch['label']}"
-              f"{f' (role: {role})' if role else ''}")
+        # Split a multi-person field ('A, B') into individual character sheets
+        # so each person gets their own archetype (not one combined sheet).
+        names = [n.strip() for n in raw.split(",") if n.strip()]
+        for nm in names:
+            c = nm  # use the individual name directly (canon maps full fields)
+            if c == "NONE" or c in sheets:
+                continue
+            role = s.get("character_role", "")
+            gender, age = _bible_meta_for(bible_meta, c)
+            arch = _assign_archetype(c, role, s.get("scene", ""), gender, age)
+            sheets[c] = _character_sheet_from_archetype(arch, c, role)
+            print(f"  [CAST] {c} -> {arch['label']}"
+                  f"{f' (role: {role})' if role else ''}"
+                  f"{f' [bible age: {age}]' if age else ''}")
     print(f"  [CAST] {len(sheets)} characters assigned from the fixed roster")
     return sheets
+
+
+def _bible_meta_for(bible_meta: dict, character_key: str) -> tuple:
+    """Look up a character's bible gender/age by name, handling multi-name shot
+    keys (a shot field can be 'Name A, Name B'). Returns (gender, age) from the
+    FIRST bible roster member whose name appears in the key."""
+    if not character_key:
+        return ("", "")
+    key_l = character_key.lower()
+    # exact key match first
+    if character_key in bible_meta:
+        return bible_meta[character_key]
+    # substring match: any roster name contained in the combined key
+    for name, (gender, age) in bible_meta.items():
+        if name and name.lower() in key_l:
+            return (gender, age)
+    return ("", "")
 
 def _character_view_block(sheet: dict, angle: str) -> str:
     """Pick the character description that matches the camera angle.
@@ -6765,8 +6861,11 @@ def _generate_thumbnail(topic: str, output_path: str) -> bool:
         "16:9 landscape. "
         "Large bold uppercase text 'SPLIT NODE' in the top-left corner. "
         f"Large bold uppercase clickbait headline text '{headline}' centered in the "
-        "lower third. Crisp legible text, high-impact YouTube thumbnail, FERN "
-        "documentary channel style."
+        "lower third. Crisp legible text, high-impact YouTube thumbnail. "
+        "CRITICAL: do NOT render the word FERN anywhere in the image, and do not "
+        "render any other channel names, logos, brand names, watermarks or "
+        "unrelated words. Only the exact text 'SPLIT NODE' (top-left) and the "
+        "headline (lower third) may appear as text. No other on-image text."
     )
     try:
         import providers
@@ -7919,8 +8018,9 @@ def main():
     if easter_egg:
         _inject_easter_egg(shots, easter_egg)
 
-    # 4b. Stage 2b: character sheets for every named character
-    character_sheets = _build_character_sheets(shots, narration)
+    # 4b. Stage 2b: character sheets for every named character (bible's
+    #     gender/age drive the archetype so the cast matches the article)
+    character_sheets = _build_character_sheets(shots, narration, bible=story_bible)
     # 4c0. Brand logos: detect AI companies/models and real businesses in the
     #      article, ensure their logos are cached (search -> cache -> reuse),
     #      and render the context-appropriate asset: hacker computer screen
