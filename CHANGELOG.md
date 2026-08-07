@@ -2,6 +2,18 @@
 
 All notable changes to Split Node.
 
+## [1.32.0] - 2026-08-07
+
+### Killed the "Goulburn / Queen Square, Sydney" leak at the source
+
+- **Root cause found**: the narration system prompt's STYLE RULES embedded Luke Moore demo specifics as its examples - "Goulburn, New South Wales." / "Queen Square, Sydney." (rule 9 place anchors), his exact figures ("$2.1 million", "$9 fee", "$449 a fortnight", "five taps of $4,999"), and his metaphors/rhetorical questions ("Who is watching this account?", "heart stopping between beats"). The LLM copy-pasted these exemplars into every unrelated article - which is why those two Australian places kept appearing everywhere.
+- **All demo specifics generalized** in `NARRATION_SYSTEM_PROMPT`: rule 8 now says use the ARTICLE's exact figures (placeholder `'$X million', 'Y months'`), rule 9 now uses generic examples ("Paris, France." / "The airport tarmac.") and explicitly forbids importing a location from another story, and rules 10-13 were rewritten with non-episode-specific wording. Verified: zero leaked demo terms remain in any prompt constant.
+- **Hard guard on extracted places**: `_build_episode_context` now drops any extracted place whose key tokens are NOT actually present in the article text (e.g. "Goulburn, New South Wales" / "Apollo Global Management" are rejected when the article only says "the United States"). Belt-and-suspenders on top of the prompt fix.
+
+### No more back-to-back same-location repetition
+
+- New **`_dedupe_consecutive_locations()`** runs right after the narration script is built (before chapters/anchors/establishing so all index maps stay aligned). If two+ consecutive paragraphs open with the **same** location anchor, it strips the redundant location **prefix** from the later ones - the paragraph's actual content is preserved, only the repeated "Goulburn, New South Wales." / "Queen Square, Sydney." lead is removed. A location can still recur across the episode when separated by other content (a scene shift back to a prior place still re-states it).
+
 ## [1.31.1] - 2026-08-07
 
 ### Fresh run now asks for the episode image provider too

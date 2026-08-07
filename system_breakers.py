@@ -1840,23 +1840,28 @@ NARRATION_SYSTEM_PROMPT = (
     "7. CONTEXT FIRST, THEN ESCALATE: open simple enough for someone who knows "
     "nothing about the topic, then raise complexity beat by beat. Never open with the "
     "most advanced concept.\n"
-    "8. EXACT NUMBERS, never vague. Dollar amounts, durations, counts "
-    "('$449 a fortnight', '$2.1 million', '29 months', 'a $9 fee', 'five taps of $4,999'). "
-    "Never write 'a lot of money' - write the exact figure from the article.\n"
+    "8. EXACT NUMBERS, never vague. Dollar amounts, durations, counts - always "
+    "use the exact figures the ARTICLE states (e.g. '$X million', 'Y months' - "
+    "replace X and Y with the article's own numbers, never an invented or borrowed "
+    "figure from a different story). Never write 'a lot of money' - always write "
+    "the exact figure from the article.\n"
     "9. PLACE ANCHORS: every time the scene shifts, START the new paragraph "
-    "with a standalone location sentence ('Goulburn, New South Wales.' / "
-    "'Queen Square, Sydney.'). The viewer must always know where the story is. "
-    "Use REAL place names from the article. Do NOT use dates.\n"
-    "10. METAPHOR AND SENSORY DETAIL: concrete images ('the account died mid-"
-    "transaction like a heart stopping between beats', 'a paper monument to a number "
-    "nobody at the bank appears to be reading').\n"
+    "with a standalone location sentence using a REAL place from THIS article "
+    "(e.g. 'Paris, France.' or 'The airport tarmac.' - always a place actually "
+    "named in the article you were given). Never import a location from another "
+    "story. The viewer must always know where the story is. Do NOT use dates.\n"
+    "10. METAPHOR AND SENSORY DETAIL: concrete, original images - invent fresh "
+    "metaphors for THIS story, never reuse a metaphor from a different episode.\n"
     "11. RHETORICAL QUESTIONS as pivots between beats - and 2-3 times per episode, "
     "ask the viewer to figure something out themselves instead of telling them "
-    "('Who is watching this account?') then pay it off a few paragraphs later.\n"
-    "12. IRONY AND REVERSAL: set up the obvious reading, then flip it ('The law has a "
-    "name for that arrangement, and it isn't fraud. It's a loan.')\n"
-    "13. DIRECT ADDRESS 1-2 times per episode ('Be honest. If some part of you would "
-    "have typed that first $4,999 too...')\n"
+    "('How did he keep getting away with it?') then pay it off a few paragraphs "
+    "later.\n"
+    "12. IRONY AND REVERSAL: set up the obvious reading, then flip it - the system "
+    "that was supposed to stop the protagonist turned out to be the reason they "
+    "won.\n"
+    "13. DIRECT ADDRESS 1-2 times per episode ('Be honest. If some part of you "
+    "would have done the same thing, this verdict lands closer to home than it "
+    "should.').\n"
     "14. NEVER invent facts that contradict the article. Expand with cinematic framing, "
     "sensory detail and dramatic tension only.\n"
     "15. OUTPUT CONTRACT: say NOTHING except the narration itself. Never write meta "
@@ -2545,6 +2550,68 @@ def _llm_json(messages: list[dict], max_tokens: int = 1200, temp: float = 0.5) -
     return {}
 
 
+# Generic words that should never be the discriminating token when checking
+# whether an extracted place actually appears in the article text.
+_GENERIC_PLACE_WORDS = {
+    "the", "of", "and", "for", "in", "a", "an", "to", "on", "at", "near",
+    "city", "town", "street", "road", "district", "area", "region", "state",
+    "beach", "bay", "island", "north", "south", "east", "west", "new", "saint",
+    "st", "mt", "united", "usa", "us", "great", "republic",
+}
+
+
+def _dedupe_consecutive_locations(narration_paras: list[str]) -> list[str]:
+    """If two+ CONSECUTIVE paragraphs open with the SAME location anchor, keep
+    each paragraph's content but strip the redundant leading location prefix.
+
+    A location CAN recur across the episode (each scene shift gets a new place
+    anchor) but should never be re-stated back-to-back. When the LLM (or the
+    establishing-shot injector) emits the same location anchor at the start of
+    consecutive paragraphs, the duplicate prefixes are removed so the narrator
+    doesn't keep saying the same place over and over. The paragraph body is
+    preserved; only a paragraph that was EXCLUSIVELY the location anchor is
+    dropped entirely.
+    """
+    if len(narration_paras) < 2:
+        return narration_paras
+
+    def _lead_loc(para: str):
+        """Return (loc_key_lower, end_index) if the paragraph OPENS with a
+        location anchor, else ("", 0). end_index is where the place phrase
+        ends so we can strip just the prefix."""
+        lead = para[:TITLE_ANCHOR_MAX_CHARS]
+        m = LOCATION_PATTERNS[0].search(lead)
+        if m:
+            return (m.group(1) + " " + m.group(2)).strip().lower(), m.end()
+        m = LOCATION_PATTERNS[1].search(lead)
+        if m and m.group(1).lower() not in LOCATION_STOPWORDS:
+            return m.group(1).strip().lower(), m.end()
+        return "", 0
+
+    out: list[str] = []
+    prev = ""
+    stripped = 0
+    for para in narration_paras:
+        loc, end = _lead_loc(para)
+        if loc and loc == prev:
+            # Same place as the paragraph before - keep the body, drop the
+            # redundant location prefix so it isn't re-stated back-to-back.
+            rest = para[end:]
+            rest = re.sub(r"^[\s.,;:]+", "", rest).strip()
+            if rest and rest[0].islower():
+                rest = rest[0].upper() + rest[1:]
+            if rest:
+                out.append(rest)
+            # prev stays the same -> a 3rd consecutive repeat is stripped too
+            stripped += 1
+            continue
+        out.append(para)
+        prev = loc  # "" on a non-location paragraph resets the run
+    if stripped:
+        print(f"  [DEDUPE] stripped {stripped} back-to-back same-location prefix(es)")
+    return out
+
+
 def _build_episode_context(topic: str, paragraphs: list[str]) -> dict:
     """One LLM pass: the story's world (era, places, environments, props).
     Injected into the shot list so scenes fit ANY topic - a rainforest story
@@ -2574,6 +2641,25 @@ def _build_episode_context(topic: str, paragraphs: list[str]) -> dict:
             defaults[k] = [str(x) for x in v[:8]]
         elif isinstance(v, str) and v.strip():
             defaults[k] = v.strip()
+    # HARD GUARD: drop any extracted place that is NOT actually present in the
+    # article text. The LLM keeps leaking demo-story locations (e.g. "Goulburn,
+    # New South Wales" / "Queen Square, Sydney" from the Luke Moore reference
+    # episode) into unrelated articles - this filter rejects them outright.
+    if defaults["places"]:
+        art_text = re.sub(r"\s+", " ", " ".join(paragraphs)).lower()
+        kept = []
+        for p in defaults["places"]:
+            p = str(p).strip()
+            if not p:
+                continue
+            toks = [t for t in re.findall(r"[A-Za-z']{3,}", p.lower())
+                    if t not in _GENERIC_PLACE_WORDS]
+            if toks and any(t in art_text for t in toks):
+                kept.append(p)
+        if len(kept) != len(defaults["places"]):
+            dropped = [p for p in defaults["places"] if p not in kept]
+            print(f"  [CONTEXT] dropped hallucinated places: {', '.join(dropped)}")
+        defaults["places"] = kept
     print("  [CONTEXT] era=%s | %d places | %d environments | %d props"
           % (defaults["era"], len(defaults["places"]),
              len(defaults["environments"]), len(defaults["props"])))
@@ -7931,6 +8017,9 @@ def _rebuild_script_for_resume(state: dict) -> dict:
         if not narration:
             print("  [FILTER] All rebuilt narration off-topic, retrying...")
             narration = _build_narration_script(paragraphs, target_paras, bible=story_bible)
+    # Drop back-to-back same-location repeats BEFORE chapter/anchors/establishing
+    # so every derived index map stays aligned with the deduped narration.
+    narration = _dedupe_consecutive_locations(narration)
     narration, chapter_events = _insert_chapter_markers(narration)
     anchor_events = _extract_anchor_events(narration)
     establishing_map = {}
@@ -8499,6 +8588,10 @@ def main():
         if not narration:
             print("  [FILTER] All narration segments off-topic, rebuilding from filtered article...")
             narration = _build_narration_script(paragraphs, target_paras, bible=story_bible)
+
+    # 3b1. Drop back-to-back same-location repeats BEFORE chapter/anchors/
+    #      establishing so every derived index map stays aligned.
+    narration = _dedupe_consecutive_locations(narration)
 
     # 3c. Chapter pass: insert 'Chapter N - Title' paragraphs (black cards)
     narration, chapter_events = _insert_chapter_markers(narration)
