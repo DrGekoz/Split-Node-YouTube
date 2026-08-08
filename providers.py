@@ -313,6 +313,7 @@ class Codex:
             raise RuntimeError("codex CLI not found on PATH - install with: npm install -g @openai/codex")
 
     def generate_image(self, prompt: str, out_path: str,
+                       ref_images: list | None = None,
                        timeout: int = 900) -> bool:
         import shutil
         import subprocess
@@ -320,14 +321,30 @@ class Codex:
         import glob
         generated = Path.home() / ".codex" / "generated_images"
         generated.mkdir(parents=True, exist_ok=True)
-        before = set(glob.glob(str(generated / "**" / "ig_*.png"), recursive=True))
+        # Codex 0.147+ names outputs call_*.png (older used ig_*.png) - match
+        # both so a version bump never silently breaks detection.
+        def _scan() -> set:
+            return (set(glob.glob(str(generated / "**" / "call_*.png"), recursive=True))
+                    | set(glob.glob(str(generated / "**" / "ig_*.png"), recursive=True)))
+        before = _scan()
 
         # Codex is a Windows Node app -> always shell through powershell.exe.
         # The --skip-git-repo-check flag MUST come BEFORE the /imagegen prompt.
-        ps_cmd = ("codex exec --skip-git-repo-check " +
-                  "/imagegen " + _ps_quote(prompt))
+        # Image references are attached via -i <file> so GPT Image 2 uses them
+        # as identity/style refs (character panels, real-person refs, logos).
+        # NOTE: when any -i ref is attached, codex exec reads the prompt from
+        # STDIN (not the positional arg) - so we ALWAYS pipe the prompt via
+        # `echo <prompt> |` to keep both paths working.
+        ref_args = ""
+        for ref in (ref_images or []):
+            if ref and os.path.isfile(ref):
+                ref_args += " -i " + _ps_quote(os.path.abspath(ref))
+        p_quoted = _ps_quote(prompt)
+        ps_cmd = (f"echo {p_quoted} | codex exec --skip-git-repo-check "
+                  f"{ref_args} /imagegen {p_quoted}")
         cmd = ["powershell.exe", "-NoProfile", "-Command", ps_cmd]
-        print(f"  [CODEX] running codex exec /imagegen (this can take a minute)...")
+        print(f"  [CODEX] running codex exec /imagegen"
+              f"{' (' + str(len(ref_images)) + ' image refs)' if ref_images else ''}...")
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
                                   timeout=timeout)
@@ -336,11 +353,11 @@ class Codex:
             return False
 
         # No reliable "saved to X" line - find the NEWEST generated image.
-        after = set(glob.glob(str(generated / "**" / "ig_*.png"), recursive=True))
+        after = _scan()
         new = after - before
         if not new:
             # fall back to newest mtime if the session folder already existed
-            all_imgs = sorted(glob.glob(str(generated / "**" / "ig_*.png"), recursive=True),
+            all_imgs = sorted(_scan(),
                               key=os.path.getmtime, reverse=True)
             if all_imgs:
                 new = {all_imgs[0]}
@@ -362,72 +379,85 @@ def _ps_quote(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
+# Path to the standalone FaceUpDAT upscale script + the Python that can run it.
+# We use ComfyUI's embedded Python because it has the CUDA torch + spandrel
+# needed to load 4xFaceUpDAT directly - NO ComfyUI server required.
+_UPSCALE_SCRIPT = PROJECT_DIR / "faceupdat_upscale.py"
+_COMFY_PY = r"F:\ComfyUI_windows_portable\python_embeded\python.exe"
+_UPSCALER_MODEL = r"F:\ComfyUI_windows_portable\ComfyUI\models\upscale_models\4xFaceUpDAT.safetensors"
+
+
 def _faceupdat_upscale(image_path: str, out_path: str,
                        width: int = 1920, height: int = 1080,
                        timeout: int = 900) -> bool:
-    """Upscale an existing image through ComfyUI's 4xFaceUpDAT model, then
-    ImageScale to the target resolution. Used to pipe Codex/GPT-Image-2 output
-    up to the final shot/panel/thumbnail resolution (in-graph, no second GPU
-    process). Reuses krea2_splitnode's ComfyUI connection helpers."""
-    import shutil
-    try:
-        import krea2_splitnode as krea
-    except Exception as e:
-        print(f"  [UPSCALE] import krea2_splitnode failed: {e}")
+    """Upscale an image with 4xFaceUpDAT run DIRECTLY in Python (torch + spandrel).
+
+    No ComfyUI server needed - the embedded Python loads the model and upscales
+    standalone, then cover-fits to the exact target resolution. Used to pipe
+    Codex/GPT-Image-2/local output up to the final shot/panel/thumbnail size.
+    Returns True on success.
+    """
+    import subprocess
+    if not os.path.isfile(_UPSCALE_SCRIPT):
+        print(f"  [UPSCALE] script not found: {_UPSCALE_SCRIPT}")
         return False
-    try:
-        base = krea._comfy_url()
-    except Exception as e:
-        print(f"  [UPSCALE] ComfyUI not reachable: {str(e)[:80]}")
+    if not os.path.isfile(_UPSCALER_MODEL):
+        print(f"  [UPSCALE] model not found: {_UPSCALER_MODEL}")
         return False
+    if not os.path.isfile(_COMFY_PY):
+        print(f"  [UPSCALE] embedded python not found: {_COMFY_PY}")
+        return False
+    cmd = [_COMFY_PY, str(_UPSCALE_SCRIPT), _UPSCALER_MODEL,
+           os.path.abspath(image_path), os.path.abspath(out_path),
+           str(width), str(height), "--skip-if-larger"]
     try:
-        # Upload the codex output into ComfyUI's input dir.
-        ref = krea._upload_ref(image_path, base)
-        api = {
-            "1": {"class_type": "LoadImage", "inputs": {"image": ref}},
-            "2": {"class_type": "UpscaleModelLoader",
-                  "inputs": {"model_name": krea.UPSCALER}},
-            "3": {"class_type": "ImageUpscaleWithModel",
-                  "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
-            "4": {"class_type": "ImageScale",
-                  "inputs": {"image": ["3", 0], "upscale_method": "lanczos",
-                             "width": width, "height": height, "crop": "center"}},
-            "5": {"class_type": "SaveImage",
-                  "inputs": {"images": ["4", 0], "filename_prefix": "splitnode_up"}},
-        }
-        queued = krea._req(base, "/prompt", {"prompt": api}, timeout=120)
-        pid = queued.get("prompt_id")
-        if not pid:
-            print(f"  [UPSCALE] submit failed: {str(queued)[:150]}")
-            return False
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            try:
-                hist = krea._req(base, f"/history/{pid}", timeout=30)
-            except OSError:
-                time.sleep(5)
-                continue
-            entry = hist.get(pid)
-            if entry and entry.get("outputs"):
-                imgs = []
-                for node_out in entry["outputs"].values():
-                    imgs.extend(node_out.get("images", []))
-                if imgs:
-                    img = imgs[0]
-                    dl = (f"{base}/view?filename={img['filename']}"
-                          f"&subfolder={img.get('subfolder', '')}"
-                          f"&type={img.get('type', 'output')}")
-                    with urllib.request.urlopen(dl, timeout=120) as r:
-                        with open(out_path, "wb") as f:
-                            f.write(r.read())
-                    print(f"  [UPSCALE] {os.path.basename(out_path)} "
-                          f"({os.path.getsize(out_path)//1024}KB, {width}x{height})")
-                    return os.path.getsize(out_path) > 500
-            time.sleep(3)
-        print("  [UPSCALE] timed out waiting for upscale job")
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"  [UPSCALE] timed out ({timeout}s)")
+        return False
+    if r.returncode != 0 or not os.path.isfile(out_path) or os.path.getsize(out_path) < 500:
+        print(f"  [UPSCALE] failed: {r.stderr.strip()[-300:]}")
+        return False
+    return True
+
+
+def _ensure_image_size(image_path: str, out_path: str,
+                       width: int = 1920, height: int = 1080,
+                       timeout: int = 900) -> bool:
+    """Ensure an image is at least `width`x`height`, upscaling only if smaller.
+
+    Preferred path is 4xFaceUpDAT run DIRECTLY in the embedded Python (torch +
+    spandrel) - no ComfyUI server required. If FaceUpDAT can't run (missing
+    python/model), fall back to a PIL lanczos upscale so the pipeline still
+    hits the target resolution. Never downsizes - if the source is already >=
+    target it's left untouched.
+    """
+    try:
+        from PIL import Image
+        im = Image.open(image_path)
+        w, h = im.size
     except Exception as e:
-        print(f"  [UPSCALE] error: {str(e)[:150]}")
-    return False
+        print(f"  [SIZE] could not read image ({str(e)[:60]})")
+        return False
+    if w >= width and h >= height:
+        print(f"  [SIZE] {os.path.basename(image_path)} already {w}x{h} "
+              f"(target {width}x{height}), no upscale needed")
+        return True
+    # FaceUpDAT (direct Python, best quality, no ComfyUI server).
+    if _faceupdat_upscale(image_path, out_path, width=width, height=height,
+                          timeout=timeout):
+        return True
+    # PIL lanczos fallback so the pipeline never hard-requires torch/spandrel.
+    try:
+        im = im.convert("RGB")
+        im = im.resize((width, height), Image.LANCZOS)
+        im.save(out_path)
+        print(f"  [SIZE] PIL fallback upscale {os.path.basename(out_path)} "
+              f"{w}x{h} -> {width}x{height}")
+        return os.path.getsize(out_path) > 500
+    except Exception as e:
+        print(f"  [SIZE] PIL fallback failed: {str(e)[:120]}")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -562,12 +592,15 @@ def generate_image(prompt: str, seed: int, out_path: str,
         except RuntimeError as e:
             print(f"  [CODEX] {e}")
             return False
-        ok = c.generate_image(prompt, out_path)
+        ok = c.generate_image(prompt, out_path, ref_images=ref_images)
         if not ok:
             return False
-        # Pipe codex output through FaceUpDAT upscaler to reach target res.
+        # Enforce the target resolution: GPT Image 2 / codex output can come
+        # out smaller than the requested size. Prefer FaceUpDAT (ComfyUI, best
+        # quality) but fall back to a PIL lanczos upscale so a NON-local run
+        # never REQUIRES ComfyUI to be running.
         if upscale:
-            return _faceupdat_upscale(out_path, out_path, width=width,
+            return _ensure_image_size(out_path, out_path, width=width,
                                       height=height)
         return True
 

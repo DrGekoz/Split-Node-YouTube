@@ -9,7 +9,7 @@ Pipeline:
   -> LLM shot list (clothed mannequins, action scenes, camera logic)
   -> RunPod Z-Image-Turbo 16:9 images per shot
   -> PocketTTS built-in male voice narration (0dB normalized)
-  -> FFmpeg render 1080p with music (-18dB) + timecoded SFX (-14dB)
+  -> FFmpeg render 1080p with music (-19.5dB) + timecoded SFX (-15dB)
   -> FAL GPT Image 2 thumbnail -> YouTube upload (Split Node channel)
 """
 
@@ -1087,10 +1087,10 @@ MUSIC_LIBRARY = {
 
 # Mix levels (dB)
 VOICE_DB = 0.0
-MUSIC_DB = -18.0
-SFX_DB = -14.0
-# Camera shutter is a punchy transient - it needs to CUT through (user: -4dB)
-SHUTTER_DB = -4.0
+MUSIC_DB = -19.5
+SFX_DB = -15.0
+# Camera shutter is a punchy transient - it needs to CUT through (user: -5dB)
+SHUTTER_DB = -5.0
 
 # Discord announcement bot
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
@@ -3059,6 +3059,18 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 scene = ("An establishing wide full-body shot of the character, "
                          "whole person in frame from head to toe, "
                          f"highly detailed, {RENDER_STYLE}")
+            # When rendering on a backend that handles TEXT well (Codex CLI /
+            # GPT Image 2), bake the establishing label into the image in the
+            # bottom-left, broadcast style: for a location use
+            #   '/// LOCATION NAME' and for a character the name on its own.
+            # This replaces the need for a burned typewriter title over these
+            # establishing frames (Joe 2026-08-09).
+            if _active_image_backend() in ("codex", "fal"):
+                _label = (f"/// {name.upper()}" if is_loc else name.upper())
+                scene += (f". Render the text {_label!r} in the bottom-left "
+                          "corner of the image, small clean broadcast "
+                          "caption, white with a subtle shadow, legible. "
+                          "No other text anywhere in the frame.")
             shots.append({
                 "narration": para,
                 "narration_idx": i,
@@ -3202,6 +3214,25 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 dropped += 1
         print(f"  [CAST-LOCK] enforced bible roster on shot list: "
               f"{kept} shots kept roster names, {dropped} leaked/invented names dropped")
+    # BUSINESS/ENTITY DEMOTE (runs regardless of bible): any shot whose
+    # 'character' field is a business/entity (SpaceX, 'the company', the IRS)
+    # gets its character cleared so it renders as the scene/logo, not a human.
+    # This is the belt-and-suspenders that stops a company being personified.
+    _biz_demoted = 0
+    for s in shots:
+        ch = (s.get("character") or "NONE").strip()
+        if ch.upper() == "NONE":
+            continue
+        names = [n.strip() for n in ch.split(",") if n.strip()]
+        keep = [n for n in names if not _is_business_name(n)]
+        if len(keep) != len(names):
+            s["character"] = ", ".join(keep) if keep else "NONE"
+            if not keep:
+                s["character_role"] = ""
+            _biz_demoted += 1
+    if _biz_demoted:
+        print(f"  [CAST-LOCK] demoted {_biz_demoted} business/entity shot(s) "
+              f"(company personified as a person -> NONE, renders as scene/logo)")
     shots = _merge_character_aliases(shots)
     print(f"  [LLM] Shot list complete: {len(shots)} shots")
     return shots
@@ -3716,6 +3747,12 @@ def _build_character_sheets(shots: list[dict], narration: list[str],
             c = nm  # use the individual name directly (canon maps full fields)
             if c == "NONE" or c in sheets:
                 continue
+            # BUSINESS/ENTITY GUARD: a company (SpaceX, 'the company', the IRS)
+            # is NOT a person - it must never get a human archetype sheet. It
+            # is handled by the BRAND/logo pipeline instead (Joe 2026-08-09).
+            if _is_business_name(c):
+                print(f"  [CAST] {c} -> SKIP (business/entity, not a person)")
+                continue
             role = s.get("character_role", "")
             gender, age = _bible_meta_for(bible_meta, c)
             arch = _assign_archetype(c, role, s.get("scene", ""), gender, age)
@@ -4060,6 +4097,58 @@ def _black_placeholder(episode_num: int) -> str:
     return out
 
 
+def _generate_chapter_card(shot: dict, episode_num: int) -> Optional[str]:
+    """Render a chapter TITLE CARD image via the active image backend.
+
+    GPT Image 2 / Codex CLI renders text very well, so when IMAGE_BACKEND is
+    codex (or fal gpt-image-2) we generate a real 'CHAPTER N -- title' card as
+    the shot's image (shown for the whole time the narrator reads the chapter),
+    instead of the old black placeholder + ASS burn. Returns the card path, or
+    None when the backend shouldn't render text cards (local Krea -> falls back
+    to the black placeholder + ASS burn).
+    """
+    backend = _active_image_backend()
+    if backend not in ("codex", "fal"):
+        # Local Krea / runpod render text poorly - keep the black placeholder
+        # so the ASS chapter card is burned in pass 2 (split_node_titles).
+        return None
+    n = int(shot.get("chapter_num", 1))
+    title = str(shot.get("chapter_title", "")).strip() or "The Story"
+    W_RES, H_RES = _get_output_resolution()
+    ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    out = str(ep_dir / f"chapter_{n:02d}_card.png")
+    if os.path.isfile(out) and os.path.getsize(out) > 1000:
+        return out
+    card_text = f"CHAPTER {n:02d}\n\n{title}"
+    # Text-exact prompt - GPT Image 2 loves this. Style injected to keep the
+    # channel's dark cinematic documentary look while keeping the text crisp.
+    prompt = (
+        "A cinematic documentary chapter title card. Solid near-black "
+        "background with subtle dark atmosphere and a faint moody glow behind "
+        "the text. Large elegant white sans-serif capitalised text centred: "
+        f"{card_text!r}. The exact words must render perfectly and legibly - "
+        f"'CHAPTER {n:02d}' big on top, then the chapter title '{title}' below "
+        "it in a slightly smaller line. Minimal, clean, high contrast, "
+        "professional broadcast title card, no photos, no people, no objects, "
+        f"no watermark, no extra text. 16:9 widescreen. {_style_inject()}"
+    )
+    print(f"  [CARD] rendering chapter {n:02d} title card via {backend}...")
+    seed = 90000 + n * 137 + episode_num
+    ok = _krea_generate(prompt, seed, out, ref_images=None, denoise=1.0,
+                        upscale=True, width=W_RES, height=H_RES,
+                        ref_mode="img2img", image_size="landscape_16_9")
+    if ok and os.path.isfile(out) and os.path.getsize(out) > 1000:
+        return out
+    print(f"  [CARD] chapter {n:02d} card failed - using black placeholder")
+    return None
+
+
+def _active_image_backend() -> str:
+    """Current IMAGE_BACKEND (default 'local')."""
+    return (os.environ.get("IMAGE_BACKEND", "") or "local").strip().lower()
+
+
 def _krea_generate(prompt: str, seed: int, out_path: str,
                    ref_images: Optional[list] = None, denoise: float = 0.55,
                    upscale: bool = True, timeout: int = 1800,
@@ -4069,16 +4158,24 @@ def _krea_generate(prompt: str, seed: int, out_path: str,
                    ref_method: str = "index_timestep_zero",
                    ref_boost: float = 4.0, grounding_px: int = 1024,
                    ref_images_b: Optional[list] = None,
-                   negative_prompt: str = "") -> bool:
+                   negative_prompt: str = "",
+                   image_size: Optional[str] = None) -> bool:
     """Generate one image, routed through the unified provider layer.
 
     Backend is selected at runtime by IMAGE_BACKEND (default 'local' ->
-    ComfyUI Krea 2 Turbo). Set IMAGE_BACKEND=runpod or =fal to render shots
-    through a cloud provider instead (ref_images/ref_mode only apply to the
-    local backend - cloud models are text-to-image). Cloud providers need a
-    RUNPOD_API_KEY / FAL_API_KEY in .env.
+    ComfyUI Krea 2 Turbo). Set IMAGE_BACKEND=runpod or =fal or =codex to
+    render shots through a cloud provider instead. ref_images/ref_mode are
+    honoured by local AND codex (which attaches refs via `-i`); runpod/fal
+    are text-to-image.
     """
-    backend = (os.environ.get("IMAGE_BACKEND", "") or "local").strip().lower()
+    backend = _active_image_backend()
+    # Codex (and cloud) outputs can come out smaller than requested - when the
+    # caller left the 1280x720 default, aim the upscale at the OUTPUT res so a
+    # codex shot reaches 1920x1080 (or 4K), matching the local in-graph path.
+    if upscale and width == 1280 and height == 720:
+        W_RES, H_RES = _get_output_resolution()
+        if backend in ("codex", "fal", "runpod"):
+            width, height = W_RES, H_RES
     try:
         import providers
     except Exception as e:
@@ -4090,7 +4187,7 @@ def _krea_generate(prompt: str, seed: int, out_path: str,
         timeout=timeout, steps=steps, cfg=cfg, width=width, height=height,
         ref_mode=ref_mode, ref_method=ref_method, ref_boost=ref_boost,
         grounding_px=grounding_px, ref_images_b=ref_images_b,
-        negative_prompt=negative_prompt)
+        negative_prompt=negative_prompt, image_size=image_size)
 
 
 def _generate_motion_clip(prompt: str, out_path: str,
@@ -4722,6 +4819,94 @@ def _commons_logo_bytes(brand: str) -> Optional[bytes]:
 
 def _brand_safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", name.lower()).strip("_") or "brand"
+
+
+# Company/corporate entity suffixes + generic corporate tokens used to detect
+# a name that is a BUSINESS/ENTITY rather than a person. When the LLM lists
+# 'SpaceX', 'the company', 'IRS', 'HackerOne' etc. as a 'character', we must
+# NOT build a human character sheet for it - it belongs to the BRAND/logo
+# pipeline instead (Joe 2026-08-09: SpaceX was being personified as a human).
+BUSINESS_SUFFIX_RE = re.compile(
+    r"(?i)\b(inc|corp|corporation|llc|ltd|limited|co|company|group|holdings|"
+    r"systems|industries|labs|laboratories|technologies|tech|services|solutions|"
+    r"media|entertainment|airlines|airways|railways|rail|motorways|express|"
+    r"bank|banks|insurance|fund|funds|capital|ventures|partners|associates|"
+    r"communications|networks|energy|oil|gas|mining|auto|motors|beverages|"
+    r"electronics|semiconductors|software|hardware|cloud|ai|robotics|defense|"
+    r"aerospace|space|rocket|telecom|wireless|logistics|shipping|retail|stores|"
+    r"farms|farming|studios|games|gaming|university|hospital|healthcare|pharma|"
+    r"hotel|hotels|resorts|restaurant|restaurants|cafe|cafes|school|college|"
+    r"agency|agencies|ministry|department|authority|commission|administration|"
+    r"service|services)\b"
+)
+BUSINESS_WORD_RE = re.compile(
+    r"(?i)\b(company|corporation|corp|inc|llc|ltd|founder|ceo|chairman|"
+    r"co-founder|cofounder|executive|executives|board|shareholder|investor|"
+    r"investors|employer|employees|workforce|hq|headquarters|head office|"
+    r"officer|officers|spokesman|spokesperson|spokeswoman|"
+    r"business|businesses|enterprise|firm|startup|start-ups|venture|fund|"
+    r"bureau|agency|authority|department|division|unit|subsidiary|team|"
+    r"organisation|organization|outfit|operation|operations)\b"
+)
+
+
+def _is_business_name(name: str) -> bool:
+    """True when a name is a business/entity, not a human.
+
+    Detects (a) known brands in the AI-org registry + curated real-world
+    companies + persisted manifest, (b) a corporate-entity suffix
+    (Inc/Corp/LLC/Bank/Labs...), or (c) a generic corporate token
+    ('the company', 'founder', 'CEO'). Used to STOP businesses being
+    personified as human characters in the shot list / character sheets.
+    """
+    if not name:
+        return False
+    n = str(name).strip()
+    if not n:
+        return False
+    low = n.lower()
+    # Known brand registry (curated AI orgs + real-world companies + persisted
+    # detected brands).
+    if low in KNOWN_COMPANY_NAMES:
+        return True
+    for b in _KNOWN_BRANDS:
+        if b and b.lower() == low:
+            return True
+    # Multi-token corporate/company phrases.
+    if BUSINESS_WORD_RE.search(n):
+        return True
+    # A trailing corporate suffix - only meaningful when the name is 2+ tokens
+    # OR the sole token is an obvious entity (avoid flagging a person whose
+    # surname happens to be 'Smith' etc.).
+    return bool(BUSINESS_SUFFIX_RE.search(n))
+
+
+# Well-known real-world companies/brands (lowercase) that appear in articles
+# but are NOT in the AI-org registry - flagged as businesses so they are never
+# personified as a person (e.g. 'SpaceX', 'Tesla', 'Nike'). Extended at runtime
+# by _extract_brands.
+KNOWN_COMPANY_NAMES: set[str] = {
+    "spacex", "tesla", "nike", "adidas", "amazon", "apple", "microsoft",
+    "meta", "facebook", "netflix", "nvidia", "intel", "amd", "ibm", "oracle",
+    "salesforce", "spotify", "uber", "lyft", "airbnb", "stripe", "paypal",
+    "visa", "mastercard", "disney", "sony", "samsung", "huawei", "xiaomi",
+    "qualcomm", "broadcom", "cisco", "dell", "hp", "lenovo", "asus", "acer",
+    "toyota", "honda", "ford", "gm", "chevrolet", "bmw", "mercedes", "volkswagen",
+    "audi", "ferrari", "lamborghini", "porsche", "tesco", "walmart", "costco",
+    "target", "kroger", "ikea", "home depot", "lowes", "mcdonalds", "kfc",
+    "burger king", "subway", "starbucks", "coca-cola", "pepsi", "nestle",
+    "kraft", "heinz", "jpmorgan", "goldman sachs", "morgan stanley", "citibank",
+    "bank of america", "wells fargo", "hsbc", "barclays", "reuters", "bloomberg",
+    "guardian", "forbes", "cnn", "bbc", "nbc", "abc", "cbs", "fox", "ny times",
+    "new york times", "washington post", "hackerone", "bugcrowd", "crowdstrike",
+    "palantir", "spacex", "nasa", "boeing", "lockheed martin", "raytheon",
+    "northrop grumman", "grubhub", "doordash", "expedia", "booking", "paypal",
+    "square", "robinhood", "coinbase", "binance", "ethereum", "bitcoin",
+    "irs", "hackerone", "equifax", "experian", "transunion",
+    "united airlines", "american airlines", "delta", "southwest",
+    "british airways", "qantas", "cathay pacific", "singapore airlines",
+    "virgin", "visa", "mastercard", "amex", "american express",
+}
 
 
 def _load_brand_manifest() -> dict[str, str]:
@@ -5801,7 +5986,8 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
                   f"(identity, refs={len(refs_full)}, boost={boost}, "
                   f"grounding={g_px})...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
-                                ref_images=refs_full, denoise=denoise, upscale=False,
+                                ref_images=refs_full, denoise=denoise,
+                                upscale=(_active_image_backend() == "codex"),
                                 steps=10, width=CHAR_PANEL_W, height=CHAR_PANEL_H,
                                 ref_mode="identity", ref_boost=boost,
                                 grounding_px=g_px,
@@ -5827,7 +6013,8 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
             print(f"  [SHEET] {view} panel for {char_name} "
                   f"(ref={ref_src}, kontext={ref_method})...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
-                                ref_images=ref, denoise=denoise, upscale=False,
+                                ref_images=ref, denoise=denoise,
+                                upscale=(_active_image_backend() == "codex"),
                                 steps=14, width=CHAR_PANEL_W, height=CHAR_PANEL_H,
                                 ref_mode="reference", ref_method=ref_method)
         if ok:
@@ -5901,7 +6088,8 @@ def _generate_material_panels(char_name: str, sheet: dict, seed: int,
                   f"(real-face, refs={len(refs_full)}, boost={boost})...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
                                 ref_images=refs_full, denoise=denoise,
-                                upscale=False, steps=14,
+                                upscale=(_active_image_backend() == "codex"),
+                                steps=14,
                                 width=CHAR_PANEL_W, height=CHAR_PANEL_H,
                                 ref_mode="identity", ref_boost=boost,
                                 grounding_px=g_px)
@@ -5910,7 +6098,8 @@ def _generate_material_panels(char_name: str, sheet: dict, seed: int,
             print(f"  [SHEET] {view} {look} panel for {char_name} "
                   f"(txt2img, hair: '{hair[:50]}')...")
             ok = _krea_generate(p, seed + 111 * len(view), str(pan),
-                                ref_images=None, denoise=denoise, upscale=False,
+                                ref_images=None, denoise=denoise,
+                                upscale=(_active_image_backend() == "codex"),
                                 steps=14, width=CHAR_PANEL_W, height=CHAR_PANEL_H,
                                 ref_mode="img2img")
         if ok:
@@ -6045,8 +6234,18 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                 f"  [IMAGES] shot {idx+1}/{len(shots)}")
         if shot.get("is_chapter"):
             shot["seed"] = 0
-            shot["image_path"] = black
-            print(f"  [SHOT {idx+1}/{len(shots)}] chapter placeholder (no image)")
+            # When using the Codex CLI backend, render a REAL chapter title
+            # card (GPT Image 2 is very good at text) instead of a black
+            # placeholder - the card is shown for the whole time the narrator
+            # reads "Chapter N - title". The ASS chapter burn is skipped in the
+            # render pass for codex runs so the text isn't doubled.
+            card = _generate_chapter_card(shot, episode_num)
+            shot["image_path"] = card if card else black
+            if card:
+                print(f"  [SHOT {idx+1}/{len(shots)}] chapter title card: "
+                      f"{os.path.basename(card)}")
+            else:
+                print(f"  [SHOT {idx+1}/{len(shots)}] chapter placeholder (no image)")
             continue
         # REGEN_IMAGES=1 -> force re-generate (overwrite) instead of resuming.
         _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
@@ -6334,7 +6533,7 @@ def _is_place_anchor(text: str) -> bool:
 
 def _build_audio_mix(shots: list[dict], episode_num: int,
                      title_events: Optional[list] = None):
-    """Build the full audio track: voice (0dB) + music (-18dB) + SFX (-14dB hit-aligned).
+    """Build the full audio track: voice (0dB) + music (-19.5dB) + SFX (-15dB hit-aligned).
 
     New SFX in this version:
       - mixkit glitchy suspense hit at t=0 (every video opens with it)
@@ -6953,7 +7152,7 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
 def _master_gain_filter(audio_path: str) -> str:
     """Measure the mixed WAV's peak and return an ffmpeg -af filter string that
     raises the loudest peak to 0dB (0.0dB gain if already at/near 0dB).
-    Relative levels inside the mix are preserved: voice 0dB, music -18dB, SFX -14dB."""
+    Relative levels inside the mix are preserved: voice 0dB, music -19.5dB, SFX -15dB."""
     try:
         probe = subprocess.run(
             ["ffmpeg", "-i", audio_path, "-af", "volumedetect", "-f", "null", "-"],
@@ -7199,7 +7398,7 @@ def _render_video(shots: list[dict], episode_num: int,
 
         # Mux the full mixed audio (voice + music + sfx) over the video,
         # with a final master gain so the loudest peak reaches 0dB
-        # (voice 0dB, music -18dB, SFX -14dB relative in the mix).
+        # (voice 0dB, music -19.5dB, SFX -15dB relative in the mix).
         if mixed_audio and os.path.isfile(mixed_audio):
             final_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_final.mp4")
             master_filter = _master_gain_filter(mixed_audio)
@@ -7230,11 +7429,39 @@ def _render_video(shots: list[dict], episode_num: int,
             if os.path.isfile(marker):
                 print("  [TITLES] already burned (marker present), skipping pass 2")
             else:
+                # When the Codex backend rendered real chapter title CARDS
+                # (GPT Image 2 is very good at text), skip the ASS chapter burn
+                # so the card text isn't doubled - keep the location/person
+                # typewriter titles (they fire over regular shots, not cards).
+                _burn_events = title_events
+                if _active_image_backend() == "codex":
+                    _chap_cards = any(
+                        s.get("is_chapter") and s.get("image_path")
+                        and os.path.isfile(s["image_path"])
+                        and "chapter_" in os.path.basename(s["image_path"])
+                        for s in shots)
+                    if _chap_cards:
+                        _burn_events = [ev for ev in title_events
+                                        if ev.get("kind") != "chapter"]
+                        print(f"  [TITLES] codex chapter cards present - "
+                              f"burning {len(_burn_events)} non-chapter title events")
+                    # Establishing shots already have the label BAKED into the
+                    # image (bottom-left '/// NAME') - drop the matching
+                    # location/person typewriter burn so it isn't doubled.
+                    _estab_paras = {s.get("narration_idx")
+                                    for s in shots if s.get("is_establishing")}
+                    if _estab_paras:
+                        _before = len(_burn_events)
+                        _burn_events = [ev for ev in _burn_events
+                                        if ev.get("para_idx") not in _estab_paras]
+                        if len(_burn_events) != _before:
+                            print(f"  [TITLES] dropped {_before - len(_burn_events)} "
+                                  f"typewriter event(s) over baked establishing labels")
                 ass_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titles.ass")
                 burned = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titled.mp4")
                 try:
-                    split_node_titles.build_title_ass(title_events, ass_path)
-                    print(f"  [TITLES] pass 2: burning {len(title_events)} title events...")
+                    split_node_titles.build_title_ass(_burn_events, ass_path)
+                    print(f"  [TITLES] pass 2: burning {len(_burn_events)} title events...")
                     # Kicker + title are both inside the ASS now (Bahnschrift),
                     # no pre-rendered chapter clips needed.
                     if split_node_titles.burn_titles(
@@ -8175,6 +8402,22 @@ def _resume_episode(state: dict) -> None:
         missing_img = [s for s in shots
                        if not (s.get("is_chapter") or
                                (s.get("image_path") and os.path.isfile(s["image_path"])))]
+    # Chapter title cards (codex/fal): generate any missing card images on
+    # resume too, so a mid-run crash doesn't leave a chapter on a black card.
+    _chap_missing = [s for s in shots
+                     if s.get("is_chapter")
+                     and _active_image_backend() in ("codex", "fal")
+                     and not (s.get("image_path")
+                              and os.path.isfile(s["image_path"])
+                              and "chapter_" in os.path.basename(s["image_path"]))]
+    if _chap_missing:
+        print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards...")
+        for _cs in _chap_missing:
+            _card = _generate_chapter_card(_cs, episode_num)
+            if _card:
+                _cs["image_path"] = _card
+            print(f"  [CARD] chapter {_cs.get('chapter_num')}: "
+                  f"{'OK' if _card else 'black placeholder'}")
     if missing_img:
         print(f"\n[IMAGES] Regenerating {len(missing_img)} missing shots...")
         # ---- Rebuild the episode world assets the fresh run never finished ----
@@ -8626,10 +8869,10 @@ def main():
     # 3i. Duration planning: per-chapter runtime estimates vs target length.
     _plan_durations(narration)
 
-    # 3j. Style test frame (Krea 2 Turbo local) + human review gate.
+    # 3j. Style test frame (active image backend) + human review gate.
     style_test = str(SHOTS_DIR / f"ep{episode_num:03d}" / "style_test.png")
     st_env = ", ".join(context.get("environments", [])) or "the primary setting"
-    print("\n[STYLE] generating style test frame (Krea 2 Turbo local)...")
+    print(f"\n[STYLE] generating style test frame ({_active_image_backend()})...")
     _krea_generate(
         f"{RENDER_STYLE}. A moody establishing frame of the episode's main "
         f"environment: {st_env}. 16:9 widescreen cinematic documentary frame",

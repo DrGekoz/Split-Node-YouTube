@@ -2,6 +2,28 @@
 
 All notable changes to Split Node.
 
+## [1.34.0] - 2026-08-09
+
+### Codex CLI image backend now uses image references + runs FaceUpDAT in Python (no ComfyUI server)
+
+- **Image references via `-i`**: the Codex backend (`IMAGE_BACKEND=codex`) now attaches reference images with `codex exec -i <file>` — real-person photos feed the character sheets, and character panels / brand logos feed each shot — so identity and style carry through just like the local backend.
+- **FaceUpDAT runs DIRECTLY in Python**: new standalone `faceupdat_upscale.py` loads `4xFaceUpDAT.safetensors` with torch + spandrel via ComfyUI's embedded Python (CUDA). No ComfyUI server is required for upscaling — a codex/fal run hits the target resolution without ComfyUI up. PIL lanczos remains only as a last-resort fallback if torch/spandrel is missing.
+- **Sizes enforced**: shots upscale to 1920x1080 (16:9), character panels to 1280x1280, only when the model output is smaller (never downsizes).
+- Fixed two Codex CLI gotchas: when any `-i` ref is attached codex reads the prompt from STDIN (now always piped via `echo`), and Codex 0.147+ renames outputs to `call_*.png` (glob now matches both `call_*` and `ig_*`).
+
+### Businesses are no longer personified as people
+
+- New `_is_business_name()` (curated `KNOWN_COMPANY_NAMES` set + corporate suffix/word regex) stops the LLM treating a company as a person: SpaceX, 'the company', the IRS, HackerOne etc. are skipped in `_build_character_sheets` and demoted to `NONE` after the shot-list CAST-LOCK, so they render as their scene/logo instead of a human. The brand logo still attaches as a shot ref for HQ shots.
+
+### Chapter title cards + establishing-shot labels (Codex / fal)
+
+- **Chapter cards**: when using the codex or fal backend, each chapter gets a real rendered "CHAPTER N -- title" card image (GPT Image 2 is very good at text) shown while the narrator reads the chapter; the ASS chapter burn is skipped for codex runs so the text isn't doubled. Local still uses the black placeholder + ASS card.
+- **Establishing shots**: for codex/fal the name/location is baked into the image bottom-left (`/// LOCATION NAME` for a location, the name for a character); the matching typewriter burn is dropped to avoid doubling.
+
+### Mix levels
+
+- Music bed now **-19.5dB**, SFX **-15dB**, camera shutter **-5dB** (was -18 / -14 / -4).
+
 ## [1.33.0] - 2026-08-07
 
 ### TTS finishes before image generation (no more GPU contention)
