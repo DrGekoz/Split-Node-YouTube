@@ -8780,6 +8780,36 @@ def main():
     os.environ["IMAGE_MODEL"] = img_model
     print(f"  [IMG] Episode image provider: {img_backend} ({img_model})\n")
 
+    # 1c2. ComfyUI gate AFTER the backends are chosen: only the LOCAL image
+    #      backend needs the ComfyUI server (Krea 2 gen). Codex / fal / runpod
+    #      run fine without it (FaceUpDAT upscale runs directly in Python).
+    #      Warn if a local backend was picked but ComfyUI is down, and let the
+    #      user swap to a cloud backend rather than blocking the whole run.
+    _needs_comfy = (thumb_backend == "local" or img_backend == "local")
+    if _needs_comfy:
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8188/system_stats",
+                                         method="GET")
+            with urllib.request.urlopen(req, timeout=4) as r:
+                _comfy_ok = r.status == 200
+        except Exception:
+            _comfy_ok = False
+        if not _comfy_ok:
+            print("\n  [WARN] ComfyUI is NOT running on port 8188.")
+            if img_backend == "local":
+                print("         The LOCAL image backend (Krea 2) needs ComfyUI up.")
+                print("         Re-run with run_nvidia_gpu.bat --lowvram, OR pick")
+                print("         codex / fal / runpod for the episode images instead.")
+                _cont = input("  Continue anyway? (y = keep local & continue, "
+                              "n = abort): ").strip().lower()
+                if _cont in ("n", "no"):
+                    print("  [ABORT] ComfyUI not running. Start it, then re-run.")
+                    return
+                print("  [OK] Continuing with local backend despite ComfyUI being down.\n")
+            else:
+                # Only thumbnail is local - episode images are fine, just warn.
+                print("         Only your THUMBNAIL backend is local; continuing.\n")
+
     # 1d. Image generation mode: resume existing or re-generate (overwrite).
     #     Then pick the style; a style DIFFERENT from the current/resume style
     #     forces re-generate so the new look actually applies to the images.

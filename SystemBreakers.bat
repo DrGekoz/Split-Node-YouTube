@@ -56,9 +56,8 @@ echo [CHECK] ComfyUI (port 8188)...
 curl -s -o nul http://127.0.0.1:8188/system_stats 2>nul
 if %errorlevel% neq 0 (
     echo [WARN] ComfyUI not running on port 8188
-    echo        Krea 2 image generation needs ComfyUI running.
-    echo        Start ComfyUI via run_nvidia_gpu.bat, then re-run this.
-    pause
+    echo        Only needed if you pick the LOCAL image backend.
+    echo        Codex / fal / runpod run fine without it.
 ) else (
     echo [OK] ComfyUI ready
 )

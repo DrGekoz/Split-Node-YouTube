@@ -2,6 +2,14 @@
 
 All notable changes to Split Node.
 
+## [1.34.1] - 2026-08-09
+
+### ComfyUI check moved AFTER the image-backend prompts (no premature block)
+
+- The launcher (`SystemBreakers.bat`) no longer hard-blocks when ComfyUI is down — the ComfyUI check is now a **non-blocking WARN** there ("Only needed if you pick the LOCAL image backend").
+- The real gate now runs in `main()` **after** the thumbnail and episode-image backend prompts. Only the **local** image backend needs the ComfyUI server (Krea 2 gen). If you pick **codex / fal / runpod** for the episode images (no local anywhere), the run proceeds fine with ComfyUI down — FaceUpDAT upscaling runs directly in Python.
+- If the episode backend IS local but ComfyUI is down, it explains why and lets you abort or continue, instead of silently dying before you've chosen anything.
+
 ## [1.34.0] - 2026-08-09
 
 ### Codex CLI image backend now uses image references + runs FaceUpDAT in Python (no ComfyUI server)
