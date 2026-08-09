@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.35.0] - 2026-08-09
+
+### Parallel image generation + async upscale queue (fixes FaceUpDAT OOM stall)
+
+- **Parallel generation**: `IMAGE_BACKEND=codex/fal/runpod` now render shots in PARALLEL (`IMAGE_CONCURRENCY`, default 3) via `ThreadPoolExecutor`. Panels within one character stay sequential (they chain). Local ComfyUI stays 1-concurrent (a single server serialises anyway).
+- **Codex output detection is parallel-safe**: each `generate_image` call snapshots the on-disk image set under a lock, runs codex, then claims the NEWEST file that appeared during its own call and wasn't already claimed (`_scan_lock` + `_claimed` set). Verified: 3 parallel codex calls produce 3 distinct images, no collision.
+- **Async upscale queue**: codex shots enqueue their resolution enforcement and return immediately, so the next prompt fires while the upscaler catches up. A single background worker drains the queue using the persistent upscale daemon. `providers.flush_upscales()` blocks until the queue is empty and is called before the render pass consumes the images. The color grade runs AFTER the upscale (async), never inline.
+- **Upscaler switched to 2x RealESRGAN** (`RealESRGAN_x2plus.pth`, spandrel CUDA bf16, ~1s per image): the 8GB card OOM'd on `4xFaceUpDAT` when a 1280x1280 source blew up to a 5120x5120 intermediate, which stalled episode 11's char-sheet pass. FaceUpDAT (4x) is now the fallback used only for genuine >=2x upscales.
+- **Persistent FaceUpDAT/RealESRGAN daemon**: model load happens once per run (`faceupdat_upscale.py --serve --model`, line-in/DONE-line-out), then every upscale reuses it. Falls back to one-shot if the daemon can't start.
+- `codex_single_test.py` + `codex_parallel_test.py` committed for regression testing parallel codex gen.
+
 ## [1.34.1] - 2026-08-09
 
 ### ComfyUI check moved AFTER the image-backend prompts (no premature block)

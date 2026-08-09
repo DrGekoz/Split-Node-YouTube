@@ -28,6 +28,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -282,9 +283,13 @@ STYLE_PROMPT_FALLBACK = (
 # An unrecognised/custom value is used verbatim as a free-form style tag.
 STYLE_PROFILES = {
     "arcane": (
-        "bold animated style, strong stylized brushwork, painterly shading, "
-        "saturated colors, dramatic rim lighting, dark moody atmosphere, "
-        "high detail, cinematic documentary recreation"),
+        "bold stylized 3D illustration, hand-rendered graphic look, strong "
+        "clean black outlines around characters and objects like a comic or "
+        "cel-shaded video game, flat-to-soft painterly shading, slightly "
+        "exaggerated features, saturated vibrant colors, dramatic rim "
+        "lighting, dark moody atmosphere, high detail, cinematic animated "
+        "documentary still, NOT photorealistic, not a photograph, not "
+        "realistic skin - a stylized illustrated look"),
     "bold-outline": (
         "bold thick black outlines, flat cel-shaded color, comic book "
         "illustration, high contrast, clean graphic shapes, dynamic angles, "
@@ -3903,6 +3908,21 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     if egg:
         scene = (scene + " " + egg).strip()
     chars = _parse_shot_characters(shot)
+    # CODE-X hardening (Joe 2026-08-09): codex is text-to-image + real-photo
+    # refs (no generated panels). The prompt must (a) tell gpt-image-2 to
+    # derive each person's face/likeness from the attached reference photo and
+    # (b) keep it a SINGLE clean cinematic frame - no panel grids, no reference
+    # sheets, no collage. Without this, codex can render the ref as a grid.
+    codex_hard = ""
+    if _active_image_backend() == "codex":
+        codex_hard = (
+            " Use the attached reference photo(s) ONLY for each person's face "
+            "and identity - keep their likeness true to the reference. Render a "
+            "SINGLE clean cinematic frame: one person per subject, whole bodies "
+            "composed in one scene, NO multi-panel grid, NO character sheet, "
+            "NO side-by-side thumbnails, NO repeated copies of the same person, "
+            "no split frames, no collage."
+        )
     if not chars:
         # No character (establishing/landscape/object/hand-closeup shot) - use
         # the scene-only style with zero human language so no person appears.
@@ -3926,7 +3946,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         blocks.append(f"{cb} ({facing})")
     char_part = " ".join(blocks)
     return (
-        f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}, "
+        f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}, "
         f"16:9 widescreen cinematic documentary frame, EXACTLY ONE continuous "
         f"scene, no collage, no duplicated figures"
     )
@@ -3934,27 +3954,37 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
 
 def _get_output_resolution() -> tuple:
     """(W, H) for the final image/video output - RESOLUTION env var.
-    1080p (default) or 4K (3840x2160). Overridden by a per-run prompt that is
-    persisted in resume state."""
-    r = os.environ.get("RESOLUTION", "1080p").strip().lower()
-    return (3840, 2160) if r.startswith("4k") or r in ("2160p", "uhd") else (1920, 1080)
+    1440p (default), 1080p or 4K (3840x2160). Overridden by a per-run
+    prompt that is persisted in resume state."""
+    r = os.environ.get("RESOLUTION", "1440p").strip().lower()
+    if r.startswith("4k") or r in ("2160p", "uhd"):
+        return (3840, 2160)
+    if r in ("1440p", "2k", "qhd"):
+        return (2560, 1440)
+    return (1920, 1080)
 
 
 def _ask_resolution() -> str:
-    """Interactive resolution selection (1080p or 4K) - affects the image
-    upscale target AND the final FFmpeg video output. RESOLUTION env var
-    overrides the prompt; returns the chosen key ('1080p' or '4k')."""
+    """Interactive resolution selection (1440p default / 1080p / 4K) - affects
+    the image upscale target AND the final FFmpeg video output. RESOLUTION env
+    var overrides the prompt; returns the chosen key ('1440p'/'1080p'/'4k')."""
     if os.environ.get("RESOLUTION"):
         r = os.environ.get("RESOLUTION").strip().lower()
-        return "4k" if r.startswith("4k") or r in ("2160p", "uhd") else "1080p"
+        if r.startswith("4k") or r in ("2160p", "uhd"):
+            return "4k"
+        if r in ("1440p", "2k", "qhd"):
+            return "1440p"
+        return "1080p"
     print("\n  Output resolution (affects image upscale target + final video):")
     while True:
-        resp = input("  1080p or 4K? [1080p]: ").strip().lower()
+        resp = input("  1440p, 1080p or 4K? [1440p]: ").strip().lower()
         if resp in ("4k", "2160p", "uhd", "4"):
             return "4k"
-        if resp in ("1080p", "1080", "hd", ""):
+        if resp in ("1440p", "2k", "qhd", ""):
+            return "1440p"
+        if resp in ("1080p", "1080", "hd"):
             return "1080p"
-        print(f"  [WARN] '{resp}' not recognised - enter 1080p or 4K")
+        print(f"  [WARN] '{resp}' not recognised - enter 1440p, 1080p or 4K")
 
 
 def _ask_image_regen() -> bool:
@@ -4097,6 +4127,37 @@ def _black_placeholder(episode_num: int) -> str:
     return out
 
 
+def _llm_chapter_bg_prompt(title: str, chapter_num: int) -> str:
+    """Ask the local LLM to imagine a striking background scene for a chapter.
+
+    The chapter title/name is the only context given - the LLM invents a
+    cinematic, thematically-matched backdrop (setting, mood, objects) that the
+    title card text will sit on top of. Returns a short image-prompt string,
+    or '' if the LLM is unreachable / returns nothing usable.
+    """
+    if not (title or "").strip():
+        return ""
+    try:
+        msgs = [
+            {"role": "system",
+             "content": ("You are a documentary title-card art director. Given a "
+                         "chapter title, describe a SINGLE striking cinematic "
+                         "background scene (setting, mood, key objects, lighting) "
+                         "that matches the title's theme. Return ONLY a 1-2 "
+                         "sentence image prompt. No text, no dialogue, no "
+                         "characters' faces, no words, no watermarks.")},
+            {"role": "user",
+             "content": f"Chapter {chapter_num}: {title}. Background scene:"},
+        ]
+        out = _llm_chat(msgs, max_tokens=120, temp=0.7).strip()
+        out = re.sub(r"\s+", " ", out).strip(" '\"")
+        if not out or len(out) < 8 or out.lower().startswith("chapter"):
+            return ""
+        return out[:300]
+    except Exception:
+        return ""
+
+
 def _generate_chapter_card(shot: dict, episode_num: int) -> Optional[str]:
     """Render a chapter TITLE CARD image via the active image backend.
 
@@ -4118,21 +4179,48 @@ def _generate_chapter_card(shot: dict, episode_num: int) -> Optional[str]:
     ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
     ep_dir.mkdir(parents=True, exist_ok=True)
     out = str(ep_dir / f"chapter_{n:02d}_card.png")
+    _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
+    if _regen and os.path.isfile(out):
+        try:
+            os.remove(out)
+            print(f"  [CARD] REGEN - dropping stale chapter {n:02d} card")
+        except OSError:
+            pass
     if os.path.isfile(out) and os.path.getsize(out) > 1000:
         return out
-    card_text = f"CHAPTER {n:02d}\n\n{title}"
-    # Text-exact prompt - GPT Image 2 loves this. Style injected to keep the
-    # channel's dark cinematic documentary look while keeping the text crisp.
-    prompt = (
-        "A cinematic documentary chapter title card. Solid near-black "
-        "background with subtle dark atmosphere and a faint moody glow behind "
-        "the text. Large elegant white sans-serif capitalised text centred: "
-        f"{card_text!r}. The exact words must render perfectly and legibly - "
-        f"'CHAPTER {n:02d}' big on top, then the chapter title '{title}' below "
-        "it in a slightly smaller line. Minimal, clean, high contrast, "
-        "professional broadcast title card, no photos, no people, no objects, "
-        f"no watermark, no extra text. 16:9 widescreen. {_style_inject()}"
-    )
+    # Match EXACTLY what the TTS narration reads: 'Chapter 1' then the title on
+    # the next line. The narration is 'Chapter {n} - {title}', so we render
+    # 'Chapter {n}' big on top and '{title}' below - identical wording.
+    card_text = f"Chapter {n}\n\n{title}"
+    # COOL BACKGROUND (Joe 2026-08-09): ask the local LLM to imagine a striking,
+    # thematically-matched background for this chapter from its title, instead of
+    # a plain black card. The style prompt is injected as a prefix so the bg
+    # matches the channel's look. Falls back to the dark-moody text card if the
+    # LLM is unreachable or returns nothing usable.
+    bg = _llm_chapter_bg_prompt(title, n)
+    if bg:
+        prompt = (
+            f"{_style_inject()}. {bg}. Overlaid on top, large elegant white "
+            f"sans-serif capitalised text centred: {card_text!r}. The exact "
+            f"words must render perfectly and legibly - 'Chapter {n}' big on "
+            f"top, then the chapter title '{title}' below it in a slightly "
+            f"smaller line. Keep the text crisp and readable against the "
+            f"background, dark vignette behind the text, minimal clutter, no "
+            f"watermark, no extra text. 16:9 widescreen cinematic documentary "
+            f"title card."
+        )
+        print(f"  [CARD] chapter {n:02d} LLM background prompt generated")
+    else:
+        prompt = (
+            "A cinematic documentary chapter title card. Solid near-black "
+            "background with subtle dark atmosphere and a faint moody glow behind "
+            "the text. Large elegant white sans-serif capitalised text centred: "
+            f"{card_text!r}. The exact words must render perfectly and legibly - "
+            f"'Chapter {n}' big on top, then the chapter title '{title}' below "
+            "it in a slightly smaller line. Minimal, clean, high contrast, "
+            "professional broadcast title card, no photos, no people, no objects, "
+            f"no watermark, no extra text. 16:9 widescreen. {_style_inject()}"
+        )
     print(f"  [CARD] rendering chapter {n:02d} title card via {backend}...")
     seed = 90000 + n * 137 + episode_num
     ok = _krea_generate(prompt, seed, out, ref_images=None, denoise=1.0,
@@ -4533,6 +4621,13 @@ def _find_real_reference(char_name: str, role: str) -> Optional[str]:
     when nothing usable is found (the sheet then falls back to txt2img)."""
     safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
     out = REAL_REFS_DIR / f"{safe}.jpg"
+    # MANUAL URL OVERRIDE (Joe, Aug 2026): set REALREF_URL_<SAFE> to force a
+    # specific photo URL for this person. Always honoured - bypasses cached
+    # reuse AND the cached-failure skip, so a manually-supplied URL ALWAYS
+    # creates a fresh face for this episode.
+    override = os.environ.get(f"REALREF_URL_{safe.upper()}")
+    if override:
+        return _download_realref_url(char_name, override, out, force=True)
     if out.is_file():
         if _is_real_image(str(out)):
             print(f"  [REALREF] reuse {os.path.basename(out)}")
@@ -4546,8 +4641,10 @@ def _find_real_reference(char_name: str, role: str) -> Optional[str]:
             pass
     # If a prior run already failed to find a real ref for this person (no
     # usable image), skip the whole 99-candidate search and go straight to
-    # the txt2img fallback. Avoids re-burning the search every run.
-    if char_name.lower() in _load_realref_failures():
+    # the txt2img fallback. Avoids re-burning the search every run. Set
+    # REALREF_FORCE_SEARCH=1 to always try a fresh search (restart/regenerate).
+    if (char_name.lower() in _load_realref_failures()
+            and os.environ.get("REALREF_FORCE_SEARCH", "0") != "1"):
         print(f"  [REALREF] {char_name}: cached no-real-ref (skipping search)")
         return None
     urls = _google_images_candidates(char_name, role)
@@ -4597,6 +4694,58 @@ def _find_real_reference(char_name: str, role: str) -> Optional[str]:
     # No usable ref found this run - cache it so future runs skip the search.
     _save_realref_failure(char_name)
     return None
+
+
+def _download_realref_url(char_name: str, url: str, out: Path,
+                          force: bool = False) -> Optional[str]:
+    """Download a single URL as the real-person photo for char_name.
+
+    Used by the manual URL override (REALREF_URL_<SAFE>). With force=True it
+    overwrites any cached ref so a manually-supplied URL ALWAYS creates a
+    fresh face for this episode. Returns the saved path on success, None on
+    failure. Validates the bytes are a decodable image and audits the photo
+    (person match / no text-watermark) when the local vision model is loaded.
+    """
+    if out.is_file() and not force:
+        if _is_real_image(str(out)):
+            return str(out)
+        try:
+            out.unlink()
+        except OSError:
+            pass
+    if not url or _bad_realref_url(url):
+        print(f"  [REALREF] {char_name}: override URL blocked {str(url)[:60]}")
+        return None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            blob = r.read()
+        if len(blob) < 5000:
+            print(f"  [REALREF] {char_name}: override too small / no bytes")
+            return None
+        REAL_REFS_DIR.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(blob)
+        if not _is_real_image(str(out)):
+            print(f"  [REALREF] {char_name}: override not a decodable image")
+            try:
+                out.unlink()
+            except OSError:
+                pass
+            return None
+        if _vision_available() and not _audit_real_photo(
+                str(out), char_name, ""):
+            print(f"  [REALREF] {char_name}: override rejected by vision audit")
+            try:
+                out.unlink()
+            except Exception:
+                pass
+            return None
+        print(f"  [REALREF] {char_name} <- override {str(url)[:80]}")
+        return str(out)
+    except Exception as e:
+        print(f"  [REALREF] {char_name}: override download failed "
+              f"({str(e)[:80]})")
+        return None
 
 
 # -- Location sheets + prop assets (Joe, Aug 2026) -------------------------
@@ -5820,8 +5969,16 @@ def _select_shot_refs(shot, char_panels_cache, brand_assets=None):
       - a close-up of a hand / object -> NO person ref at all
       - multiple people -> one ref each (face/body can mismatch per framing)
       - business HQ / interior shot -> also include the real brand logo ref
+
+    CODE-X BACKEND (Joe 2026-08-09): codex is text-to-image, so we do NOT feed
+    it the generated 1280x1280 character sheet panels (they're for the Krea
+    identity path and produce weird results through gpt-image-2). Instead each
+    person uses their REAL photo directly (_find_real_reference) as the single
+    identity ref - the panels pass is skipped entirely for codex.
     """
     refs, notes = [], []
+    backend = _active_image_backend()
+    use_real_refs = (backend == "codex")
     st = str(shot.get("shot_type", "")).upper()
     subject = _FRAMING_SUBJECT.get(st, "body")
     visible = _shot_uses_character(shot)
@@ -5829,6 +5986,14 @@ def _select_shot_refs(shot, char_panels_cache, brand_assets=None):
     for ch in _parse_shot_characters(shot):
         if not visible:
             break
+        if use_real_refs:
+            # Real-person photo as the identity ref (no sheet panels).
+            real = _find_real_reference(
+                ch["name"], shot.get("character_role", ""))
+            if real and os.path.isfile(real):
+                refs.append(real)
+                notes.append(f"{ch['name']}: real photo ({ch['facing']})")
+            continue
         panels = char_panels_cache.get(ch["name"])
         if not panels:
             continue
@@ -6112,6 +6277,24 @@ def _generate_material_panels(char_name: str, sheet: dict, seed: int,
     return panels
 
 
+def _image_concurrency() -> int:
+    """How many images to generate in parallel.
+
+    Default: codex/cloud backends run 3 concurrent codex calls (network-bound,
+    no local GPU contention). The local ComfyUI backend stays sequential (1)
+    because a single ComfyUI server processes jobs one at a time and parallel
+    hits just queue on it. Override with IMAGE_CONCURRENCY env var.
+    """
+    env = os.environ.get("IMAGE_CONCURRENCY", "").strip()
+    if env:
+        try:
+            return max(1, int(env))
+        except ValueError:
+            pass
+    backend = _active_image_backend()
+    return 3 if backend in ("codex", "fal", "runpod") else 1
+
+
 def _build_all_character_sheets(shots: list[dict],
                                 character_sheets: Optional[dict],
                                 sheets_dir: Path,
@@ -6123,7 +6306,12 @@ def _build_all_character_sheets(shots: list[dict],
     inside the shot loop) means a face-panel failure is retried and resolved
     before shots are drawn, and all shots reuse the same panels - so a mid-loop
     ComfyUI hiccup can't cascade into sheets (and therefore faces) being missing
-    across every shot. Returns {char_name -> {view: panel_path}}."""
+    across every shot. Returns {char_name -> {view: panel_path}}.
+
+    CHARACTERS ARE INDEPENDENT, so on cloud/codex backends they generate in
+    PARALLEL (IMAGE_CONCURRENCY workers). Panels WITHIN one character stay
+    sequential because they chain (face -> face_side/body).
+    """
     sheets_cache = sheets_cache if sheets_cache is not None else {}
     if not character_sheets:
         character_sheets = {}
@@ -6138,9 +6326,10 @@ def _build_all_character_sheets(shots: list[dict],
         return sheets_cache
     print(f"\n  [SHEET] building character panels first "
           f"({len(seen_names)} character(s), then shots)...")
-    for nm in seen_names:
+
+    def _build_one(nm: str) -> None:
         if nm in sheets_cache:
-            continue
+            return
         sheet_obj = _sheet_for_name(character_sheets, nm) or {}
         if not sheet_obj:
             defs = _build_character_sheets(
@@ -6153,7 +6342,7 @@ def _build_all_character_sheets(shots: list[dict],
         if all(os.path.isfile(p) for p in existing.values()):
             sheets_cache[nm] = existing
             print(f"  [SHEET] reuse {nm} individual panels (on disk)")
-            continue
+            return
         panels: dict = {}
         for attempt in range(1, max_retries + 1):
             panels = _generate_character_sheet(
@@ -6169,6 +6358,14 @@ def _build_all_character_sheets(shots: list[dict],
         else:
             print(f"  [SHEET] {nm}: face panel failed after {max_retries} "
                   f"attempts - shots will render without a face ref")
+
+    n = _image_concurrency()
+    if n > 1 and len(seen_names) > 1:
+        with ThreadPoolExecutor(max_workers=n) as ex:
+            list(ex.map(_build_one, seen_names))
+    else:
+        for nm in seen_names:
+            _build_one(nm)
     return sheets_cache
 
 
@@ -6215,44 +6412,92 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                                          ep_dir or SHOTS_DIR)
     location_sheets = location_sheets or {}
     prop_assets = prop_assets or {}
-    print(f"\n[IMAGES] Generating {len(shots)} 3D shots via local Krea 2 Turbo "
-          f"(1280x720 -> in-graph FaceUpDAT 1920x1080)...")
+    backend = _active_image_backend()
+    backend_label = {"codex": "Codex CLI (gpt-image-2)", "fal": "fal.ai",
+                     "runpod": "RunPod z-image-turbo",
+                     "local": "local Krea 2 Turbo"}.get(backend, backend)
+    print(f"\n[IMAGES] Generating {len(shots)} 3D shots via {backend_label} "
+          f"({len(shots)} -> FaceUpDAT to output resolution)...")
     # ---- PANELS FIRST (dedicated pass) ----
     # Generate EVERY character's six identity panels up front, before any shot
     # renders. A face-panel failure is retried and resolved here so it can't
     # cascade into every shot missing a face.
+    # CODE-X (Joe 2026-08-09): skip panel generation entirely - codex shots use
+    # each person's REAL photo directly as the identity ref (_select_shot_refs),
+    # not the generated Krea identity panels (they render weird through
+    # gpt-image-2). The character_sheets dict is still used for prompt text.
     sheets: dict[str, dict] = {}
-    if face_lock and sheets_dir:
+    if face_lock and sheets_dir and backend != "codex":
         sheets = _build_all_character_sheets(
             shots, character_sheets, sheets_dir, 70000 + episode_num,
             sheets_cache=sheets)
+    elif backend == "codex":
+        print("  [SHEET] codex backend: using REAL-PERSON photo refs, "
+              "skipping generated character panels")
+
+    # ---- CHAPTER CARDS FIRST (sequential, pre-pass) ----
+    # Generate ALL chapter title cards up front, BEFORE the parallel shot pool.
+    # Codex output detection grabs the NEWEST generated image per call; if a
+    # chapter card runs concurrently with character-panel/shot codex calls, its
+    # "newest" scan can copy the wrong (panel) image and you get a stretched
+    # character panel on the card (ep11 bug, Joe 2026-08-09). Rendering every
+    # card here, one at a time, eliminates that race entirely. The shot loop
+    # below then reuses the pre-generated cards.
+    _chap_shots = [s for s in shots if s.get("is_chapter")]
+    if _chap_shots and backend in ("codex", "fal"):
+        print(f"  [CARDS] rendering {len(_chap_shots)} chapter title cards "
+              f"first (sequential)...")
+        for _cs in _chap_shots:
+            _card = _generate_chapter_card(_cs, episode_num)
+            if _card:
+                _cs["image_path"] = _card
+                print(f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
+                      f"{os.path.basename(_card)}")
+            else:
+                print(f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
+                      f"black placeholder")
+
     _img_iter = (tqdm(shots, desc="  [IMAGES] rendering shots", unit="shot",
                       leave=False) if _HAS_PROGRESS else shots)
-    for idx, shot in enumerate(_img_iter):
+
+    # Each shot is independent (its character panels are already built above),
+    # so shots render in PARALLEL on cloud/codex backends. State per shot is a
+    # distinct dict, so concurrent writes don't collide. A lock guards the
+    # progress bar + completion prints only.
+    _plock = threading.Lock()
+
+    def _render_one(idx: int, shot: dict) -> None:
         if _HAS_PROGRESS:
-            _img_iter.set_description(
-                f"  [IMAGES] shot {idx+1}/{len(shots)}")
+            with _plock:
+                _img_iter.set_description(
+                    f"  [IMAGES] shot {idx+1}/{len(shots)}")
         if shot.get("is_chapter"):
             shot["seed"] = 0
-            # When using the Codex CLI backend, render a REAL chapter title
-            # card (GPT Image 2 is very good at text) instead of a black
-            # placeholder - the card is shown for the whole time the narrator
-            # reads "Chapter N - title". The ASS chapter burn is skipped in the
-            # render pass for codex runs so the text isn't doubled.
-            card = _generate_chapter_card(shot, episode_num)
+            # Chapter cards are pre-generated sequentially BEFORE the parallel
+            # shot pool (see pre-pass above) to avoid a codex output-detection
+            # race. Reuse that card here; only generate if it's still missing
+            # (e.g. black placeholder on local backend, or resume without the
+            # pre-pass). The ASS chapter burn is skipped for codex runs so the
+            # card text isn't doubled.
+            card = shot.get("image_path")
+            if not (card and os.path.isfile(card) and "chapter_" in os.path.basename(card)):
+                card = _generate_chapter_card(shot, episode_num)
             shot["image_path"] = card if card else black
             if card:
-                print(f"  [SHOT {idx+1}/{len(shots)}] chapter title card: "
-                      f"{os.path.basename(card)}")
+                with _plock:
+                    print(f"  [SHOT {idx+1}/{len(shots)}] chapter title card: "
+                          f"{os.path.basename(card)}")
             else:
-                print(f"  [SHOT {idx+1}/{len(shots)}] chapter placeholder (no image)")
-            continue
+                with _plock:
+                    print(f"  [SHOT {idx+1}/{len(shots)}] chapter placeholder (no image)")
+            return
         # REGEN_IMAGES=1 -> force re-generate (overwrite) instead of resuming.
         _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
         if not _regen and shot.get("image_path") and os.path.isfile(shot["image_path"]):
-            print(f"  [SHOT {idx+1}/{len(shots)}] resume: keep "
-                  f"{os.path.basename(shot['image_path'])}")
-            continue
+            with _plock:
+                print(f"  [SHOT {idx+1}/{len(shots)}] resume: keep "
+                      f"{os.path.basename(shot['image_path'])}")
+            return
         seed = 10000 + idx * 137 + random.randint(0, 999)
         prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
         # Panels were built up front by _build_all_character_sheets (before the
@@ -6280,7 +6525,8 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             # one retry with a fresh seed
             seed2 = seed + 31337
             out2 = str((ep_dir or SHOTS_DIR) / f"shot_{seed2}.png")
-            print(f"  [SHOT {idx+1}/{len(shots)}] retrying with new seed...")
+            with _plock:
+                print(f"  [SHOT {idx+1}/{len(shots)}] retrying with new seed...")
             if refs:
                 ok = _krea_generate(prompt, seed2, out2,
                                     ref_images=refs, denoise=1.0,
@@ -6295,13 +6541,36 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         shot["seed"] = seed
         shot["image_path"] = out_path if ok else None
         if ok:
-            # Shot images come out 1920x1080 from the in-graph FaceUpDAT
-            # upscale - just apply the style-card grade.
-            _apply_grade(out_path)
+            # Codex shots are upscaled ASYNC (enqueued) - the grade must run
+            # AFTER the upscale or it gets overwritten. Apply it in the final
+            # pass after flush_upscales(). Non-codex backends grade inline.
+            if _active_image_backend() != "codex":
+                _apply_grade(out_path)
             label = notes if notes else "txt2img (no refs)"
-            print(f"  [SHOT {idx+1}/{len(shots)}] image ready -> refs: {label}")
+            with _plock:
+                print(f"  [SHOT {idx+1}/{len(shots)}] image ready -> refs: {label}")
         else:
-            print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED after retry")
+            with _plock:
+                print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED after retry")
+        if _HAS_PROGRESS:
+            with _plock:
+                _img_iter.update(1)
+
+    _n = _image_concurrency()
+    if _n > 1 and len(shots) > 1:
+        with ThreadPoolExecutor(max_workers=_n) as ex:
+            list(ex.map(_render_one, range(len(shots)), shots))
+    else:
+        for idx, shot in enumerate(shots):  # not _img_iter: manual update() below
+            _render_one(idx, shot)
+    # Wait for the async upscale queue to drain so every shot is at the final
+    # resolution before the render pass consumes them (Joe 2026-08-09). The
+    # queue lets codex fire prompts back-to-back while the upscaler catches up.
+    try:
+        import providers
+        providers.flush_upscales()
+    except Exception:
+        pass
     ok = sum(1 for s in shots if s.get("image_path"))
     print(f"  [IMAGES] {ok}/{len(shots)} images generated")
     return shots
@@ -6764,7 +7033,17 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                     placements.append((str(shutter), start + 0.1, None))
                     print(f"  [AUDIO] Camera shutter @{start + 0.1:.1f}s "
                           f"(establishing {shot.get('establishing_kind')})")
+                # VCR/static sweep on establishing frames (Joe 2026-08-09):
+                # a white-noise flicker plays as the frame cuts in, matching
+                # the scanlines+VCR look added in _render_clip. Short transient,
+                # sits with the shutter. Only when the LLM didn't already pick
+                # an sfx for the shot so we never triple-stack.
                 if shot.get("sfx", "NONE") == "NONE":
+                    vcr = _sfx_path("glitch-white-noise-flicker")
+                    if vcr and vcr.is_file():
+                        placements.append((str(vcr), start + 0.1, None))
+                        print(f"  [AUDIO] VCR static 'glitch-white-noise-flicker' "
+                              f"@{start + 0.1:.1f}s (establishing)")
                     wkey = _pick_sfx("sweep-")
                     if wkey:
                         wm = SFX_LIBRARY[wkey]
@@ -7088,11 +7367,15 @@ def _build_resolved_title_events(chapter_events: list[dict],
 
 def _render_clip(image_path: str, audio_path: str, output_path: str,
                  fallback_img: Optional[str] = None,
-                 black_frames: bool = False) -> bool:
+                 black_frames: bool = False,
+                 vcr_effect: bool = False) -> bool:
     """Render one shot: slow-zoom image + narration audio -> 1080p clip.
 
     black_frames=True prepends 2 frames of pure black before the image
     (camera-shutter mimic when a new character/location is introduced).
+    vcr_effect=True (establishing shots, Joe 2026-08-09) overlays scanlines +
+    a VCR static/noise look so the establishing frame reads as an aged
+    broadcast frame - pairs with the white-noise-flicker SFX added in the mix.
     """
     W_RES, H_RES = _get_output_resolution()
     OV_W, OV_H = W_RES * 4, H_RES * 4   # 4x overscan -> sub-pixel zoom steps
@@ -7110,7 +7393,9 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
     # frame-to-frame motion variance vs 2x - cv 0.73 -> 0.41 on noise imagery),
     # and zoom from the exact center so the crop never drifts.
     zoom_expr = f"z='if(eq(on,1),1,min(1+0.06*(on-1)/{max(n_frames-1,1)},1.06))'"
-    chain = (
+    # Main image pipeline. Trailing [base] label ONLY added when the VCR
+    # scanline blend needs to splice in (otherwise it'd dangle before [vout]).
+    main = (
         f"[0:v]loop=1:size=1:start=0,"
         f"scale={OV_W}:{OV_H}:flags=lanczos:force_original_aspect_ratio=increase,"
         f"crop={OV_W}:{OV_H},"
@@ -7118,10 +7403,26 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
         f"d={n_frames}:s={W_RES}x{H_RES}:fps=24,"
         f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(dur-0.3,0):.2f}:d=0.3"
     )
+    # VCR / scanlines look for establishing frames (Joe 2026-08-09):
+    #  - a generated dark-line scanline overlay (2px on / 2px off, blended)
+    #  - temporal static noise + slight chroma tint for the aged-broadcast look
+    #  - pairs with the white-noise-flicker SFX added in the audio mix.
+    if vcr_effect:
+        # The scanline layer is nullsrc+geq (black on alternate lines) then
+        # blended on at low opacity so the establishing image stays readable.
+        scan = (f"[base];"
+                f"nullsrc=size={W_RES}x{H_RES}:rate=24,"
+                f"geq=r='if(lt(mod(Y,4),2),0,255)':"
+                f"g='if(lt(mod(Y,4),2),0,255)':"
+                f"b='if(lt(mod(Y,4),2),0,255)':"
+                f"a='if(lt(mod(Y,4),2),255,0)'[scan];"
+                f"[base][scan]blend=all_mode=overlay:all_opacity=0.35,"
+                f"eq=saturation=0.9,noise=alls=5:allf=t,hue=b=2")
+        main += "[base]" + scan
     if black_frames:
         # 2 frames of black at the very start = camera shutter between images
-        chain += ",tpad=start=2:color=black"
-    filter_graph = chain + "[vout]"
+        main += ",tpad=start=2:color=black"
+    filter_graph = main + "[vout]"
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", image_path,
@@ -7347,12 +7648,18 @@ def _render_video(shots: list[dict], episode_num: int,
                 continue
             nidx = shot.get("narration_idx", idx)
             black_frames = nidx in shutter_paras
+            # Establishing frames AND chapter cards get the scanlines+VCR look
+            # (Joe 2026-08-09): aged-broadcast frame, pairs with the
+            # white-noise-flicker SFX.
+            vcr = bool(shot.get("is_establishing") or shot.get("is_chapter"))
             ok = _render_clip(shot.get("image_path", ""), shot["tts_path"], clip_out,
-                              fallback_img, black_frames=black_frames)
+                              fallback_img, black_frames=black_frames,
+                              vcr_effect=vcr)
             if ok:
                 clip_files.append(clip_out)
                 print(f"  [CLIP {idx+1}/{len(valid)}] rendered"
-                      f"{' (shutter: 2 black frames)' if black_frames else ''}")
+                      f"{' (shutter: 2 black frames)' if black_frames else ''}"
+                      f"{' (VCR/scanlines)' if vcr else ''}")
             else:
                 print(f"  [CLIP {idx+1}/{len(valid)}] FAILED")
         print(f"  [CLIPS] {reused}/{len(clip_files)} reused from batch_temp, "
@@ -8378,9 +8685,13 @@ def _resume_episode(state: dict) -> None:
             os.environ["REGEN_IMAGES"] = "1"
         if _chosen:
             os.environ["STYLE"] = _chosen
-    # Resume keeps the episode's output resolution too (unless RESOLUTION set).
-    if state.get("resolution") and not os.environ.get("RESOLUTION"):
-        os.environ["RESOLUTION"] = str(state.get("resolution"))
+    # Ask the user for the output resolution on resume too (Joe 2026-08-09):
+    # defaults to 1440p but offers 1080p/4K, so a resumed run can change the
+    # upscale/video target. RESOLUTION env var overrides the prompt.
+    if not os.environ.get("RESOLUTION"):
+        _chosen_res = _ask_resolution()
+        os.environ["RESOLUTION"] = _chosen_res
+        print(f"  [RESUME] Output resolution -> {_chosen_res.upper()}")
 
     def _save(stg):
         _save_resume_state(stg, episode_num, article_url, topic, shots,
@@ -8404,12 +8715,15 @@ def _resume_episode(state: dict) -> None:
                                (s.get("image_path") and os.path.isfile(s["image_path"])))]
     # Chapter title cards (codex/fal): generate any missing card images on
     # resume too, so a mid-run crash doesn't leave a chapter on a black card.
+    # Under REGEN_IMAGES=1 the stale cards are force-regenerated (they may be
+    # corrupted - ep11 had character panels stretched onto the cards).
     _chap_missing = [s for s in shots
                      if s.get("is_chapter")
                      and _active_image_backend() in ("codex", "fal")
-                     and not (s.get("image_path")
-                              and os.path.isfile(s["image_path"])
-                              and "chapter_" in os.path.basename(s["image_path"]))]
+                     and (not (s.get("image_path")
+                               and os.path.isfile(s["image_path"])
+                               and "chapter_" in os.path.basename(s["image_path"]))
+                          or _force_regen)]
     if _chap_missing:
         print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards...")
         for _cs in _chap_missing:
@@ -8434,25 +8748,39 @@ def _resume_episode(state: dict) -> None:
         # Generate EVERY character's six identity panels up front, before any
         # shot renders. A face-panel failure is retried here and resolved here,
         # so it can't cascade into every shot missing a face (a lazy in-loop
-        # build would leave sheets empty across all 111 shots on a hiccup).
-        if face_lock:
+        # build would leave sheets empty across all shots on a hiccup).
+        # CODE-X (Joe 2026-08-09): skip panel generation on resume too - codex
+        # shots use each person's REAL photo directly as the identity ref, so
+        # panels are wasted work (and can leak into codex output detection).
+        if face_lock and _active_image_backend() != "codex":
             sheets_cache = _build_all_character_sheets(
                 missing_img, character_sheets, sheets_dir, 70000 + episode_num,
                 sheets_cache=sheets_cache)
-        # ---- Smart shot regen (matches the fresh loop) ----
+        elif face_lock:
+            print("  [SHEET] codex backend: using REAL-PERSON photo refs, "
+                  "skipping generated character panels (resume)")
+        # ---- Smart shot regen (matches the fresh loop, PARALLEL on cloud/codex) ----
         # Each character's SIX individual 1280x1280 panels are built once and
         # _select_shot_refs picks the PERFECT panel(s) per shot (framing,
         # facing, mirrored sides, multi-person, business logo). Style is
-        # prompt-injected; no style-plate refs.
+        # prompt-injected; no style-plate refs. Shots are independent, so on
+        # codex/fal/runpod they render in PARALLEL (IMAGE_CONCURRENCY) exactly
+        # like the fresh path (Joe 2026-08-09).
         _re_iter = (tqdm(missing_img, desc="  [IMAGES] regenerating missing",
                          unit="shot", leave=False)
                     if _HAS_PROGRESS else missing_img)
-        for shot in _re_iter:
+        _plock = threading.Lock()
+
+        def _regen_one(idx: int, shot: dict) -> None:
+            if _HAS_PROGRESS:
+                with _plock:
+                    _re_iter.set_description(
+                        f"  [IMAGES] regenerating {idx+1}/{len(missing_img)}")
             chars = _parse_shot_characters(shot)
             seed = shot.get("seed") or (10000 + random.randint(0, 999))
             prompt = (_build_shot_prompt(shot, character_sheets)
                       + " " + _style_inject())
-            if face_lock:
+            if face_lock and _active_image_backend() != "codex":
                 # Panels were built up front by _build_all_character_sheets -
                 # just confirm every char in this shot is present.
                 for ch in chars:
@@ -8479,7 +8807,8 @@ def _resume_episode(state: dict) -> None:
             if not ok:
                 seed2 = seed + 31337
                 out2 = str(ep_shot_dir / f"shot_{seed2}.png")
-                print("  [SHOT] retrying with new seed...")
+                with _plock:
+                    print("  [SHOT] retrying with new seed...")
                 if refs:
                     ok = _krea_generate(prompt, seed2, out2,
                                         ref_images=refs, denoise=1.0,
@@ -8494,9 +8823,28 @@ def _resume_episode(state: dict) -> None:
             shot["seed"] = seed
             shot["image_path"] = out_path if ok else None
             label = notes if notes else "txt2img (no refs)"
-            print(f"  [SHOT] {'image ready' if ok else 'IMAGE FAILED - fallback'} "
-                  f"-> refs: {label}")
-            time.sleep(1)
+            with _plock:
+                print(f"  [SHOT] {'image ready' if ok else 'IMAGE FAILED - fallback'} "
+                      f"-> refs: {label}")
+                time.sleep(1)
+            if _HAS_PROGRESS:
+                with _plock:
+                    _re_iter.update(1)
+
+        _rn = _image_concurrency()
+        if _rn > 1 and len(missing_img) > 1:
+            with ThreadPoolExecutor(max_workers=_rn) as ex:
+                list(ex.map(_regen_one, range(len(missing_img)), missing_img))
+        else:
+            for _i, _sh in enumerate(missing_img):
+                _regen_one(_i, _sh)
+        # Drain the async upscale queue so every regen shot is at the final
+        # resolution before the next stage consumes them (Joe 2026-08-09).
+        try:
+            import providers
+            providers.flush_upscales()
+        except Exception:
+            pass
         _save("images")
     else:
         print(f"  [RESUME] All {len(shots)} images present")
@@ -8504,16 +8852,28 @@ def _resume_episode(state: dict) -> None:
     # 2. TTS: regenerate only the missing narration clips (or ALL of them when
     #    regen_tts). Also strip any leaked stage directions from the narration
     #    text before speaking it, so a bracketed direction can never be read.
+    #    The skip check is DISK-BASED (deterministic narration_XX.wav path):
+    #    clips already rendered are reused even if the resume state was saved
+    #    before TTS finished, so a mid-TTS crash resumes from where it left off
+    #    (e.g. 34/109) instead of re-speaking everything.
+    ep_dir = TTS_TEMP / f"ep_{episode_num}"
+    ep_dir.mkdir(parents=True, exist_ok=True)
     if regen_tts:
         missing_tts = [s for s in shots
                        if not s.get("is_chapter") and (s.get("narration") or "").strip()]
         print(f"\n[TTS] REGEN - re-speaking ALL {len(missing_tts)} narration clips")
     else:
-        missing_tts = [s for s in shots if not (s.get("tts_path") and os.path.isfile(s["tts_path"]))]
+        missing_tts = []
+        for s in shots:
+            _nidx = s.get("narration_idx", 0)
+            _disk = str(ep_dir / f"narration_{_nidx:02d}.wav")
+            if os.path.isfile(_disk) and os.path.getsize(_disk) > 1000:
+                s["tts_path"] = _disk  # reuse what's already on disk
+                continue
+            missing_tts.append(s)
     if missing_tts:
-        print(f"\n[TTS] Generating {len(missing_tts)} missing narration clips...")
-        ep_dir = TTS_TEMP / f"ep_{episode_num}"
-        ep_dir.mkdir(parents=True, exist_ok=True)
+        print(f"\n[TTS] Generating {len(missing_tts)} missing narration clips "
+              f"({len(shots) - len(missing_tts)} already on disk)...")
         for idx, shot in enumerate(missing_tts):
             nidx = shot.get("narration_idx", idx)
             out = str(ep_dir / f"narration_{nidx:02d}.wav")
@@ -8909,9 +9269,9 @@ def main():
         4242 + episode_num, style_test)
     if os.path.isfile(style_test):
         print(f"  [STYLE] test frame: {style_test}")
-        if not _gate("Approve style + director's bible? (n = rebuild bible)"):
-            print("  [BIBLE] rebuilding with a fresh perspective...")
-            bible = _build_directors_bible(article_title, narration)
+        # No human gate here - Joe 2026-08-09: removed the "Approve style +
+        # director's bible?" prompt so unattended codex runs don't stall. The
+        # bible is used as-is; style changes are handled by the STYLE env var.
     else:
         print("  [STYLE] test frame failed (ComfyUI not running?) - continuing")
 

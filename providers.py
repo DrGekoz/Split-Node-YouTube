@@ -35,6 +35,8 @@ import time
 import urllib.request
 import urllib.error
 from pathlib import Path
+import queue as _queue
+import threading as _threading
 
 # ---------------------------------------------------------------------------
 # Keys + project root (.env loaded here; system_breakers also loads it)
@@ -308,6 +310,21 @@ def _codex_available() -> bool:
 
 
 class Codex:
+    # Parallel-safe output detection: each call records the set of generated
+    # images present before it runs, generates, then claims the NEWEST file
+    # that was NOT present before AND not already claimed by another thread.
+    # The lock only guards the scan/claim step, not the codex subprocess, so
+    # multiple codex calls run concurrently without stealing each other's output.
+    _scan_lock = None
+    _claimed = set()
+
+    @classmethod
+    def _lock(cls):
+        if cls._scan_lock is None:
+            import threading
+            cls._scan_lock = threading.Lock()
+        return cls._scan_lock
+
     def __init__(self):
         if not _codex_available():
             raise RuntimeError("codex CLI not found on PATH - install with: npm install -g @openai/codex")
@@ -317,31 +334,41 @@ class Codex:
                        timeout: int = 900) -> bool:
         import shutil
         import subprocess
-        import tempfile
         import glob
         generated = Path.home() / ".codex" / "generated_images"
         generated.mkdir(parents=True, exist_ok=True)
         # Codex 0.147+ names outputs call_*.png (older used ig_*.png) - match
         # both so a version bump never silently breaks detection.
-        def _scan() -> set:
-            return (set(glob.glob(str(generated / "**" / "call_*.png"), recursive=True))
-                    | set(glob.glob(str(generated / "**" / "ig_*.png"), recursive=True)))
-        before = _scan()
+        def _scan() -> dict:
+            m = {}
+            for p in (glob.glob(str(generated / "**" / "call_*.png"), recursive=True)
+                      + glob.glob(str(generated / "**" / "ig_*.png"), recursive=True)):
+                m[os.path.abspath(p)] = os.path.getmtime(p)
+            return m
+
+        # Snapshot BEFORE (under lock) so concurrent threads each get their own
+        # before-set and can't collide on which output belongs to whom.
+        with self._lock():
+            before = _scan()
 
         # Codex is a Windows Node app -> always shell through powershell.exe.
         # The --skip-git-repo-check flag MUST come BEFORE the /imagegen prompt.
         # Image references are attached via -i <file> so GPT Image 2 uses them
         # as identity/style refs (character panels, real-person refs, logos).
-        # NOTE: when any -i ref is attached, codex exec reads the prompt from
-        # STDIN (not the positional arg) - so we ALWAYS pipe the prompt via
-        # `echo <prompt> |` to keep both paths working.
+        # CRITICAL (Joe 2026-08-09): `/imagegen <prompt>` must be piped to codex
+        # exec on STDIN as ONE payload. Passing `/imagegen` and the prompt as
+        # SEPARATE positional args makes codex parse `/imagegen` as a subcommand
+        # and reject the prompt as 'unexpected argument' -> it errors out in ~0s,
+        # creates no output, and the fallback below would silently copy a stale
+        # old on-disk image. Verified working: `echo '/imagegen <prompt>' |
+        # codex exec --skip-git-repo-check [-i <ref>]` (with OR without refs).
         ref_args = ""
         for ref in (ref_images or []):
             if ref and os.path.isfile(ref):
                 ref_args += " -i " + _ps_quote(os.path.abspath(ref))
-        p_quoted = _ps_quote(prompt)
+        p_quoted = _ps_quote("/imagegen " + prompt)
         ps_cmd = (f"echo {p_quoted} | codex exec --skip-git-repo-check "
-                  f"{ref_args} /imagegen {p_quoted}")
+                  f"{ref_args}")
         cmd = ["powershell.exe", "-NoProfile", "-Command", ps_cmd]
         print(f"  [CODEX] running codex exec /imagegen"
               f"{' (' + str(len(ref_images)) + ' image refs)' if ref_images else ''}...")
@@ -352,19 +379,21 @@ class Codex:
             print("  [CODEX] timed out generating image")
             return False
 
-        # No reliable "saved to X" line - find the NEWEST generated image.
+        # Claim the NEWEST image that appeared during THIS call (and wasn't
+        # already present or claimed by another thread). Under lock so parallel
+        # threads each pick a distinct file.
         after = _scan()
-        new = after - before
-        if not new:
-            # fall back to newest mtime if the session folder already existed
-            all_imgs = sorted(_scan(),
-                              key=os.path.getmtime, reverse=True)
-            if all_imgs:
-                new = {all_imgs[0]}
-        if not new:
-            print("  [CODEX] no generated image found under ~/.codex/generated_images")
-            return False
-        src = sorted(new, key=os.path.getmtime, reverse=True)[0]
+        with self._lock():
+            candidates = {p: t for p, t in after.items()
+                          if p not in before and p not in self._claimed}
+            if not candidates:
+                candidates = {p: t for p, t in after.items()
+                              if p not in self._claimed}
+            if not candidates:
+                print("  [CODEX] no generated image found under ~/.codex/generated_images")
+                return False
+            src = max(candidates, key=candidates.get)  # newest by mtime
+            self._claimed.add(src)
         try:
             shutil.copy2(src, out_path)
         except Exception as e:
@@ -384,30 +413,193 @@ def _ps_quote(s: str) -> str:
 # needed to load 4xFaceUpDAT directly - NO ComfyUI server required.
 _UPSCALE_SCRIPT = PROJECT_DIR / "faceupdat_upscale.py"
 _COMFY_PY = r"F:\ComfyUI_windows_portable\python_embeded\python.exe"
-_UPSCALER_MODEL = r"F:\ComfyUI_windows_portable\ComfyUI\models\upscale_models\4xFaceUpDAT.safetensors"
+# 2x upscaler - fast on the 8GB card, good at faces/eyes (Joe 2026-08-09).
+# FaceUpDAT (4x) is the fallback if the 2x model is missing.
+_UPSCALER_MODEL = r"F:\ComfyUI_windows_portable\ComfyUI\models\upscale_models\RealESRGAN_x2plus.pth"
+_UPSCALER_MODEL_4X = r"F:\ComfyUI_windows_portable\ComfyUI\models\upscale_models\4xFaceUpDAT.safetensors"
+
+# Persistent FaceUpDAT daemon: the ~40s model load happens ONCE per run and
+# every subsequent upscale reuses the loaded model (job line in, 'DONE' line
+# out). Falls back to one-shot subprocess (previous behaviour) if the daemon
+# can't start, so the pipeline never hard-requires it.
+_upscale_daemon = None
+_upscale_daemon_lock = None
+_UPSCALE_TIMEOUT = int(os.environ.get("UPSCALE_TIMEOUT", "300"))
+
+# Async upscale queue (Joe 2026-08-09): codex generation should NOT wait for
+# the previous shot's upscale to finish before firing the next prompt. Shots
+# enqueue their resolution enforcement here and return immediately; a single
+# background worker drains the queue (itself using the persistent FaceUpDAT
+# daemon, so upscales stay cheap). _flush_upscales() blocks until the queue is
+# empty and is called before the render pass consumes the images.
+_upscale_q = _queue.Queue()
+_upscale_q_worker = None
+_upscale_q_lock = _threading.Lock()
+
+
+def _upscale_worker_loop():
+    while True:
+        job = _upscale_q.get()
+        if job is None:
+            _upscale_q.task_done()
+            break
+        try:
+            image_path, width, height = job
+            _enforce_resolution(image_path, width, height)
+        except Exception as _e:
+            print(f"  [UPSCALE] worker error: {str(_e)[:120]}")
+        finally:
+            _upscale_q.task_done()
+
+
+def _start_upscale_worker():
+    global _upscale_q_worker
+    with _upscale_q_lock:
+        if _upscale_q_worker is None or not _upscale_q_worker.is_alive():
+            _upscale_q_worker = _threading.Thread(
+                target=_upscale_worker_loop, daemon=True)
+            _upscale_q_worker.start()
+
+
+def enqueue_upscale(image_path: str, width: int, height: int) -> None:
+    """Queue a resolution-enforcement job for the background worker. Returns
+    immediately so codex can fire the next prompt without waiting."""
+    _start_upscale_worker()
+    _upscale_q.put((image_path, int(width), int(height)))
+
+
+def flush_upscales(timeout: float = 3600.0) -> None:
+    """Block until every queued upscale job has finished. Safe to call with an
+    empty queue. Used before the render pass consumes the upscaled images."""
+    _start_upscale_worker()
+    _upscale_q.join()
+
+
+def _enforce_resolution(image_path: str, width: int, height: int) -> bool:
+    """Enforce EXACT target resolution on an image, in place.
+
+    GPT Image 2 / codex has a FIXED native output (1672x941 on this setup)
+    regardless of the prompt size hint, so it rarely matches the requested
+    width x height. Resize to the EXACT requested size: downscale via PIL
+    lanczos when larger (or wrong ratio), upscale via the neural upscaler
+    (RealESRGAN x2) when smaller. Returns True on success.
+    """
+    from PIL import Image
+    try:
+        im = Image.open(image_path)
+        w, h = im.size
+        im.close()
+    except Exception:
+        return False
+    if w >= width and h >= height and (w, h) != (width, height):
+        # larger than target (or wrong ratio) -> downscale to exact
+        with Image.open(image_path) as im:
+            im = im.resize((width, height), Image.LANCZOS)
+            im.save(image_path)
+        print(f"  [SIZE] {os.path.basename(image_path)} downscaled "
+              f"{w}x{h} -> {width}x{height}")
+        return True
+    return _ensure_image_size(image_path, image_path, width=width,
+                              height=height)
+
+
+def _upscale_model_path() -> str:
+    """Return the 2x upscaler if present, else the 4x FaceUpDAT fallback."""
+    return (_UPSCALER_MODEL if os.path.isfile(_UPSCALER_MODEL)
+            else _UPSCALER_MODEL_4X if os.path.isfile(_UPSCALER_MODEL_4X)
+            else _UPSCALER_MODEL)
+
+
+def _get_upscale_daemon():
+    """Return (proc, lock) for a persistent upscale --serve subprocess,
+    starting it on first use. Returns (None, None) if it can't be started."""
+    global _upscale_daemon, _upscale_daemon_lock
+    if _upscale_daemon is not None:
+        return _upscale_daemon, _upscale_daemon_lock
+    if (not os.path.isfile(_UPSCALE_SCRIPT)
+            or not os.path.isfile(_upscale_model_path())
+            or not os.path.isfile(_COMFY_PY)):
+        return None, None
+    import subprocess
+    import threading
+    cmd = [_COMFY_PY, str(_UPSCALE_SCRIPT), "--serve", "--model",
+           _upscale_model_path()]
+    try:
+        # stderr -> DEVNULL: torch model-load warnings fill the stderr pipe and
+        # deadlock the daemon before [READY] if we don't drain it. The serve
+        # daemon reports per-job success/failure on stdout (DONE lines), so we
+        # don't lose error info by discarding stderr.
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL,
+                                text=True, bufsize=1)
+        # wait for [READY] (model loaded) with a bounded timeout
+        line = ""
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if "READY" in line:
+                break
+        if "READY" not in line:
+            proc.terminate()
+            return None, None
+    except Exception:
+        return None, None
+    _upscale_daemon = proc
+    _upscale_daemon_lock = threading.Lock()
+    return _upscale_daemon, _upscale_daemon_lock
 
 
 def _faceupdat_upscale(image_path: str, out_path: str,
                        width: int = 1920, height: int = 1080,
-                       timeout: int = 900) -> bool:
+                       timeout: int = None) -> bool:
     """Upscale an image with 4xFaceUpDAT run DIRECTLY in Python (torch + spandrel).
 
     No ComfyUI server needed - the embedded Python loads the model and upscales
-    standalone, then cover-fits to the exact target resolution. Used to pipe
-    Codex/GPT-Image-2/local output up to the final shot/panel/thumbnail size.
-    Returns True on success.
+    standalone, then cover-fits to the exact target resolution. Uses a PERSISTENT
+    daemon so the model is loaded only once per run. Returns True on success.
     """
+    import json
     import subprocess
-    if not os.path.isfile(_UPSCALE_SCRIPT):
-        print(f"  [UPSCALE] script not found: {_UPSCALE_SCRIPT}")
+    timeout = timeout or _UPSCALE_TIMEOUT
+    if not os.path.isfile(image_path):
         return False
-    if not os.path.isfile(_UPSCALER_MODEL):
-        print(f"  [UPSCALE] model not found: {_UPSCALER_MODEL}")
+    daemon, lock = _get_upscale_daemon()
+    if daemon is not None and lock is not None:
+        try:
+            with lock:
+                job = json.dumps({"in": os.path.abspath(image_path),
+                                  "out": os.path.abspath(out_path),
+                                  "w": width, "h": height, "skip": True})
+                try:
+                    daemon.stdin.write(job + "\n")
+                    daemon.stdin.flush()
+                except Exception:
+                    # daemon died mid-run - fall through to one-shot
+                    return _faceupdat_oneshot(image_path, out_path,
+                                              width, height, timeout)
+                # read the single DONE line for this job
+                line = ""
+                for _ in range(20):
+                    line = daemon.stdout.readline()
+                    if line.startswith("DONE"):
+                        break
+                parts = line.split()
+                if len(parts) >= 3 and parts[0] == "DONE" and parts[2] == "1":
+                    return True
+                return False
+        except Exception:
+            return _faceupdat_oneshot(image_path, out_path, width, height, timeout)
+    return _faceupdat_oneshot(image_path, out_path, width, height, timeout)
+
+
+def _faceupdat_oneshot(image_path: str, out_path: str,
+                       width: int, height: int, timeout: int) -> bool:
+    """Original per-image subprocess path (fallback if the daemon is unavailable)."""
+    import subprocess
+    if not os.path.isfile(_UPSCALE_SCRIPT) or not os.path.isfile(_upscale_model_path()):
         return False
-    if not os.path.isfile(_COMFY_PY):
-        print(f"  [UPSCALE] embedded python not found: {_COMFY_PY}")
-        return False
-    cmd = [_COMFY_PY, str(_UPSCALE_SCRIPT), _UPSCALER_MODEL,
+    cmd = [_COMFY_PY, str(_UPSCALE_SCRIPT), _upscale_model_path(),
            os.path.abspath(image_path), os.path.abspath(out_path),
            str(width), str(height), "--skip-if-larger"]
     try:
@@ -426,14 +618,15 @@ def _ensure_image_size(image_path: str, out_path: str,
                        timeout: int = 900) -> bool:
     """Ensure an image is at least `width`x`height`, upscaling only if smaller.
 
-    Preferred path is 4xFaceUpDAT run DIRECTLY in the embedded Python (torch +
-    spandrel) - no ComfyUI server required. If FaceUpDAT can't run (missing
-    python/model), fall back to a PIL lanczos upscale so the pipeline still
-    hits the target resolution. Never downsizes - if the source is already >=
-    target it's left untouched.
+    Uses the neural 2x upscaler (RealESRGAN x2plus) via the persistent daemon -
+    FAST on the 8GB card (~2-5s per 1280x720 shot) and good at faces/eyes. The
+    daemon's tile-based mosaic covers the source at the model's scale then
+    cover-fits to the exact target, so 1080p/1440p/4K all come out correct.
+    Never downsizes; an already->=target source is left untouched. NO PIL
+    lanczos resize is used (Joe 2026-08-09 - PIL upscales were blurry).
     """
+    from PIL import Image
     try:
-        from PIL import Image
         im = Image.open(image_path)
         w, h = im.size
     except Exception as e:
@@ -443,21 +636,12 @@ def _ensure_image_size(image_path: str, out_path: str,
         print(f"  [SIZE] {os.path.basename(image_path)} already {w}x{h} "
               f"(target {width}x{height}), no upscale needed")
         return True
-    # FaceUpDAT (direct Python, best quality, no ComfyUI server).
     if _faceupdat_upscale(image_path, out_path, width=width, height=height,
                           timeout=timeout):
         return True
-    # PIL lanczos fallback so the pipeline never hard-requires torch/spandrel.
-    try:
-        im = im.convert("RGB")
-        im = im.resize((width, height), Image.LANCZOS)
-        im.save(out_path)
-        print(f"  [SIZE] PIL fallback upscale {os.path.basename(out_path)} "
-              f"{w}x{h} -> {width}x{height}")
-        return os.path.getsize(out_path) > 500
-    except Exception as e:
-        print(f"  [SIZE] PIL fallback failed: {str(e)[:120]}")
-        return False
+    print(f"  [SIZE] neural upscale failed for "
+          f"{os.path.basename(image_path)}")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -595,13 +779,14 @@ def generate_image(prompt: str, seed: int, out_path: str,
         ok = c.generate_image(prompt, out_path, ref_images=ref_images)
         if not ok:
             return False
-        # Enforce the target resolution: GPT Image 2 / codex output can come
-        # out smaller than the requested size. Prefer FaceUpDAT (ComfyUI, best
-        # quality) but fall back to a PIL lanczos upscale so a NON-local run
-        # never REQUIRES ComfyUI to be running.
+        # Enforce the target resolution ASYNCHRONOUSLY (Joe 2026-08-09): GPT
+        # Image 2 / codex has a FIXED native output (1672x941 on this setup)
+        # regardless of the prompt size hint. Instead of blocking the shot
+        # loop here on the upscale, enqueue the exact-size enforcement so codex
+        # can fire the next prompt immediately and the upscaler catches up in
+        # the background. flush_upscales() is called before the render pass.
         if upscale:
-            return _ensure_image_size(out_path, out_path, width=width,
-                                      height=height)
+            enqueue_upscale(out_path, width, height)
         return True
 
     if backend == "fal":
