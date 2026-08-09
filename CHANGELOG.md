@@ -2,6 +2,20 @@
 
 All notable changes to Split Node.
 
+## [1.39.5] - 2026-08-09
+
+### Separate resume control for images vs video clips
+
+- The resume menu now asks separately about images and video clips:
+  - "Regenerate ALL images (overwrite)?" - no = use existing images
+  - "Regenerate ALL video clips (re-render from images)?" - no = reuse the
+    already-generated clips in batch_temp
+- New `REGEN_CLIPS=1` env flag forces the video render to re-render every clip
+  from its image (ignoring finished clips). Off = reuse finished clips.
+- When images are auto-regenerated (script rebuild, style change, model swap,
+  or "regenerate all images"), clips are force-rebuilt too since they embed the
+  image and would otherwise be stale.
+
 ## [1.39.4] - 2026-08-09
 
 ### FIX duplicate episode in resume list (dedupe by episode number)

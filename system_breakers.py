@@ -8393,11 +8393,17 @@ def _render_video(shots: list[dict], episode_num: int,
         clip_dir = BATCH_TEMP / f"ep{episode_num:03d}"
         clip_dir.mkdir(parents=True, exist_ok=True)
         reused = 0
+        # REGEN_CLIPS=1 (Joe 2026-08-09): re-render EVERY clip from its image,
+        # ignoring finished clips in batch_temp (e.g. after a clip-render change
+        # like the VCR/scanlines effect). Default off = reuse finished clips.
+        regen_clips = os.environ.get("REGEN_CLIPS", "0").strip().lower() in ("1", "yes", "y", "true")
+        if regen_clips:
+            print("  [CLIPS] REGEN_CLIPS=1 - re-rendering all clips (ignoring batch_temp)")
         for idx, shot in enumerate(shots):
             if not (shot.get("tts_path") and os.path.isfile(shot["tts_path"])):
                 continue
             clip_out = str(clip_dir / f"clip{idx:02d}.mp4")
-            if (os.path.isfile(clip_out) and os.path.getsize(clip_out) > 1000
+            if (not regen_clips and os.path.isfile(clip_out) and os.path.getsize(clip_out) > 1000
                     and _get_audio_duration(clip_out) > 0.5):
                 clip_files.append(clip_out)
                 reused += 1
@@ -9489,7 +9495,11 @@ def _resume_episode(state: dict) -> None:
         _regen_script = _yn("    Rebuild the narration SCRIPT from the article? [y/N]: ")
         regen_tts = _yn("    Regenerate ALL TTS clips (re-speak every line)? [y/N]: ")
         _regen_img = _yn("    Regenerate ALL images (overwrite)? [y/N]: ")
+        _regen_clips = _yn("    Regenerate ALL video clips (re-render from images)? [y/N]: ")
         _swap_model = _yn("    Swap the image-gen model (backend/model)? [y/N]: ")
+        if _regen_clips:
+            os.environ["REGEN_CLIPS"] = "1"
+            print("  [RESUME] Regenerating ALL video clips (reuse disabled)")
         if _regen_script:
             rebuilt = _rebuild_script_for_resume(state)
             if rebuilt:
@@ -9502,9 +9512,12 @@ def _resume_episode(state: dict) -> None:
                 topic = rebuilt["topic"]
                 article_url = rebuilt["article_url"]
                 target_paras = rebuilt["target_paras"]
-                # New narration means every line + every image must be re-done.
+                # New narration means every line + every image must be re-done,
+                # and the video clips embed that audio - so they must re-render
+                # too (a reused clip would carry the OLD spoken line).
                 regen_tts = True
                 os.environ["REGEN_IMAGES"] = "1"
+                os.environ["REGEN_CLIPS"] = "1"
                 # Titles/description/tags derive from the script - reset them.
                 titles, description, tags = [], "", []
                 print("  [RESUME] Script rebuilt -> forcing image + TTS regeneration")
@@ -9513,9 +9526,11 @@ def _resume_episode(state: dict) -> None:
         if _swap_model:
             _ask_image_model_swap()
             os.environ["REGEN_IMAGES"] = "1"
+            os.environ["REGEN_CLIPS"] = "1"  # clips embed the image - must re-render
             print("  [RESUME] Model changed -> forcing image regeneration")
         if _regen_img:
             os.environ["REGEN_IMAGES"] = "1"
+            os.environ["REGEN_CLIPS"] = "1"  # clips embed the image - must re-render
         if _regen_script or regen_tts or _regen_img or _swap_model:
             print("  [RESUME] Applying regeneration options...\n")
     else:
@@ -9537,6 +9552,7 @@ def _resume_episode(state: dict) -> None:
             print(f"  [STYLE] changed {_cur or 'default'} -> {_chosen} - "
                   f"forcing full re-generate so the new look applies")
             os.environ["REGEN_IMAGES"] = "1"
+            os.environ["REGEN_CLIPS"] = "1"  # clips embed the image - must re-render
         if _chosen:
             os.environ["STYLE"] = _chosen
     # Ask the user for the output resolution on resume too (Joe 2026-08-09):
