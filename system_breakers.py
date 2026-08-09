@@ -4598,15 +4598,13 @@ def _generate_chapter_card(shot: dict, episode_num: int,
         logo = _find_logo(brand)
         if logo and os.path.isfile(logo):
             card_refs.append(logo)
-            # Place the logo on the outskirts, never over the title area.
+            # Joe 2026-08-09: let GPT Image 2 integrate the logo naturally into
+            # the full composition (its normal behaviour) - NO manual placement
+            # instructions. Just name it so the model folds it in where it fits.
             brand_clause = (
-                f" Include the {brand} company logo as a small emblem at the "
-                f"top edge of the frame - top centre (upper ~15% of the image) "
-                f"or tucked into the top-left / top-right corner - kept small "
-                f"and clearly on the outskirts so the CENTRE of the image stays "
-                f"completely open and uncluttered for title text to be overlaid "
-                f"later. The logo should read as a subtle production credit, not "
-                f"the main subject.")
+                f" The official {brand} company logo is included in the scene, "
+                f"naturally integrated into the composition like a production "
+                f"detail.")
             print(f"  [CARD] chapter {n:02d} brand ref: {brand} "
                   f"({os.path.basename(logo)})")
     # COOL BACKGROUND (Joe 2026-08-09): ask the local LLM to imagine a striking,
@@ -4615,13 +4613,21 @@ def _generate_chapter_card(shot: dict, episode_num: int,
     # look. Falls back to a clean dark-moody background if the LLM is
     # unreachable or returns nothing usable.
     bg = _llm_chapter_bg_prompt(title, n, topic, context)
+    # When a logo ref is attached, drop the anti-text/watermark hard ban so the
+    # logo's wordmark can render naturally (GPT Image 2 integrates it into the
+    # full composition, Joe 2026-08-09). Otherwise keep NO text to stop stray
+    # hallucinated words.
+    _no_text = ("NO text, NO words, NO letters, NO titles, no watermark. "
+                if not card_refs else
+                "No other text besides the {brand} logo.".format(brand=brand) if brand else
+                "No other text, no watermarks.")
     if bg:
         # MAIN PROMPT = the chapter-title-derived background FIRST, then the
         # channel style + logo/brand injections AFTER (Joe 2026-08-09). The
         # title is the anchor; style/brand are finishing touches, never the lead.
         prompt = (
             f"{bg}.{card_prop_clause} A clean cinematic documentary chapter card background with "
-            f"NO text, NO words, NO letters, NO titles, no watermark. The "
+            f"{_no_text} The "
             f"composition is a striking themed backdrop with plenty of open "
             f"negative space in the CENTRE for text to be overlaid later. Dark "
             f"vignette, moody atmosphere, minimal clutter, no people as the "
@@ -4636,8 +4642,8 @@ def _generate_chapter_card(shot: dict, episode_num: int,
             "background with subtle dark atmosphere and a faint moody glow in "
             "the centre."
             f"{card_prop_clause}"
-            f" {_style_inject()}.{brand_clause} NO text, NO words, NO letters, "
-            "NO titles, no watermark. Clean, minimal, high contrast, "
+            f" {_style_inject()}.{brand_clause} {_no_text} "
+            "Clean, minimal, high contrast, "
             "professional broadcast background plate, no photos, no people, no "
             "objects, open negative space in the centre. 16:9 widescreen, "
             "high detail illustration."

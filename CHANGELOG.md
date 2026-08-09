@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.38.5] - 2026-08-09
+
+### Chapter-card logo injected naturally (no manual placement)
+
+- Chapter-card business logo is now injected into the FULL composition via GPT
+  Image 2's normal behaviour - removed the previous "place at top 15% /
+  outskirts" instruction. The logo is simply named and the model integrates it
+  naturally where it fits. When a logo ref is attached, the card's "NO text /
+  no watermark" hard ban is relaxed (so the logo's wordmark can render) but
+  still forbids any OTHER text.
+
 ## [1.38.4] - 2026-08-09
 
 ### ~200 prop visuals injected into shots + chapter cards + parallel cards with correct filenames
