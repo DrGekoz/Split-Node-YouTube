@@ -2,6 +2,34 @@
 
 All notable changes to Split Node.
 
+## [1.35.2] - 2026-08-09
+
+### Text is NEVER baked into shots or chapter cards - FFmpeg burns it at the end
+
+- **Establishing shots render clean**: the `/// NAME` label is no longer baked
+  into the codex/fal shot image (prompt had "Render the text '/// NAME' in the
+  bottom-left corner..."). Every establishing shot now gets a dedicated
+  `/// NAME` typewriter title burned by FFmpeg at render time (Myriad Pro Bold,
+  red for locations / gold for persons), via a new `_build_establishing_events`
+  + `_merge_establishing_titles` pass that guarantees exactly one label per
+  establishing frame and dedupes it against the narration-scanned location/person
+  anchors.
+- **Chapter cards render clean**: `_generate_chapter_card` no longer asks GPT
+  Image 2 / codex to render `Chapter N - Title` text onto the card - it produces
+  a clean thematically-matched background, and the ASS chapter title is burned
+  over it. Removed the codex "skip the ASS chapter burn" logic so the burn
+  always fires (matches the local-backend behaviour).
+- **Font**: location/person typewriter titles (TypeLoc / TypePerson / ghosts)
+  switched from Consolas to **Myriad Pro Bold**. It's a proportional font, so
+  `_typewriter_events` now measures each character's advance (PIL) for the
+  reveal + cursor instead of assuming monospace. Font resolved from the project
+  `fonts/` dir first, then `C:\Windows\Fonts`; the burn filter passes a
+  `fontsdir` so libass finds it even when not installed system-wide.
+
+> NOTE: Myriad Pro Bold is a commercial Adobe font not present on this machine -
+> drop `MyriadPro-Bold.otf` into `F:\aaaaaVIBECODING\System Breakers\fonts\`
+> for it to render (until then libass falls back to a default).
+
 ## [1.35.1] - 2026-08-09
 
 ### Fix: upscale daemon reported false "neural upscale failed" for paths with spaces

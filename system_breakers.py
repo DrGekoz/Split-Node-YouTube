@@ -2509,6 +2509,50 @@ def _resolve_anchor_times(events: list[dict], words: list[dict],
         resolved.append(ev)
     return resolved
 
+
+def _build_establishing_events(shots: list[dict],
+                               clip_starts: list[float]) -> list[dict]:
+    """A burned '/// NAME' typewriter label for EVERY establishing shot.
+
+    Shots render CLEAN (no baked text); FFmpeg burns the label (Myriad Pro
+    Bold) over each establishing frame at render time. Uses the shot's own clip
+    start so the label appears right as the establishing shot cuts in.
+    (Joe 2026-08-09: labels moved out of the image into the FFmpeg burn.)
+    """
+    events = []
+    for pos, shot in enumerate(shots):
+        if not shot.get("is_establishing"):
+            continue
+        name = (shot.get("establishing_name") or "").strip()
+        if not name:
+            continue
+        kind = ("location" if shot.get("establishing_kind") == "location"
+                else "person")
+        nidx = shot.get("narration_idx", pos)
+        start = clip_starts[pos] if pos < len(clip_starts) else 0.0
+        events.append({
+            "kind": kind,
+            "text": f"/// {name}",
+            "para_idx": nidx,
+            "start": round(start + 0.4, 3),
+        })
+    return events
+
+
+def _merge_establishing_titles(title_events: list[dict],
+                               establishing_events: list[dict]) -> list[dict]:
+    """Merge dedicated establishing labels into the resolved title events,
+    replacing any existing location/person event that targets an establishing
+    shot so the '/// NAME' label is burned exactly once per establishing frame.
+    """
+    if not establishing_events:
+        return title_events
+    estab_paras = {e["para_idx"] for e in establishing_events}
+    kept = [ev for ev in title_events
+            if ev.get("kind") == "chapter"
+            or ev.get("para_idx") not in estab_paras]
+    return kept + establishing_events
+
 # -- Director's bible, scene board, episode context, templates ----------
 # (Added Aug 2026: pre-visual planning stages so the pipeline works for ANY
 # topic/environment/location and every episode gets a locked story + look.)
@@ -3064,18 +3108,10 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 scene = ("An establishing wide full-body shot of the character, "
                          "whole person in frame from head to toe, "
                          f"highly detailed, {RENDER_STYLE}")
-            # When rendering on a backend that handles TEXT well (Codex CLI /
-            # GPT Image 2), bake the establishing label into the image in the
-            # bottom-left, broadcast style: for a location use
-            #   '/// LOCATION NAME' and for a character the name on its own.
-            # This replaces the need for a burned typewriter title over these
-            # establishing frames (Joe 2026-08-09).
-            if _active_image_backend() in ("codex", "fal"):
-                _label = (f"/// {name.upper()}" if is_loc else name.upper())
-                scene += (f". Render the text {_label!r} in the bottom-left "
-                          "corner of the image, small clean broadcast "
-                          "caption, white with a subtle shadow, legible. "
-                          "No other text anywhere in the frame.")
+            # Establishing labels are NOT baked into the image (Joe 2026-08-09):
+            # shots render clean and FFmpeg burns a '/// NAME' typewriter title
+            # (Myriad Pro Bold) over the frame at render time, so the text is
+            # always crisp and never in the source art.
             shots.append({
                 "narration": para,
                 "narration_idx": i,
@@ -4188,38 +4224,34 @@ def _generate_chapter_card(shot: dict, episode_num: int) -> Optional[str]:
             pass
     if os.path.isfile(out) and os.path.getsize(out) > 1000:
         return out
-    # Match EXACTLY what the TTS narration reads: 'Chapter 1' then the title on
-    # the next line. The narration is 'Chapter {n} - {title}', so we render
-    # 'Chapter {n}' big on top and '{title}' below - identical wording.
-    card_text = f"Chapter {n}\n\n{title}"
+    # Joe 2026-08-09: chapter cards render CLEAN - NO baked text. FFmpeg
+    # overlays the 'Chapter N - Title' text onto each card at render time (ASS
+    # chapter burn), so the card is a clean background the text sits on.
     # COOL BACKGROUND (Joe 2026-08-09): ask the local LLM to imagine a striking,
     # thematically-matched background for this chapter from its title, instead of
     # a plain black card. The style prompt is injected as a prefix so the bg
-    # matches the channel's look. Falls back to the dark-moody text card if the
-    # LLM is unreachable or returns nothing usable.
+    # matches the channel's look. Falls back to a clean dark-moody background if
+    # the LLM is unreachable or returns nothing usable.
     bg = _llm_chapter_bg_prompt(title, n)
     if bg:
         prompt = (
-            f"{_style_inject()}. {bg}. Overlaid on top, large elegant white "
-            f"sans-serif capitalised text centred: {card_text!r}. The exact "
-            f"words must render perfectly and legibly - 'Chapter {n}' big on "
-            f"top, then the chapter title '{title}' below it in a slightly "
-            f"smaller line. Keep the text crisp and readable against the "
-            f"background, dark vignette behind the text, minimal clutter, no "
-            f"watermark, no extra text. 16:9 widescreen cinematic documentary "
-            f"title card."
+            f"{_style_inject()}. {bg}. A clean cinematic documentary chapter "
+            f"card background with NO text, NO words, NO letters, NO titles, "
+            f"no watermark. The composition is a striking themed backdrop "
+            f"with plenty of open negative space in the centre for text to "
+            f"be overlaid later. Dark vignette, moody atmosphere, minimal "
+            f"clutter, no people as the main subject. 16:9 widescreen "
+            f"cinematic documentary background."
         )
         print(f"  [CARD] chapter {n:02d} LLM background prompt generated")
     else:
         prompt = (
-            "A cinematic documentary chapter title card. Solid near-black "
-            "background with subtle dark atmosphere and a faint moody glow behind "
-            "the text. Large elegant white sans-serif capitalised text centred: "
-            f"{card_text!r}. The exact words must render perfectly and legibly - "
-            f"'Chapter {n}' big on top, then the chapter title '{title}' below "
-            "it in a slightly smaller line. Minimal, clean, high contrast, "
-            "professional broadcast title card, no photos, no people, no objects, "
-            f"no watermark, no extra text. 16:9 widescreen. {_style_inject()}"
+            "A cinematic documentary chapter card background. Solid near-black "
+            "background with subtle dark atmosphere and a faint moody glow in "
+            "the centre. NO text, NO words, NO letters, NO titles, no "
+            "watermark. Clean, minimal, high contrast, professional broadcast "
+            "background plate, no photos, no people, no objects, open negative "
+            f"space in the centre. 16:9 widescreen. {_style_inject()}"
         )
     print(f"  [CARD] rendering chapter {n:02d} title card via {backend}...")
     seed = 90000 + n * 137 + episode_num
@@ -7736,34 +7768,13 @@ def _render_video(shots: list[dict], episode_num: int,
             if os.path.isfile(marker):
                 print("  [TITLES] already burned (marker present), skipping pass 2")
             else:
-                # When the Codex backend rendered real chapter title CARDS
-                # (GPT Image 2 is very good at text), skip the ASS chapter burn
-                # so the card text isn't doubled - keep the location/person
-                # typewriter titles (they fire over regular shots, not cards).
+                # Joe 2026-08-09: chapter cards + establishing shots are rendered
+                # CLEAN (no baked text). FFmpeg burns everything at the end: the
+                # ASS chapter title over each chapter card, and the '/// NAME'
+                # typewriter label over each establishing shot (establishing
+                # events are pre-merged into title_events - see
+                # _merge_establishing_titles).
                 _burn_events = title_events
-                if _active_image_backend() == "codex":
-                    _chap_cards = any(
-                        s.get("is_chapter") and s.get("image_path")
-                        and os.path.isfile(s["image_path"])
-                        and "chapter_" in os.path.basename(s["image_path"])
-                        for s in shots)
-                    if _chap_cards:
-                        _burn_events = [ev for ev in title_events
-                                        if ev.get("kind") != "chapter"]
-                        print(f"  [TITLES] codex chapter cards present - "
-                              f"burning {len(_burn_events)} non-chapter title events")
-                    # Establishing shots already have the label BAKED into the
-                    # image (bottom-left '/// NAME') - drop the matching
-                    # location/person typewriter burn so it isn't doubled.
-                    _estab_paras = {s.get("narration_idx")
-                                    for s in shots if s.get("is_establishing")}
-                    if _estab_paras:
-                        _before = len(_burn_events)
-                        _burn_events = [ev for ev in _burn_events
-                                        if ev.get("para_idx") not in _estab_paras]
-                        if len(_burn_events) != _before:
-                            print(f"  [TITLES] dropped {_before - len(_burn_events)} "
-                                  f"typewriter event(s) over baked establishing labels")
                 ass_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titles.ass")
                 burned = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titled.mp4")
                 try:
@@ -8906,6 +8917,10 @@ def _resume_episode(state: dict) -> None:
         clip_starts = _compute_clip_starts(shots)
         title_events = _build_resolved_title_events(
             chapter_events, anchor_events + person_events, words, clip_starts)
+        # Establishing shots render clean - merge their FFmpeg '/// NAME' labels
+        # so every establishing frame gets exactly one burned label (Joe 2026-08-09).
+        title_events = _merge_establishing_titles(
+            title_events, _build_establishing_events(shots, clip_starts))
         for ev in title_events:
             print(f"    [{ev['kind']}] @{ev['start']:.2f}s '{ev.get('text', ev.get('title', ''))}'")
 
@@ -9367,6 +9382,10 @@ def main():
         clip_starts = _compute_clip_starts(shots)
         title_events = _build_resolved_title_events(
             chapter_events, anchor_events + person_events, words, clip_starts)
+        # Establishing shots render clean - merge their FFmpeg '/// NAME' labels
+        # so every establishing frame gets exactly one burned label (Joe 2026-08-09).
+        title_events = _merge_establishing_titles(
+            title_events, _build_establishing_events(shots, clip_starts))
         for ev in title_events:
             print(f"    [{ev['kind']}] @{ev['start']:.2f}s '{ev.get('text', ev.get('title', ''))}'")
         _save_resume_state("titles", episode_num, article_url, topic, shots,

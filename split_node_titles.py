@@ -60,10 +60,10 @@ Style: ChapCore,Bahnschrift,{chap_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000
 Style: ChapGlow,Bahnschrift,{chap_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,2,0,1,0,0,5,60,60,60,1
 Style: ChapKicker,Bahnschrift,{kicker_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,1,0,0,0,100,100,8,0,1,2,0,5,60,60,60,1
 Style: ChapBg,Arial,10,&H00000000,&H00000000,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
-Style: TypeLoc,Consolas,{type_size},&H000000FF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
-Style: TypePerson,Consolas,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
-Style: TypeGhost,Consolas,{type_size},&H0000FF00,&H0000FF00,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
-Style: TypePersonGhost,Consolas,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+Style: TypeLoc,Myriad Pro Bold,{type_size},&H000000FF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+Style: TypePerson,Myriad Pro Bold,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+Style: TypeGhost,Myriad Pro Bold,{type_size},&H0000FF00,&H0000FF00,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+Style: TypePersonGhost,Myriad Pro Bold,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -87,16 +87,22 @@ def _dialog(start: float, end: float, style: str, text: str, layer: int = 0) -> 
 
 def _font_path(name: str) -> str:
     """Windows font file for measurement (PIL needs a real path)."""
-    base = r"C:\Windows\Fonts"
+    # Project fonts dir first (for fonts not installed system-wide, e.g.
+    # Myriad Pro Bold), then C:\\Windows\\Fonts.
+    _FONTS_DIR = Path(__file__).resolve().parent / "fonts"
     table = {
         "Consolas": "consola.ttf",
+        "Myriad Pro Bold": "MyriadPro-Bold.otf",
         "Arial Black": "ariblk.ttf",
         "Bahnschrift": "bahnschrift.ttf",
         "Impact": "impact.ttf",
         "Arial": "arial.ttf",
     }
-    p = Path(base) / table.get(name, "arial.ttf")
-    return str(p) if p.exists() else ""
+    for base in (_FONTS_DIR, Path(r"C:\Windows\Fonts")):
+        p = base / table.get(name, "arial.ttf")
+        if p.exists():
+            return str(p)
+    return ""
 
 
 def _char_width(fontname: str, size: int) -> float:
@@ -118,6 +124,18 @@ def _text_width(fontname: str, size: int, text: str) -> float:
         except Exception:
             pass
     return len(text) * size * 0.55
+
+
+def _char_advance(fontname: str, size: int, ch: str) -> float:
+    """Advance width of a single character (needed for PROPORTIONAL fonts like
+    Myriad Pro Bold - a monospace proxy width would overlap narrow chars)."""
+    if _HAS_PIL:
+        try:
+            f = ImageFont.truetype(_font_path(fontname), size)
+            return f.getlength(ch)
+        except Exception:
+            pass
+    return _char_width(fontname, size)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +206,6 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
              "person": "TypePerson"}.get(ev["kind"], "TypeLoc")
     ghost_style = "TypePersonGhost" if ev["kind"] == "person" else "TypeGhost"
     fontsize = 56
-    char_w = _char_width("Consolas", fontsize)
     margin = 48
     # Row layout (bottom-left): person titles sit on the baseline; a location
     # (red) fires stacked ABOVE it. A person title that collides with a
@@ -202,6 +219,9 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
     text = ev["text"]
     # Escape ASS characters
     text = text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
+    # Myriad Pro Bold is PROPORTIONAL - measure each char's advance so the
+    # reveal and the cursor never overlap (monospace proxy would misalign).
+    widths = [_char_advance("Myriad Pro Bold", fontsize, ch) for ch in text]
     n = max(len(text), 1)
     step = 0.7 / n                 # per-char typewriter delay
     hold_end = ev["start"] + 4.7   # glitch starts here (0.7 type + 4.0 hold)
@@ -213,7 +233,7 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
 
     for i, ch in enumerate(text):
         if ch == " ":
-            x += char_w
+            x += widths[i]
             continue
         t_show = ev["start"] + i * step
         # random staggered exit inside the 0.5s glitch window
@@ -230,7 +250,7 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
                 f"\\t({int((fl-ev['start'])*1000)+160},{int((t_exit-ev['start'])*1000)},\\alpha&HFF&\\fscx(120)\\fscy(120))"
                 f"\\move({x + jitter:.1f},{base_y},{x:.1f},{base_y})}}")
         lines.append(_dialog(t_show, t_exit, style, tags + ch, layer=4))
-        x += char_w
+        x += widths[i]
 
     # Blinking block cursor after the typed text during the hold
     cx = x + 4
@@ -243,7 +263,7 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
     lines.append(_dialog(ev["start"] + 0.7, hold_end, style, cursor, layer=4))
 
     # RGB-split ghost copies during the glitch window (chromatic aberration)
-    full_w = _text_width("Consolas", fontsize, text)
+    full_w = _text_width("Myriad Pro Bold", fontsize, text)
     for off, ghost_alpha in ((-7, "&HAA&"), (7, "&H88&")):
         ghost = (f"{{\\an7\\pos({margin + off},{base_y})\\blur(1)\\1c&H00FFFF&\\alpha{ghost_alpha}"
                  f"\\t(0,{int(0.3*1000)},\\alpha&HFF&)}}{text}")
@@ -328,10 +348,18 @@ def burn_titles(video_path: str, ass_path: str, out_path: str,
     aname = Path(ass_path).name
     oname = Path(out_path).name
     total = _probe_duration(video_path)
+    # libass resolves font names from installed system fonts; for fonts that
+    # live only in the project fonts/ dir (e.g. Myriad Pro Bold) pass a
+    # fontsdir so the .ass style name actually resolves instead of falling back.
+    sub_filter = f"subtitles={aname}"
+    _fonts_dir = Path(__file__).resolve().parent / "fonts"
+    if _fonts_dir.is_dir() and any(_fonts_dir.iterdir()):
+        _fd = str(_fonts_dir).replace("\\", "/").replace(":", "\\:")
+        sub_filter += f":fontsdir={_fd}"
     cmd = [
         "ffmpeg", "-y", "-v", "error",
         "-i", vname,
-        "-vf", f"subtitles={aname}",
+        "-vf", sub_filter,
         "-c:v", "hevc_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "28", "-b:v", "0",
         "-c:a", "copy",
         "-pix_fmt", "yuv420p",
