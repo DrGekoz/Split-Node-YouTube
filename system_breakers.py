@@ -6525,10 +6525,22 @@ def _generate_material_panels(char_name: str, sheet: dict, seed: int,
 def _image_concurrency() -> int:
     """How many images to generate in parallel.
 
-    Default: codex/cloud backends run 3 concurrent codex calls (network-bound,
-    no local GPU contention). The local ComfyUI backend stays sequential (1)
-    because a single ComfyUI server processes jobs one at a time and parallel
-    hits just queue on it. Override with IMAGE_CONCURRENCY env var.
+    Bulk-parallel codex benchmark (Joe 2026-08-09) measured throughput
+    (images/hour) across N concurrent `codex exec /imagegen` calls:
+
+        N=5  -> ~130 img/hr (collisions)
+        N=10 -> ~220 img/hr (collisions)
+        N=20 -> ~478 img/hr  <-- PEAK
+        N=25 -> ~390 img/hr
+        N=30 -> ~230 img/hr
+        N=35 -> ~274 img/hr
+        N=40 -> ~252 img/hr
+
+    Codex CLI is a local wrapper around the remote gpt-image-2 API, so all
+    parallel calls contend for the SAME rate limit - throughput rises to a
+    sharp peak at 20 then collapses. The local ComfyUI backend stays
+    sequential (1) because a single ComfyUI server processes jobs one at a
+    time. Override with IMAGE_CONCURRENCY env var.
     """
     env = os.environ.get("IMAGE_CONCURRENCY", "").strip()
     if env:
@@ -6537,7 +6549,7 @@ def _image_concurrency() -> int:
         except ValueError:
             pass
     backend = _active_image_backend()
-    return 3 if backend in ("codex", "fal", "runpod") else 1
+    return 20 if backend in ("codex", "fal", "runpod") else 1
 
 
 def _build_all_character_sheets(shots: list[dict],
@@ -6712,6 +6724,34 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             for _cs in _chap_shots:
                 print(_render_card(_cs))
 
+    # ---- PROMPT PRE-VERIFICATION PASS (Joe 2026-08-09) ----
+    # Build + relevance-gate EVERY shot's final prompt up front, SEQUENTIALLY,
+    # BEFORE the parallel batch is fired to codex. This catches off-topic shots
+    # (and rewrites their scenes) so a bad prompt can't sneak through mid-batch
+    # and waste a whole parallel slot on an unrelated image. The verified
+    # prompt is cached on the shot and reused by _render_one, so the parallel
+    # pool only does the actual generation (no per-shot LLM latency in the
+    # hot loop). Only runs for shots that will actually generate.
+    _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
+    _verify_todo = [s for s in shots
+                    if not s.get("is_chapter")
+                    and (_regen or not (s.get("image_path") and os.path.isfile(s.get("image_path", ""))))]
+    if _verify_todo and _SHOT_RELEVANCE_ON and topic:
+        _rewrites = 0
+        print(f"  [VERIFY] pre-verifying {len(_verify_todo)} shot prompts vs "
+              f"story topic before the parallel batch...")
+        for _vs in _verify_todo:
+            _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
+            _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
+            if _vp != _base:
+                _rewrites += 1
+            _vs["_verified_prompt"] = _vp
+        print(f"  [VERIFY] {len(_verify_todo)} prompts verified, {_rewrites} scene "
+              f"rewrites applied")
+    else:
+        for _vs in shots:
+            _vs.pop("_verified_prompt", None)
+
     _img_iter = (tqdm(shots, desc="  [IMAGES] rendering shots", unit="shot",
                       leave=False) if _HAS_PROGRESS else shots)
 
@@ -6754,10 +6794,15 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                       f"{os.path.basename(shot['image_path'])}")
             return
         seed = 10000 + idx * 137 + random.randint(0, 999)
-        prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
-        # LLM relevance gate (Joe 2026-08-09): cross-check the prompt against the
-        # article topic; rewrite the scene + rebuild if it drifted off-story.
-        prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock, topic)
+        # Reuse the prompt verified in the PRE-VERIFICATION pass (Joe 2026-08-09)
+        # when it exists; otherwise build + gate inline (fallback for resume or
+        # when the gate was off during the pre-pass).
+        prompt = shot.get("_verified_prompt")
+        if not prompt:
+            prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
+            # LLM relevance gate (Joe 2026-08-09): cross-check the prompt against the
+            # article topic; rewrite the scene + rebuild if it drifted off-story.
+            prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock, topic)
         # Panels were built up front by _build_all_character_sheets (before the
         # shot loop); _select_shot_refs just picks the PERFECT panel(s) here.
         refs, notes = _select_shot_refs(shot, sheets, brand_assets)
@@ -6831,6 +6876,9 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         providers.flush_upscales()
     except Exception:
         pass
+    # Drop the pre-verify prompt cache so it doesn't bloat resume state.
+    for _s in shots:
+        _s.pop("_verified_prompt", None)
     ok = sum(1 for s in shots if s.get("image_path"))
     print(f"  [IMAGES] {ok}/{len(shots)} images generated")
     return shots
@@ -9070,6 +9118,26 @@ def _resume_episode(state: dict) -> None:
                     if _HAS_PROGRESS else missing_img)
         _plock = threading.Lock()
 
+        # ---- PROMPT PRE-VERIFICATION PASS (resume, Joe 2026-08-09) ----
+        # Build + relevance-gate every regen shot's prompt up front, before the
+        # parallel regen pool fires to codex, so a bad prompt can't waste a
+        # parallel slot. Cached on the shot; _regen_one reuses it.
+        if _SHOT_RELEVANCE_ON and topic:
+            _rewrites = 0
+            print(f"  [VERIFY] pre-verifying {len(missing_img)} regen prompts "
+                  f"vs story topic...")
+            for _vs in missing_img:
+                _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
+                _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
+                if _vp != _base:
+                    _rewrites += 1
+                _vs["_verified_prompt"] = _vp
+            print(f"  [VERIFY] {len(missing_img)} regen prompts verified, "
+                  f"{_rewrites} scene rewrites applied")
+        else:
+            for _vs in missing_img:
+                _vs.pop("_verified_prompt", None)
+
         def _regen_one(idx: int, shot: dict) -> None:
             if _HAS_PROGRESS:
                 with _plock:
@@ -9077,11 +9145,14 @@ def _resume_episode(state: dict) -> None:
                         f"  [IMAGES] regenerating {idx+1}/{len(missing_img)}")
             chars = _parse_shot_characters(shot)
             seed = shot.get("seed") or (10000 + random.randint(0, 999))
-            prompt = (_build_shot_prompt(shot, character_sheets)
-                      + " " + _style_inject())
-            # LLM relevance gate (Joe 2026-08-09): cross-check the prompt against
-            # the article topic; rewrite the scene + rebuild if it drifted off-story.
-            prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock, topic)
+            # Reuse the pre-verified prompt when available (Joe 2026-08-09).
+            prompt = shot.get("_verified_prompt")
+            if not prompt:
+                prompt = (_build_shot_prompt(shot, character_sheets)
+                          + " " + _style_inject())
+                # LLM relevance gate (Joe 2026-08-09): cross-check the prompt against
+                # the article topic; rewrite the scene + rebuild if it drifted off-story.
+                prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock, topic)
             if face_lock and _active_image_backend() != "codex":
                 # Panels were built up front by _build_all_character_sheets -
                 # just confirm every char in this shot is present.
@@ -9148,6 +9219,9 @@ def _resume_episode(state: dict) -> None:
             providers.flush_upscales()
         except Exception:
             pass
+        # Drop the pre-verify prompt cache so it doesn't bloat resume state.
+        for _sh in missing_img:
+            _sh.pop("_verified_prompt", None)
         _save("images")
     else:
         print(f"  [RESUME] All {len(shots)} images present")

@@ -31,6 +31,7 @@ Keys are read from environment or the project .env (never committed).
 """
 import json
 import os
+import random
 import time
 import urllib.request
 import urllib.error
@@ -386,17 +387,27 @@ class Codex:
 
         # Claim the NEWEST image that appeared during THIS call (and wasn't
         # already present or claimed by another thread). Under lock so parallel
-        # threads each pick a distinct file.
+        # threads each pick a distinct file. CRITICAL: we only ever claim a file
+        # that appeared DURING this call (not in `before`) - the old fallback
+        # `{p not in self._claimed}` could grab a STALE pre-existing image when
+        # codex produced nothing new and silently report it as a success (and two
+        # threads could even claim the same stale file). That corrupted bulk runs
+        # (Joe 2026-08-09). No new output = genuine failure -> return False so the
+        # caller's retry/throttle logic handles it.
         after = _scan()
         with self._lock():
             candidates = {p: t for p, t in after.items()
                           if p not in before and p not in self._claimed}
             if not candidates:
-                candidates = {p: t for p, t in after.items()
-                              if p not in self._claimed}
-            if not candidates:
-                print("  [CODEX] no generated image found under ~/.codex/generated_images")
-                return False
+                # Rate-limit throttle (Joe 2026-08-09): when codex produced no
+                # new output (typically a rate limit / 429), do NOT fall back to
+                # another model and do NOT count a stale file as success. Instead
+                # back off to a single slow retry per hour until one succeeds,
+                # then resume the batch. Handled by _codex_throttled_retry below.
+                print("  [CODEX] no new image generated (likely rate-limited) - "
+                      "throttling: 1 retry/hour until success")
+                return _codex_throttled_retry(self, prompt, out_path, ref_images,
+                                              timeout, before)
             src = max(candidates, key=candidates.get)  # newest by mtime
             self._claimed.add(src)
         try:
@@ -406,6 +417,36 @@ class Codex:
             return False
         print(f"  [CODEX] {os.path.basename(out_path)} ({os.path.getsize(out_path)//1024}KB)")
         return os.path.getsize(out_path) > 500
+
+
+def _codex_throttled_retry(codex, prompt: str, out_path: str,
+                           ref_images: list | None, timeout: int,
+                           before: dict) -> bool:
+    """Rate-limit recovery for codex (Joe 2026-08-09).
+
+    Codex/gpt-image-2 got rate-limited (no new output). We do NOT fall back to
+    another image model. We wait one hour, retry this single image; if it still
+    fails we keep waiting one hour and retrying until it succeeds, then return
+    so the batch pushes the next image after it. The batch's parallel pool keeps
+    its other slots; this call just blocks on the one slow retry.
+    """
+    import time as _time
+    base_wait = max(60, int(os.environ.get("CODEX_RATELIMIT_WAIT", "3600")))
+    attempt = 1
+    while True:
+        # Jitter the wait ±10% so that if several parallel threads hit the rate
+        # limit together they DON'T all wake at the same moment and re-trip the
+        # limit as a thundering herd (Joe 2026-08-09). Each wakes, retries its
+        # one image, and only pushes the next after it succeeds.
+        wait = base_wait * random.uniform(0.9, 1.1)
+        print(f"  [CODEX][RATELIMIT] retry {attempt} in {wait/60:.0f} min "
+              f"(single image/hour)...", flush=True)
+        _time.sleep(wait)
+        if codex.generate_image(prompt, out_path, ref_images=ref_images,
+                                timeout=timeout):
+            print(f"  [CODEX][RATELIMIT] succeeded after {attempt} retry")
+            return True
+        attempt += 1
 
 
 def _ps_quote(s: str) -> str:

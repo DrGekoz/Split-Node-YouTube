@@ -2,6 +2,45 @@
 
 All notable changes to Split Node.
 
+## [1.37.0] - 2026-08-09
+
+### Bulk-parallel codex at the measured optimum (20) + rate-limit throttle
+
+- **Bulk-parallel codex benchmark** (measured live, 5–40 concurrent calls):
+  throughput peaks at **20 concurrent codex calls (~478 img/hr)**. Below that
+  you leave rate-limit headroom on the table; above ~25 it collapses because
+  every call contends for the ONE remote gpt-image-2 quota:
+
+  | N  | img/hr |
+  |----|--------|
+  | 5  | ~130   |
+  | 10 | ~220   |
+  | 20 | ~478 (peak) |
+  | 25 | ~390   |
+  | 30 | ~230   |
+  | 35 | ~274   |
+  | 40 | ~252   |
+
+- **Codex default concurrency 3 -> 20** (`_image_concurrency`). Local ComfyUI
+  stays sequential (1) as before. Override with `IMAGE_CONCURRENCY`.
+- **FIX - stale-image fallback**: the old output-claim code, when codex produced
+  no NEW file, silently grabbed any pre-existing image in `~/.codex` and
+  reported it as a success (and two parallel threads could even claim the same
+  stale file, corrupting bulk runs). Now it only claims a file that appeared
+  during THIS call; no new output is a genuine failure.
+- **Rate-limit throttle (no model fallback)**: if codex/gpt-image-2 is
+  rate-limited (no new output), it does NOT fall back to fal/runpod/local. It
+  waits one hour (jittered ±10% so parallel threads don't re-trip together as
+  a thundering herd) and retries a single image; it keeps doing that until one
+  succeeds, then the batch pushes the next image. `CODEX_RATELIMIT_WAIT` env
+  overrides the hour.
+- **Batch prompt pre-verification**: before the parallel batch fires to codex,
+  every shot's final prompt is relevance-gated vs the story topic sequentially;
+  off-topic scenes are rewritten up front so a bad prompt can't waste a
+  parallel slot mid-batch. Verified prompt cached and reused by the parallel
+  pool (no per-shot LLM latency in the hot loop). Applied to both fresh and
+  resume paths.
+
 ## [1.36.0] - 2026-08-09
 
 ### Batch multi-video pipeline + resume-all + reliable async upscaling
