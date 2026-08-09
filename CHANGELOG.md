@@ -2,6 +2,20 @@
 
 All notable changes to Split Node.
 
+## [1.37.1] - 2026-08-09
+
+### Fix: "Paris, France." leaked into narration via the PLACE ANCHORS prompt example
+
+- Rule 9 (PLACE ANCHORS) of the narration prompt literally showed the LLM
+  `'Paris, France.'` as an example location. The model copied that exact string
+  into narration even when the article had nothing to do with Paris. The RSS /
+  'beat the system' keyword filter was NOT the source (no Paris in feed logic);
+  it was purely the prompt example leaking through.
+- Rewrote rule 9 to instruct a REAL place actually named in the article, with an
+  explicit "NEVER a famous city or location that is not in the article" clause,
+  and removed the concrete example string so there's nothing for the model to
+  copy. Verified zero "Paris" references remain in the pipeline.
+
 ## [1.37.0] - 2026-08-09
 
 ### Bulk-parallel codex at the measured optimum (20) + rate-limit throttle
