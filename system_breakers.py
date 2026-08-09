@@ -4869,13 +4869,24 @@ def _serpapi_key() -> str:
 
 def _active_style_name() -> str:
     """Return the currently selected style profile NAME (lowercase), or '' for
-    the default/custom. Reads STYLE / STYLE_PROFILE env, then the resume style."""
+    the default/custom. Reads STYLE / STYLE_PROFILE env, then the resume style.
+
+    Handles the case where the resume state stored the FULL DESCRIPTION text
+    (e.g. "stylized hand-painted comic realism, cel-shaded 3d...") instead of
+    the profile name "arcane" - in that case it maps the description back to
+    the matching profile name so "picking arcane" doesn't falsely register as a
+    style change and force a full image re-generate (Joe 2026-08-09)."""
+    profiles = _load_style_profiles()
     sel = (os.environ.get("STYLE") or os.environ.get("STYLE_PROFILE") or "").strip()
     if not sel and _RESUME_STYLE:
         sel = str(_RESUME_STYLE)
     low = sel.lower()
-    if low in _load_style_profiles():
+    if low in profiles:
         return low
+    # Stored value may be a full description text - find which profile it is.
+    for name, desc in profiles.items():
+        if desc and desc.lower() in low or (low and low in desc.lower()):
+            return name
     return low  # custom free-form tag used verbatim
 
 

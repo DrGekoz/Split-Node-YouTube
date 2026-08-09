@@ -2,6 +2,19 @@
 
 All notable changes to Split Node.
 
+## [1.39.6] - 2026-08-09
+
+### FIX false "style changed" -> forced image re-gen on resume
+
+- When a resume state stored the style as its FULL DESCRIPTION text (e.g.
+  "stylized hand-painted comic realism, cel-shaded 3d...") instead of the
+  profile name ("arcane"), picking the current style by name compared
+  "arcane" against the whole description and wrongly registered as a style
+  change - forcing REGEN_IMAGES/REGEN_CLIPS and re-generating every image
+  even when the user kept the same style. `_active_style_name()` now maps a
+  stored description back to its profile name, so keeping the current style
+  is a no-op.
+
 ## [1.39.5] - 2026-08-09
 
 ### Separate resume control for images vs video clips
