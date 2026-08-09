@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.39.2] - 2026-08-09
+
+### TTS gap-fill now runs BEFORE image generation on resume
+
+- On resume, the narration TTS gap-fill now runs FIRST (before image gen), so
+  images are never generated against narration audio that doesn't exist yet.
+- The gap-fill logic was extracted into a reusable helper
+  (`_resume_tts_gap_fill`) that reuses clips already on disk (both the narrator
+  `narration_XX.wav` and per-character `narration_XX_char.wav` variants) and
+  generates only what's missing, with the correct per-character voice.
+
 ## [1.39.1] - 2026-08-09
 
 ### TTS resume gap-fill fixes

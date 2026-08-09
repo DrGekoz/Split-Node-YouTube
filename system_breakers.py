@@ -9384,6 +9384,62 @@ def _rebuild_script_for_resume(state: dict) -> dict:
     }
 
 
+def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
+                         save_cb) -> None:
+    """Gap-fill TTS for a resume: reuse any narration clip already on disk and
+    generate only what's missing. Runs BEFORE image generation (Joe 2026-08-09)
+    so images aren't generated against missing audio. Matches both the narrator
+    file (narration_XX.wav) and per-character clone file (narration_XX_char.wav
+    via voice_map.json). Also strips leaked stage directions before speaking."""
+    ep_dir = TTS_TEMP / f"ep_{episode_num}"
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    if regen_tts:
+        missing_tts = [s for s in shots
+                       if not s.get("is_chapter") and (s.get("narration") or "").strip()]
+        print(f"\n[TTS] REGEN - re-speaking ALL {len(missing_tts)} narration clips")
+    else:
+        # GAP-FILL (Joe 2026-08-09): reuse any clip already on disk, matching
+        # BOTH the narrator file (narration_XX.wav) and the per-character clone
+        # file (narration_XX_char.wav, used when voice_map.json maps this shot's
+        # character to a different voice). Only generate what's actually missing.
+        missing_tts = []
+        for s in shots:
+            _nidx = s.get("narration_idx", 0)
+            _voice = _lookup_voice(s.get("character", "NONE"))
+            _disk = str(ep_dir / f"narration_{_nidx:02d}.wav")
+            _disk_char = str(ep_dir / f"narration_{_nidx:02d}_char.wav")
+            # Prefer the exact clip for this shot's voice (char variant if the
+            # shot uses a clone voice, else the narrator variant).
+            if _voice and os.path.isfile(_disk_char) and os.path.getsize(_disk_char) > 1000:
+                s["tts_path"] = _disk_char
+                continue
+            if os.path.isfile(_disk) and os.path.getsize(_disk) > 1000:
+                s["tts_path"] = _disk
+                continue
+            missing_tts.append(s)
+    if missing_tts:
+        print(f"\n[TTS] Generating {len(missing_tts)} missing narration clips "
+              f"({len(shots) - len(missing_tts)} already on disk)...")
+        for idx, shot in enumerate(missing_tts):
+            nidx = shot.get("narration_idx", idx)
+            _voice = _lookup_voice(shot.get("character", "NONE"))
+            out = str(ep_dir / f"narration_{nidx:02d}.wav")
+            if _voice:
+                out = str(ep_dir / f"narration_{nidx:02d}_char.wav")
+            shot["tts_path"] = out
+            speak = _strip_stage_directions(shot.get("narration") or "")
+            ok = _pocket_tts_generate(speak, out, voice=_voice)
+            if ok:
+                _normalize_voice_0db(out)
+                print(f"  [TTS] {_get_audio_duration(out):.1f}s - {speak[:50]}...")
+            else:
+                print(f"  [TTS] FAILED - {speak[:50]}...")
+            time.sleep(0.5)
+        save_cb("tts")
+    else:
+        print(f"  [RESUME] All {len(shots)} TTS clips present")
+
+
 def _resume_episode(state: dict) -> None:
     """Resume a partially-completed episode from saved state.
 
@@ -9490,6 +9546,11 @@ def _resume_episode(state: dict) -> None:
                            chapter_events, anchor_events,
                            location_sheets, prop_assets,
                            target_paras=target_paras)
+
+    # 0. TTS GAP-FILL FIRST (Joe 2026-08-09): generate any missing narration
+    #    clips BEFORE image generation, so images are never rendered against
+    #    audio that doesn't exist yet. Reuses clips already on disk.
+    _resume_tts_gap_fill(shots, episode_num, regen_tts, _save)
 
     # 1. Images: regenerate only the missing ones (same seeds -> same look),
     #    or ALL of them when REGEN_IMAGES=1 (a style change forces this so the
@@ -9716,61 +9777,6 @@ def _resume_episode(state: dict) -> None:
         _save("images")
     else:
         print(f"  [RESUME] All {len(shots)} images present")
-
-    # 2. TTS: regenerate only the missing narration clips (or ALL of them when
-    #    regen_tts). Also strip any leaked stage directions from the narration
-    #    text before speaking it, so a bracketed direction can never be read.
-    #    The skip check is DISK-BASED (deterministic narration_XX.wav path):
-    #    clips already rendered are reused even if the resume state was saved
-    #    before TTS finished, so a mid-TTS crash resumes from where it left off
-    #    (e.g. 34/109) instead of re-speaking everything.
-    ep_dir = TTS_TEMP / f"ep_{episode_num}"
-    ep_dir.mkdir(parents=True, exist_ok=True)
-    if regen_tts:
-        missing_tts = [s for s in shots
-                       if not s.get("is_chapter") and (s.get("narration") or "").strip()]
-        print(f"\n[TTS] REGEN - re-speaking ALL {len(missing_tts)} narration clips")
-    else:
-        # GAP-FILL (Joe 2026-08-09): reuse any clip already on disk, matching
-        # BOTH the narrator file (narration_XX.wav) and the per-character clone
-        # file (narration_XX_char.wav, used when voice_map.json maps this shot's
-        # character to a different voice). Only generate what's actually missing.
-        missing_tts = []
-        for s in shots:
-            _nidx = s.get("narration_idx", 0)
-            _voice = _lookup_voice(s.get("character", "NONE"))
-            _disk = str(ep_dir / f"narration_{_nidx:02d}.wav")
-            _disk_char = str(ep_dir / f"narration_{_nidx:02d}_char.wav")
-            # Prefer the exact clip for this shot's voice (char variant if the
-            # shot uses a clone voice, else the narrator variant).
-            if _voice and os.path.isfile(_disk_char) and os.path.getsize(_disk_char) > 1000:
-                s["tts_path"] = _disk_char
-                continue
-            if os.path.isfile(_disk) and os.path.getsize(_disk) > 1000:
-                s["tts_path"] = _disk
-                continue
-            missing_tts.append(s)
-    if missing_tts:
-        print(f"\n[TTS] Generating {len(missing_tts)} missing narration clips "
-              f"({len(shots) - len(missing_tts)} already on disk)...")
-        for idx, shot in enumerate(missing_tts):
-            nidx = shot.get("narration_idx", idx)
-            _voice = _lookup_voice(shot.get("character", "NONE"))
-            out = str(ep_dir / f"narration_{nidx:02d}.wav")
-            if _voice:
-                out = str(ep_dir / f"narration_{nidx:02d}_char.wav")
-            shot["tts_path"] = out
-            speak = _strip_stage_directions(shot.get("narration") or "")
-            ok = _pocket_tts_generate(speak, out, voice=_voice)
-            if ok:
-                _normalize_voice_0db(out)
-                print(f"  [TTS] {_get_audio_duration(out):.1f}s - {speak[:50]}...")
-            else:
-                print(f"  [TTS] FAILED - {speak[:50]}...")
-            time.sleep(0.5)
-        _save("tts")
-    else:
-        print(f"  [RESUME] All {len(shots)} TTS clips present")
 
     # 3. Title pass: whisper the voice track, resolve exact title times
     #    (chapter cards + location/timeline/person anchors). Runs before the
