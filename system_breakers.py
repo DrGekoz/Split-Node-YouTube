@@ -2599,6 +2599,159 @@ def _llm_json(messages: list[dict], max_tokens: int = 1200, temp: float = 0.5) -
     return {}
 
 
+# -- LLM prompt relevance gate (Joe 2026-08-09) -----------------------
+# Current article topic, set right before image generation so every shot and
+# chapter-card prompt is cross-checked against the STORY. Stops the image model
+# drifting to off-topic content (e.g. a random Mayan pyramid). Empty = gate off.
+_IMG_TOPIC = ""
+_SHOT_RELEVANCE_RETRIES = int(os.environ.get("SHOT_RELEVANCE_RETRIES", "2"))
+# Master toggle: SHOT_RELEVANCE=0 disables the gate entirely (Joe 2026-08-09).
+_SHOT_RELEVANCE_ON = os.environ.get("SHOT_RELEVANCE", "1").strip().lower() not in (
+    "0", "false", "no", "off")
+# Cached fast-probe of LM Studio reachability so the gate fail-opens instantly
+# instead of hanging on a 180s per-call timeout when the server is busy/down.
+_LLM_REACHABLE = None
+
+
+def _llm_fast_reachable() -> bool:
+    global _LLM_REACHABLE
+    if _LLM_REACHABLE is not None:
+        return _LLM_REACHABLE
+    # Probe the CHAT endpoint (NOT /v1/models) with a short timeout: /v1/models
+    # can still respond while inference is dead/hung, which would let the gate
+    # block on a 180s per-call timeout. A tiny chat call is the real liveness test.
+    _model = "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+    _payload = {"model": _model,
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 2, "temperature": 0.1}
+    try:
+        _req = urllib.request.Request(LM_STUDIO_URL, data=json.dumps(_payload).encode(),
+                                      headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(_req, timeout=8) as _r:
+            _LLM_REACHABLE = _r.status == 200
+    except Exception:
+        _LLM_REACHABLE = False
+    if not _LLM_REACHABLE:
+        print("  [RELEVANCE] LM Studio inference unreachable (chat probe timed out) - "
+              "relevance gate OFF (all prompts pass through)")
+    return _LLM_REACHABLE
+
+
+def _set_img_topic(topic: str) -> None:
+    global _IMG_TOPIC
+    _IMG_TOPIC = (topic or "").strip()
+
+
+def _llm_judge_prompt_relevance(prompt: str, narration: str) -> tuple:
+    """Judge whether an image prompt is relevant to the article topic.
+    Returns (relevant, note). Fail-open (True, '') when no topic, gate off,
+    LM Studio unreachable, or on error."""
+    if not _SHOT_RELEVANCE_ON or not _IMG_TOPIC or not _llm_fast_reachable():
+        return True, ""
+    try:
+        sys = (
+            "You are a documentary image director. Given an ARTICLE TOPIC, the "
+            "NARRATION line being shown, and an IMAGE PROMPT about to go to an "
+            "AI image generator, judge whether the prompt is RELEVANT to the "
+            "story. RELEVANT = the scene, setting, objects and people plausibly "
+            "belong to this article and illustrate the narration. IRRELEVANT = it "
+            "drifts to an unrelated subject with nothing to do with the story "
+            "(e.g. a random Mayan pyramid, an unrelated building or landscape, a "
+            "scene about a different topic). "
+            'Reply ONLY as JSON: {"relevant": true|false, "note": "<if '
+            'irrelevant, one short sentence saying what is wrong and what the '
+            'scene SHOULD be>"}. No markdown.'
+        )
+        data = _llm_json([
+            {"role": "system", "content": sys},
+            {"role": "user", "content":
+                f"ARTICLE TOPIC: {_IMG_TOPIC}\n\n"
+                f"NARRATION: {narration}\n\n"
+                f"IMAGE PROMPT: {prompt}\n"},
+        ], max_tokens=160, temp=0.1)
+        if not isinstance(data, dict) or "relevant" not in data:
+            return True, ""
+        return bool(data.get("relevant")), str(data.get("note", "")).strip()
+    except Exception as e:
+        print(f"  [RELEVANCE] judge failed ({str(e)[:60]}) - accepting prompt")
+        return True, ""
+
+
+def _llm_rewrite_scene(narration: str, old_scene: str, note: str) -> str:
+    """Rewrite a shot's scene so it directly illustrates the narration and stays
+    on-topic with the article. Returns new scene text or '' on failure."""
+    try:
+        sys = (
+            "You are a documentary scene director. Given the ARTICLE TOPIC, the "
+            "NARRATION being shown, and a note about why the previous scene was "
+            "irrelevant, write ONE new cinematic scene description (1-3 sentences) "
+            "that DIRECTLY illustrates the narration and belongs to this story. "
+            "Include concrete setting, key objects and what is happening. No camera "
+            "framing, no shot type, no character names. Reply with ONLY the scene "
+            "text."
+        )
+        out = _llm_chat([
+            {"role": "system", "content": sys},
+            {"role": "user", "content":
+                f"ARTICLE TOPIC: {_IMG_TOPIC}\n\n"
+                f"NARRATION: {narration}\n\n"
+                f"PREVIOUS SCENE (irrelevant): {old_scene}\n\n"
+                f"PROBLEM: {note}\n\nNEW SCENE:"},
+        ], max_tokens=160, temp=0.6).strip()
+        out = re.sub(r"\s+", " ", out).strip(" '\"")
+        return out if len(out) >= 8 else ""
+    except Exception:
+        return ""
+
+
+def _ensure_shot_prompt_relevant(prompt: str, shot: dict,
+                                 character_sheets: Optional[dict],
+                                 lock) -> str:
+    """Relevance-gate a shot prompt against the article topic. If the prompt
+    drifts off-topic, rewrite the shot's scene and rebuild up to N retries.
+    Fail-open (returns the prompt unchanged) when no topic or LLM errors."""
+    for attempt in range(1, _SHOT_RELEVANCE_RETRIES + 1):
+        relevant, note = _llm_judge_prompt_relevance(
+            prompt, shot.get("narration", ""))
+        if relevant:
+            return prompt
+        _log = f"[RELEVANCE] shot miss ({attempt}/{_SHOT_RELEVANCE_RETRIES}): {note}"
+        if lock:
+            with lock:
+                print(f"  {_log}")
+        else:
+            print(f"  {_log}")
+        new_scene = _llm_rewrite_scene(
+            shot.get("narration", ""), shot.get("scene", ""), note)
+        if not new_scene:
+            break
+        shot["scene"] = new_scene
+        prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
+    return prompt
+
+
+def _ensure_card_prompt_relevant(prompt: str, title: str, n: int) -> str:
+    """Relevance-gate a chapter card background prompt. If it drifts off-topic,
+    re-run the (topic-anchored) background prompt and rebuild, up to N retries."""
+    for attempt in range(1, _SHOT_RELEVANCE_RETRIES + 1):
+        relevant, note = _llm_judge_prompt_relevance(
+            prompt, f"Chapter {n}: {title}")
+        if relevant:
+            return prompt
+        print(f"  [CARD] relevance miss ({attempt}/{_SHOT_RELEVANCE_RETRIES}): {note}")
+        bg = _llm_chapter_bg_prompt(title, n)
+        if not bg:
+            break
+        prompt = (f"{_style_inject()}. {bg}. A clean cinematic documentary "
+                  f"chapter card background with NO text, NO words, NO letters, "
+                  f"NO titles, no watermark. The composition is a striking themed "
+                  f"backdrop with plenty of open negative space in the centre for "
+                  f"text to be overlaid later. Dark vignette, moody atmosphere, "
+                  f"minimal clutter. 16:9 widescreen cinematic documentary "
+                  f"background.")
+    return prompt
+
+
 # Generic words that should never be the discriminating token when checking
 # whether an extracted place actually appears in the article text.
 _GENERIC_PLACE_WORDS = {
@@ -4177,13 +4330,16 @@ def _llm_chapter_bg_prompt(title: str, chapter_num: int) -> str:
         msgs = [
             {"role": "system",
              "content": ("You are a documentary title-card art director. Given a "
-                         "chapter title, describe a SINGLE striking cinematic "
-                         "background scene (setting, mood, key objects, lighting) "
-                         "that matches the title's theme. Return ONLY a 1-2 "
-                         "sentence image prompt. No text, no dialogue, no "
-                         "characters' faces, no words, no watermarks.")},
+                         "chapter title and the EPISODE'S ARTICLE TOPIC, describe a "
+                         "SINGLE striking cinematic background scene (setting, mood, "
+                         "key objects, lighting) that matches BOTH the title's theme "
+                         "AND belongs to the story's world (the article topic). Do NOT "
+                         "drift to an unrelated subject. Return ONLY a 1-2 sentence "
+                         "image prompt. No text, no dialogue, no characters' faces, "
+                         "no words, no watermarks.")},
             {"role": "user",
-             "content": f"Chapter {chapter_num}: {title}. Background scene:"},
+             "content": f"ARTICLE TOPIC: {_IMG_TOPIC or '(not provided)'}\n"
+                        f"Chapter {chapter_num}: {title}. Background scene:"},
         ]
         out = _llm_chat(msgs, max_tokens=120, temp=0.7).strip()
         out = re.sub(r"\s+", " ", out).strip(" '\"")
@@ -4253,6 +4409,9 @@ def _generate_chapter_card(shot: dict, episode_num: int) -> Optional[str]:
             "background plate, no photos, no people, no objects, open negative "
             f"space in the centre. 16:9 widescreen. {_style_inject()}"
         )
+    # LLM relevance gate: cross-check the card background against the article
+    # topic so it matches the STORY, not an off-topic scene (Joe 2026-08-09).
+    prompt = _ensure_card_prompt_relevant(prompt, title, n)
     print(f"  [CARD] rendering chapter {n:02d} title card via {backend}...")
     seed = 90000 + n * 137 + episode_num
     ok = _krea_generate(prompt, seed, out, ref_images=None, denoise=1.0,
@@ -6532,6 +6691,9 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             return
         seed = 10000 + idx * 137 + random.randint(0, 999)
         prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
+        # LLM relevance gate (Joe 2026-08-09): cross-check the prompt against the
+        # article topic; rewrite the scene + rebuild if it drifted off-story.
+        prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock)
         # Panels were built up front by _build_all_character_sheets (before the
         # shot loop); _select_shot_refs just picks the PERFECT panel(s) here.
         refs, notes = _select_shot_refs(shot, sheets, brand_assets)
@@ -8542,6 +8704,7 @@ def _rebuild_script_for_resume(state: dict) -> dict:
     episode_num = int(state.get("episode_num", 0))
     article_url = state.get("article_url", "")
     topic = state.get("topic", "")
+    _set_img_topic(topic)   # for the LLM prompt-relevance gate (Joe 2026-08-09)
     target_paras = int(state.get("target_paras", 0) or TARGET_NARRATION_PARAS)
     if not article_url:
         print("  [SCRIPT] No article_url in state - cannot rebuild script")
@@ -8791,6 +8954,9 @@ def _resume_episode(state: dict) -> None:
             seed = shot.get("seed") or (10000 + random.randint(0, 999))
             prompt = (_build_shot_prompt(shot, character_sheets)
                       + " " + _style_inject())
+            # LLM relevance gate (Joe 2026-08-09): cross-check the prompt against
+            # the article topic; rewrite the scene + rebuild if it drifted off-story.
+            prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock)
             if face_lock and _active_image_backend() != "codex":
                 # Panels were built up front by _build_all_character_sheets -
                 # just confirm every char in this shot is present.
@@ -9357,6 +9523,7 @@ def main():
 
     # 5. Generate images (Krea 2 Turbo local, character sheet prepended,
     #    angle-matched view, face-lock portraits).
+    _set_img_topic(topic)   # for the LLM prompt-relevance gate (Joe 2026-08-09)
     shots = _generate_all_shots(shots, character_sheets, episode_num=episode_num,
                                 context=context,
                                 location_sheets=location_sheets,

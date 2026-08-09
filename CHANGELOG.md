@@ -2,6 +2,24 @@
 
 All notable changes to Split Node.
 
+## [1.35.3] - 2026-08-09
+
+### LLM prompt-relevance gate (stops off-story images like the "Mayan pyramid")
+
+- Before every shot image and every chapter card is sent to the image backend,
+  the FINAL prompt (scene + style + codex hardening + everything) is passed to
+  the local LLM and cross-referenced against the **article title** for relevance.
+  If it's judged off-topic, the shot's scene is rewritten by the LLM (grounded in
+  the article) and the prompt is rebuilt + re-judged, up to `SHOT_RELEVANCE_RETRIES`
+  (default 2). Chapter cards get the same gate via a topic-anchored background.
+- `_llm_chapter_bg_prompt` is now topic-aware so card backgrounds belong to the
+  story's world, not a random abstraction.
+- **Never blocks the pipeline**: `SHOT_RELEVANCE=0` disables it entirely; when
+  LM Studio inference is unreachable (a fast 8s chat probe) the gate fails open
+  and every prompt passes through untouched - so a dead LM Studio can't hang the
+  run on the 180s per-call timeout. Wired into both the fresh and resume image
+  paths.
+
 ## [1.35.2] - 2026-08-09
 
 ### Text is NEVER baked into shots or chapter cards - FFmpeg burns it at the end
