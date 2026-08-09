@@ -2734,8 +2734,10 @@ def _ensure_card_prompt_relevant(prompt: str, title: str, n: int) -> str:
     """Relevance-gate a chapter card background prompt. If it drifts off-topic,
     re-run the (topic-anchored) background prompt and rebuild, up to N retries."""
     for attempt in range(1, _SHOT_RELEVANCE_RETRIES + 1):
+        # Judge checks the chapter card prompt against BOTH the article topic
+        # (via _IMG_TOPIC) AND the chapter name itself (Joe 2026-08-09).
         relevant, note = _llm_judge_prompt_relevance(
-            prompt, f"Chapter {n}: {title}")
+            prompt, f"CHAPTER CARD {n}: {title}")
         if relevant:
             return prompt
         print(f"  [CARD] relevance miss ({attempt}/{_SHOT_RELEVANCE_RETRIES}): {note}")
@@ -4101,6 +4103,18 @@ def _shot_filename(shot: dict, number: int) -> str:
         slug = "shot"
     return f"shot{int(number):02d}_{slug}.png"
 
+
+def _chapter_filename(chapter_num: int, title: str) -> str:
+    """Descriptive chapter card filename: 'chapter_{NN}_{slug}.png' e.g.
+    'chapter_01_cracking_hugging_face.png' (Joe 2026-08-09). The chapter name
+    lives in the FILENAME only - the card image itself stays clean (no baked
+    text); the ASS chapter title is burned by FFmpeg at render time."""
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", title or "").strip("_").lower()
+    slug = re.sub(r"_+", "_", slug)[:50].strip("_")
+    if not slug:
+        slug = "card"
+    return f"chapter_{int(chapter_num):02d}_{slug}.png"
+
 def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> str:
     """Build the prompt for ONE shot (shared by full gen and resume regen).
     Discovery logic (Joe 2026-08-06):
@@ -4395,7 +4409,7 @@ def _generate_chapter_card(shot: dict, episode_num: int) -> Optional[str]:
     W_RES, H_RES = _get_output_resolution()
     ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
     ep_dir.mkdir(parents=True, exist_ok=True)
-    out = str(ep_dir / f"chapter_{n:02d}_card.png")
+    out = str(ep_dir / _chapter_filename(n, title))
     _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
     if _regen and os.path.isfile(out):
         try:
@@ -6661,17 +6675,26 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
     # below then reuses the pre-generated cards.
     _chap_shots = [s for s in shots if s.get("is_chapter")]
     if _chap_shots and backend in ("codex", "fal"):
+        _cn = _image_concurrency()
         print(f"  [CARDS] rendering {len(_chap_shots)} chapter title cards "
-              f"first (sequential)...")
-        for _cs in _chap_shots:
-            _card = _generate_chapter_card(_cs, episode_num)
-            if _card:
-                _cs["image_path"] = _card
-                print(f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
-                      f"{os.path.basename(_card)}")
-            else:
-                print(f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
-                      f"black placeholder")
+              f"in parallel ({_cn} workers)...")
+
+        def _render_card(_cs):
+            _c = _generate_chapter_card(_cs, episode_num)
+            if _c:
+                _cs["image_path"] = _c
+                return (f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
+                        f"{os.path.basename(_c)}")
+            return (f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
+                    f"black placeholder")
+
+        if _cn > 1 and len(_chap_shots) > 1:
+            with ThreadPoolExecutor(max_workers=_cn) as _ex:
+                for _msg in _ex.map(_render_card, _chap_shots):
+                    print(_msg)
+        else:
+            for _cs in _chap_shots:
+                print(_render_card(_cs))
 
     _img_iter = (tqdm(shots, desc="  [IMAGES] rendering shots", unit="shot",
                       leave=False) if _HAS_PROGRESS else shots)
@@ -6768,7 +6791,8 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                 _apply_grade(out_path)
             label = notes if notes else "txt2img (no refs)"
             with _plock:
-                print(f"  [SHOT {idx+1}/{len(shots)}] image ready -> refs: {label}")
+                print(f"  [SHOT {idx+1}/{len(shots)}] image ready -> refs: {label} | "
+                      f"{os.path.basename(out_path)} ({out_path})")
         else:
             with _plock:
                 print(f"  [SHOT {idx+1}/{len(shots)}] IMAGE FAILED after retry")
@@ -8925,13 +8949,22 @@ def _resume_episode(state: dict) -> None:
                                and "chapter_" in os.path.basename(s["image_path"]))
                           or _force_regen)]
     if _chap_missing:
-        print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards...")
-        for _cs in _chap_missing:
+        print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards "
+              f"in parallel ({_image_concurrency()} workers)...")
+        def _rcard(_cs):
             _card = _generate_chapter_card(_cs, episode_num)
             if _card:
                 _cs["image_path"] = _card
-            print(f"  [CARD] chapter {_cs.get('chapter_num')}: "
-                  f"{'OK' if _card else 'black placeholder'}")
+            return (f"  [CARD] chapter {_cs.get('chapter_num')}: "
+                    f"{'OK' if _card else 'black placeholder'}")
+        _cn2 = _image_concurrency()
+        if _cn2 > 1 and len(_chap_missing) > 1:
+            with ThreadPoolExecutor(max_workers=_cn2) as _ex2:
+                for _msg2 in _ex2.map(_rcard, _chap_missing):
+                    print(_msg2)
+        else:
+            for _cs2 in _chap_missing:
+                print(_rcard(_cs2))
     if missing_img:
         print(f"\n[IMAGES] Regenerating {len(missing_img)} missing shots...")
         # ---- Rebuild the episode world assets the fresh run never finished ----
@@ -9029,7 +9062,7 @@ def _resume_episode(state: dict) -> None:
             label = notes if notes else "txt2img (no refs)"
             with _plock:
                 print(f"  [SHOT] {'image ready' if ok else 'IMAGE FAILED - fallback'} "
-                      f"-> refs: {label}")
+                      f"-> refs: {label} | {os.path.basename(out_path)} ({out_path})")
                 time.sleep(1)
             if _HAS_PROGRESS:
                 with _plock:

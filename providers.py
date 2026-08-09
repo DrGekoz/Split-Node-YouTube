@@ -38,6 +38,11 @@ from pathlib import Path
 import queue as _queue
 import threading as _threading
 
+try:
+    from tqdm import tqdm as _tqdm
+except Exception:
+    _tqdm = None
+
 # ---------------------------------------------------------------------------
 # Keys + project root (.env loaded here; system_breakers also loads it)
 # ---------------------------------------------------------------------------
@@ -445,11 +450,59 @@ def _upscale_worker_loop():
             break
         try:
             image_path, width, height = job
-            _enforce_resolution(image_path, width, height)
+            _name = os.path.basename(image_path)
+            _t0 = time.time()
+            _bar = None
+            if _tqdm is not None:
+                # Estimated duration (source-pixel proportional) so the per-image
+                # progress bar has a plausible total (Joe 2026-08-09).
+                _est = _estimate_upscale_seconds(image_path)
+                _bar = _tqdm(total=_est, unit="s", leave=False,
+                             desc=f"  [UPSCALE] {_name}",
+                             bar_format="{desc}: {percentage:3.0f}%|{bar}| "
+                                        "{n:.1f}/{total:.1f}s")
+            _res = {}
+
+            def _run():
+                _res["ok"] = _enforce_resolution(image_path, width, height)
+
+            _th = _threading.Thread(target=_run)
+            _th.start()
+            if _bar is not None:
+                while _th.is_alive():
+                    time.sleep(0.1)
+                    _bar.update(min(0.1, time.time() - _t0 - _bar.n))
+                _th.join()
+                _bar.n = _est
+                _bar.refresh()
+                _bar.close()
+            else:
+                _th.join()
+            _ok = _res.get("ok")
+            _sz = ""
+            try:
+                from PIL import Image
+                _im = Image.open(image_path)
+                _sz = f"{_im.size[0]}x{_im.size[1]}"
+            except Exception:
+                pass
+            print(f"  [UPSCALE] {'OK' if _ok else 'FAILED'} {_name} ({_sz}) "
+                  f"in {time.time()-_t0:.1f}s", flush=True)
         except Exception as _e:
-            print(f"  [UPSCALE] worker error: {str(_e)[:120]}")
+            print(f"  [UPSCALE] worker error: {str(_e)[:120]}", flush=True)
         finally:
             _upscale_q.task_done()
+
+
+def _estimate_upscale_seconds(image_path: str) -> float:
+    """Rough per-image upscale time from source pixel count (1.5e-6 s/px on the
+    RealESRGAN x2 daemon) so the progress bar has a plausible total. Clamped."""
+    try:
+        from PIL import Image
+        w, h = Image.open(image_path).size
+        return max(0.5, min(15.0, w * h * 1.5e-6 + 0.5))
+    except Exception:
+        return 2.0
 
 
 def _start_upscale_worker():

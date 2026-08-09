@@ -2,6 +2,29 @@
 
 All notable changes to Split Node.
 
+## [1.35.5] - 2026-08-09
+
+### Chapter cards: relevance vs title + article, parallel gen, descriptive filenames; upscale visibility
+
+- **Chapter card relevance vs BOTH the article title AND the chapter name**: the
+  card background prompt is judged against the article topic (via `_IMG_TOPIC`)
+  AND the chapter title itself (passed as `CHAPTER CARD {n}: {title}`), and the
+  background is rewritten + re-judged if it drifts off-topic. Chapter names are
+  already stored in the resume file (`chapter_title` on each chapter shot +
+  `chapter_events`).
+- **Chapter cards generate in PARALLEL** (`IMAGE_CONCURRENCY` workers) instead of
+  one-at-a-time - the parallel-safe codex output claiming makes the old
+  sequential pre-pass unnecessary. Big speedup on the 9-card pass.
+- **Descriptive chapter card filenames**: `chapter_{NN}_{slug}.png` e.g.
+  `chapter_01_cracking_hugging_face_vaults_open.png` (name from the chapter
+  title, filename only - the card image stays clean).
+- **Per-image upscale progress bar + completion log**: the async upscale worker
+  now shows a progress bar per image and logs `[UPSCALE] OK <name> (WxH) in X.Xs`
+  when it finishes, so it's clear images ARE being upscaled (they were silently
+  waiting in the async queue at codex's native res, which looked stuck).
+- **Shot log shows the generated image path** so each result is identifiable in
+  the terminal.
+
 ## [1.35.4] - 2026-08-09
 
 ### Shot images are 100% text-free + descriptive filenames
