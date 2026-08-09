@@ -3444,6 +3444,13 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
         print(f"  [CAST-LOCK] demoted {_biz_demoted} business/entity shot(s) "
               f"(company personified as a person -> NONE, renders as scene/logo)")
     shots = _merge_character_aliases(shots)
+    # Assign the canonical display order (Joe 2026-08-09): `seq` = the shot's
+    # exact 1-based position in the FINAL ordered list - the SAME order ffmpeg
+    # uses to assemble the video (enumerate(shots) in _render_video). Filenames
+    # and resume are keyed on this so the right image always lands on the right
+    # frame regardless of generation order or narration_idx gaps.
+    for _si, _shot in enumerate(shots):
+        _shot["seq"] = _si + 1
     print(f"  [LLM] Shot list complete: {len(shots)} shots")
     return shots
 
@@ -4105,7 +4112,10 @@ def _shot_filename(shot: dict, number: int) -> str:
     e.g. 'shot01_hugging_face_switzerland.png' (Joe 2026-08-09). The
     description lives ONLY in the filename - the image itself must stay clean
     (NO_IMAGE_TEXT), and any on-screen label is burned by FFmpeg at render time.
-    `number` = the shot's 1-based narration index (stable across resume)."""
+    `number` = the shot's 1-based CANONICAL order (seq) - the same order ffmpeg
+    uses to assemble the video. This guarantees the filename always matches the
+    frame position, even when shots generate in parallel or narration_idx has
+    gaps (Joe 2026-08-09)."""
     name = (shot.get("establishing_name") or "").strip()
     if not name:
         narr = (shot.get("narration") or shot.get("scene") or "")
@@ -4183,7 +4193,8 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         # the scene-only style with zero human language so no person appears.
         return (
             f"{SCENE_STYLE}. {scene}{cam_desc}.{narr_ctx} "
-            f"16:9 widescreen cinematic documentary frame, EXACTLY ONE "
+            f"16:9 widescreen cinematic documentary frame, high detail "
+            f"illustration, EXACTLY ONE "
             f"continuous scene, one location, no collage, no split panels, "
             f"no duplicated scenes{NO_IMAGE_TEXT}"
         )
@@ -4202,7 +4213,8 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     char_part = " ".join(blocks)
     return (
         f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx} "
-        f"16:9 widescreen cinematic documentary frame, EXACTLY ONE continuous "
+        f"16:9 widescreen cinematic documentary frame, high detail "
+        f"illustration, EXACTLY ONE continuous "
         f"scene, no collage, no duplicated figures{NO_IMAGE_TEXT}"
     )
 
@@ -4557,7 +4569,8 @@ def _generate_chapter_card(shot: dict, episode_num: int,
             f"composition is a striking themed backdrop with plenty of open "
             f"negative space in the CENTRE for text to be overlaid later. Dark "
             f"vignette, moody atmosphere, minimal clutter, no people as the "
-            f"main subject. 16:9 widescreen cinematic documentary background."
+            f"main subject. 16:9 widescreen cinematic documentary background, "
+            f"high detail illustration."
             f" {_style_inject()}.{brand_clause}"
         )
         print(f"  [CARD] chapter {n:02d} LLM background prompt generated")
@@ -4569,7 +4582,8 @@ def _generate_chapter_card(shot: dict, episode_num: int,
             f" {_style_inject()}.{brand_clause} NO text, NO words, NO letters, "
             "NO titles, no watermark. Clean, minimal, high contrast, "
             "professional broadcast background plate, no photos, no people, no "
-            "objects, open negative space in the centre. 16:9 widescreen."
+            "objects, open negative space in the centre. 16:9 widescreen, "
+            "high detail illustration."
         )
     # LLM relevance gate: cross-check the card background against the article
     # topic so it matches the STORY, not an off-topic scene (Joe 2026-08-09).
@@ -7014,7 +7028,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         refs, notes = _select_shot_refs(shot, sheets, brand_assets,
                                         llm_refs=shot.get("_llm_refs"))
         out_path = str((ep_dir or SHOTS_DIR)
-                       / _shot_filename(shot, int(shot.get("narration_idx", idx)) + 1))
+                       / _shot_filename(shot, int(shot.get("seq", 0) or (shot.get("narration_idx", idx) + 1))))
         n = len(refs)
         if refs:
             # single ref -> tight identity boost; multiple refs -> lower boost
@@ -9395,7 +9409,7 @@ def _resume_episode(state: dict) -> None:
             refs, notes = _select_shot_refs(shot, sheets_cache, brand_assets,
                                             llm_refs=shot.get("_llm_refs"))
             out_path = str(ep_shot_dir
-                           / _shot_filename(shot, int(shot.get("narration_idx", idx)) + 1))
+                           / _shot_filename(shot, int(shot.get("seq", 0) or (shot.get("narration_idx", idx) + 1))))
             n = len(refs)
             if refs:
                 # single ref -> tight identity boost; multiple refs -> lower

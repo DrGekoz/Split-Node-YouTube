@@ -2,6 +2,21 @@
 
 All notable changes to Split Node.
 
+## [1.38.2] - 2026-08-09
+
+### Canonical shot ordering + 'high detail illustration' prompt hardening
+
+- **Canonical image order tracked via `seq`**: every shot now gets a `seq`
+  field = its exact 1-based position in the FINAL ordered shot list - the SAME
+  order ffmpeg uses to assemble the video (`enumerate(shots)` in
+  `_render_video`). Shot filenames (`shot{NN}_...png`) and the clip/frame
+  assembly are both keyed on `seq`, so the right image always lands on the
+  right frame regardless of generation order, parallel chunks, or
+  `narration_idx` gaps. Previously filenames used `narration_idx`, which could
+  diverge from the true display position and produce mis-ordered files.
+- **'high detail illustration' added to every image prompt** (shots AND chapter
+  cards) to stop GPT Image 2 hallucinating weird artifacts.
+
 ## [1.38.1] - 2026-08-09
 
 ### Fix run stall + pipelined chunked shot generation + chapter-card title-only logos
