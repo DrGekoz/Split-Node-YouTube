@@ -2,6 +2,30 @@
 
 All notable changes to Split Node.
 
+## [1.38.3] - 2026-08-09
+
+### Fix chapter-card wrong filenames (sequential) + overlap shot verification + business-location logos + thumbnail style
+
+- **FIX chapter cards getting wrong filenames**: chapter cards were rendering
+  in PARALLEL, and codex's "newest generated image" claim raced - each card
+  could copy another card's output, so cards got the wrong art/filename. Cards
+  now render SEQUENTIALLY (one at a time) in BOTH fresh and resume paths, which
+  eliminates the race entirely.
+- **LLM shot-verification overlaps card generation**: while the chapter cards
+  generate, a background thread LLM-verifies + ref-checks ALL shot prompts, so
+  the LLM is busy during card gen and shots are ready to fire the moment cards
+  finish.
+- **Business-location logos**: improved `_is_business_shot` to detect a business
+  location from brand name + location cue (e.g. 'OpenAI California') even
+  without an explicit HQ keyword, and `_select_shot_refs` now attaches the
+  BRAND BUILDING asset (real logo baked onto the facade) for location shots -
+  not just the bare logo mark.
+- **Thumbnail uses the same style prompt as the main video** (via
+  `_style_inject()`), so the thumbnail matches the episode's look exactly.
+- **Arcane style prompt** replaced with the new hand-painted comic-realism
+  spec + explicit NO TEXT/no-words/no-letters/no-watermarks/no-logos to stop
+  GPT Image 2 hallucinating artifacts.
+
 ## [1.38.2] - 2026-08-09
 
 ### Canonical shot ordering + 'high detail illustration' prompt hardening

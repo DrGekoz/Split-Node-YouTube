@@ -283,13 +283,18 @@ STYLE_PROMPT_FALLBACK = (
 # An unrecognised/custom value is used verbatim as a free-form style tag.
 STYLE_PROFILES = {
     "arcane": (
-        "bold stylized 3D illustration, hand-rendered graphic look, strong "
-        "clean black outlines around characters and objects like a comic or "
-        "cel-shaded video game, flat-to-soft painterly shading, slightly "
-        "exaggerated features, saturated vibrant colors, dramatic rim "
-        "lighting, dark moody atmosphere, high detail, cinematic animated "
-        "documentary still, NOT photorealistic, not a photograph, not "
-        "realistic skin - a stylized illustrated look"),
+        "Stylized hand-painted comic realism, cel-shaded 3D rendering, bold "
+        "inked outlines, graphic-novel linework, exaggerated edge definition, "
+        "painterly textures, distressed surfaces, gritty weathering, visible "
+        "scratches and imperfections, high-contrast lighting, dramatic rim "
+        "lighting, saturated but slightly dirty color palette, warm highlights "
+        "against cool shadows, strong ambient occlusion, sharp facial and "
+        "object definition, chunky simplified forms, slightly exaggerated "
+        "proportions, textured brush strokes, rough cross-hatching, poster-like "
+        "shading, cinematic depth of field, atmospheric bloom, punchy "
+        "highlights, deep shadows, stylized realism, rebellious retro-futuristic "
+        "aesthetic, polished video-game concept art finish, NO TEXT, no words, "
+        "no letters, no captions, no watermarks, no logos"),
     "bold-outline": (
         "bold thick black outlines, flat cel-shaded color, comic book "
         "illustration, high contrast, clean graphic shapes, dynamic angles, "
@@ -6316,12 +6321,39 @@ def _mirror_image(src: str, out: str) -> Optional[str]:
 
 
 def _is_business_shot(shot) -> bool:
+    """True when a shot is a BUSINESS LOCATION - the company's physical
+    presence (HQ, campus, office, factory, lab, storefront, or simply a shot
+    that frames the company's building/place). Used to decide whether the shot
+    should carry the BRAND BUILDING asset (real logo baked onto the facade)
+    as an image ref (Joe 2026-08-09).
+
+    Detection is TWO-fold:
+      1. Explicit business-location keywords in the scene (HQ, campus, office,
+         factory, lab, etc).
+      2. OR the scene/narration names a KNOWN brand alongside a location cue
+         (e.g. 'OpenAI California', 'the OpenAI campus', 'at Tesla') even when
+         no generic HQ keyword appears.
+    """
     scene = (shot.get("scene") or "").lower()
-    return bool(re.search(
-        r"(?i)\b(hq|headquarters|head office|office|corporate|company|"
-        r"startup|founded|boardroom|executive suite|lobby|factory floor|"
-        r"data center|server room|warehouse|office building|signage|"
-        r"storefront|lab|the office|their office|at the company)\b", scene))
+    narr = (shot.get("narration") or "").lower()
+    if re.search(
+            r"(?i)\b(hq|headquarters|head office|office|corporate|company|"
+            r"startup|founded|boardroom|executive suite|lobby|factory floor|"
+            r"data center|server room|warehouse|office building|signage|"
+            r"storefront|lab|the office|their office|at the company)\b", scene):
+        return True
+    # Brand + location-cue heuristic: any known brand name appearing next to a
+    # physical-location word in the scene or narration marks it a business shot.
+    blob = f"{scene} {narr}"
+    if any(kw in blob for kw in ("building", "campus", "hq", "headquarters",
+                                 "office", "facility", "plant", "factory",
+                                 "store", "storefront", "lab", "laboratory",
+                                 "studio", "showroom", "warehouse", "floor")):
+        _load_brand_manifest()
+        for _bn in list(_KNOWN_BRANDS) + list(AI_ORGS):
+            if _bn and _bn.lower() in blob:
+                return True
+    return False
 
 
 def _llm_shot_ref_check(shot: dict, brand_assets: Optional[dict] = None,
@@ -6464,17 +6496,27 @@ def _select_shot_refs(shot, char_panels_cache, brand_assets=None, llm_refs=None)
     # Brand ref: attach when the scene reads as a business shot (deterministic),
     # OR when the LLM ref-check decided the narration names a real brand (Joe
     # 2026-08-09 - the narration is the authoritative source for what the shot
-    # should reference). The logo is always the actual cached asset.
+    # should reference). For a BUSINESS-LOCATION shot we attach the BUILDING
+    # asset (the real logo baked onto the building facade) so the logo visibly
+    # appears on the location itself - not the bare logo mark (Joe 2026-08-09).
     llm_brand = (llm_refs or {}).get("brands") or []
+    is_loc = _is_business_shot(shot)
     attach_brands = set()
-    if _is_business_shot(shot):
+    if is_loc:
         b = _match_brand_asset(shot.get("scene", ""), brand_assets)
         if b:
             attach_brands.add(b)
     for bname in llm_brand:
-        logo = _find_logo(bname)
-        if logo and os.path.isfile(logo):
-            attach_brands.add(logo)
+        asset = None
+        if is_loc:
+            # Prefer the logo-on-building asset for location shots; fall back to
+            # the screen asset, then the bare logo mark.
+            asset = (brand_assets or {}).get(bname, {}).get("building") \
+                or (brand_assets or {}).get(bname, {}).get("screen")
+        if not (asset and os.path.isfile(asset)):
+            asset = _find_logo(bname)
+        if asset and os.path.isfile(asset):
+            attach_brands.add(asset)
     for brand in attach_brands:
         if brand not in refs and os.path.isfile(brand):
             refs.append(brand)
@@ -6906,19 +6948,52 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         print("  [SHEET] codex backend: using REAL-PERSON photo refs, "
               "skipping generated character panels")
 
-    # ---- CHAPTER CARDS FIRST (sequential, pre-pass) ----
-    # Generate ALL chapter title cards up front, BEFORE the parallel shot pool.
-    # Codex output detection grabs the NEWEST generated image per call; if a
-    # chapter card runs concurrently with character-panel/shot codex calls, its
-    # "newest" scan can copy the wrong (panel) image and you get a stretched
-    # character panel on the card (ep11 bug, Joe 2026-08-09). Rendering every
-    # card here, one at a time, eliminates that race entirely. The shot loop
-    # below then reuses the pre-generated cards.
+    # ---- SHOT-PROMPT VERIFICATION DEFINITIONS (used by cards + chunked render) ----
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    CHUNK = max(1, min(int(os.environ.get("SHOT_CHUNK_SIZE", "5")), len(shots) or 1))
+    _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
+    _todo = [s for s in shots
+             if not s.get("is_chapter")
+             and (_regen or not (s.get("image_path") and os.path.isfile(s.get("image_path", ""))))]
+
+    def _verify_chunk(chunk: list) -> int:
+        """LLM pre-verify + ref-check ONE chunk. Returns rewrite count.
+        Idempotent: shots already carrying `_verified_prompt` are skipped (so the
+        background verify during card generation isn't re-done by the chunked
+        render loop)."""
+        rewrites = 0
+        for _vs in chunk:
+            if _vs.get("_verified_prompt"):
+                continue
+            _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
+            _vp = _base
+            if _SHOT_RELEVANCE_ON and topic:
+                _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
+                if _vp != _base:
+                    rewrites += 1
+            _vs["_verified_prompt"] = _vp
+            _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
+        return rewrites
+
+    # ---- CHAPTER CARDS FIRST (SEQUENTIAL - fixes wrong-filename race) ----
+    # Generate ALL chapter title cards up front, ONE AT A TIME, BEFORE the
+    # parallel shot pool. Codex output detection grabs the NEWEST generated
+    # image per call; if cards run CONCURRENTLY their "newest" scans race and
+    # each card can copy another card's output -> cards get the WRONG filename /
+    # wrong art (Joe 2026-08-09). Sequential rendering eliminates that entirely.
+    # While the cards render, a background thread LLM-verifies + ref-checks ALL
+    # shot prompts so the LLM is busy during card generation (overlap).
     _chap_shots = [s for s in shots if s.get("is_chapter")]
     if _chap_shots and backend in ("codex", "fal"):
-        _cn = _image_concurrency()
         print(f"  [CARDS] rendering {len(_chap_shots)} chapter title cards "
-              f"in parallel ({_cn} workers)...")
+              f"SEQUENTIALLY (avoids codex output race)...")
+        # Kick off the LLM shot-prompt verification in the background NOW so it
+        # runs while the cards generate.
+        _verify_future = None
+        if _todo:
+            _verify_future = _TPE(max_workers=1).submit(
+                lambda: sum(_verify_chunk(_todo[i:i + CHUNK])
+                            for i in range(0, len(_todo), CHUNK)))
 
         def _render_card(_cs):
             _c = _generate_chapter_card(_cs, episode_num, topic,
@@ -6931,13 +7006,10 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             return (f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
                     f"black placeholder")
 
-        if _cn > 1 and len(_chap_shots) > 1:
-            with ThreadPoolExecutor(max_workers=_cn) as _ex:
-                for _msg in _ex.map(_render_card, _chap_shots):
-                    print(_msg)
-        else:
-            for _cs in _chap_shots:
-                print(_render_card(_cs))
+        for _cs in _chap_shots:
+            print(_render_card(_cs))
+        if _verify_future is not None:
+            _verify_future.result()
 
     # ---- CHUNKED PRE-VERIFY + RENDER (Joe 2026-08-09) ----
     # Process shots in chunks of CHUNK_SIZE (default 5): for each chunk we run
@@ -6948,25 +7020,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
     # Studio could hang the whole run on a 180s per-call timeout before a single
     # image was generated. Now each chunk prints progress and only ever blocks
     # on CHUNK_SIZE LLM calls at a time.
-    CHUNK = max(1, min(int(os.environ.get("SHOT_CHUNK_SIZE", "5")), len(shots) or 1))
-    _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
-    _todo = [s for s in shots
-             if not s.get("is_chapter")
-             and (_regen or not (s.get("image_path") and os.path.isfile(s.get("image_path", ""))))]
-
-    def _verify_chunk(chunk: list) -> int:
-        """LLM pre-verify + ref-check ONE chunk. Returns rewrite count."""
-        rewrites = 0
-        for _vs in chunk:
-            _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
-            _vp = _base
-            if _SHOT_RELEVANCE_ON and topic:
-                _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
-                if _vp != _base:
-                    rewrites += 1
-            _vs["_verified_prompt"] = _vp
-            _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
-        return rewrites
+    # (CHUNK/_todo/_verify_chunk/_TPE are defined above the chapter-card pass.)
 
     # Chapter shots (if any) are handled inline in _render_one via the pre-pass
     # cards; they're excluded from _todo above. Everything else is chunked.
@@ -8368,10 +8422,12 @@ def _thumbnail_headline(topic: str) -> str:
 def _generate_thumbnail(topic: str, output_path: str) -> bool:
     print(f"  [THUMB] Generating thumbnail for: {topic[:60]}...")
     headline = _thumbnail_headline(topic)
+    # Use the SAME channel style prompt as the main video (Joe 2026-08-09) so
+    # the thumbnail matches the episode's look exactly - no generic hardcoded
+    # style that drifts from the actual video.
+    style = _style_inject().strip()
     prompt = (
-        "YouTube documentary thumbnail, bold animated animation style "
-        "(painted look: strong stylized brushwork, saturated "
-        "colors, dramatic rim lighting, cinematic painterly shading), "
+        f"YouTube documentary thumbnail, {style}, "
         f"dramatic cinematic scene related to: {topic[:120]}. Moody lighting, "
         "dark color grade, high contrast, bold and clickable composition, "
         "16:9 landscape. "
@@ -9328,7 +9384,7 @@ def _resume_episode(state: dict) -> None:
                           or _force_regen)]
     if _chap_missing:
         print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards "
-              f"in parallel ({_image_concurrency()} workers)...")
+              f"SEQUENTIALLY (avoids codex output race)...")
         def _rcard(_cs):
             _card = _generate_chapter_card(_cs, episode_num, topic,
                                            shots=shots, brand_assets=brand_assets,
@@ -9337,14 +9393,8 @@ def _resume_episode(state: dict) -> None:
                 _cs["image_path"] = _card
             return (f"  [CARD] chapter {_cs.get('chapter_num')}: "
                     f"{'OK' if _card else 'black placeholder'}")
-        _cn2 = _image_concurrency()
-        if _cn2 > 1 and len(_chap_missing) > 1:
-            with ThreadPoolExecutor(max_workers=_cn2) as _ex2:
-                for _msg2 in _ex2.map(_rcard, _chap_missing):
-                    print(_msg2)
-        else:
-            for _cs2 in _chap_missing:
-                print(_rcard(_cs2))
+        for _cs2 in _chap_missing:
+            print(_rcard(_cs2))
     if missing_img:
         print(f"\n[IMAGES] Regenerating {len(missing_img)} missing shots...")
         # ---- Rebuild the episode world assets the fresh run never finished ----
