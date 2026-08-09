@@ -2,6 +2,20 @@
 
 All notable changes to Split Node.
 
+## [1.38.6] - 2026-08-09
+
+### Separate shot/chapter regen prompts + shots drop no-text when a business logo ref is attached
+
+- **Ask separately whether to regenerate SHOT images vs CHAPTER CARD images**
+  (they're now independent). Env overrides: `REGEN_SHOTS`/`REGEN_IMAGES` for
+  shots, `REGEN_CHAPTERS` for chapter cards (legacy: `REGEN_IMAGES` alone
+  controls both).
+- **Shot prompts drop the "NO text / NO watermark" ban when a business logo is
+  attached** (same logic as chapter cards): if a shot is a business-location
+  shot (or the ref-check picked a brand), the logo's wordmark is allowed, while
+  any OTHER text/captions/labels/signage is still forbidden. Non-business shots
+  keep the full NO text clause.
+
 ## [1.38.5] - 2026-08-09
 
 ### Chapter-card logo injected naturally (no manual placement)

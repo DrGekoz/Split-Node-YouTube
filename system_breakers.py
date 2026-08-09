@@ -4217,6 +4217,14 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     # (vault, library, casino, server, etc), inject its visual descriptor so it
     # appears in the frame with the right context.
     prop_clause = _inject_prop_visuals(f"{narration} {scene}")
+    # NO-TEXT clause (Joe 2026-08-09): when a business logo will be attached as
+    # an image ref, drop the hard no-text/watermark ban so the logo's wordmark
+    # can render (the logo IS allowed text). Otherwise keep NO text so gpt-image-2
+    # doesn't hallucinate stray labels/signage.
+    if _is_business_shot(shot) or (shot.get("_llm_refs") or {}).get("brands"):
+        no_text_clause = " No other text, captions, labels, signage, subtitles or watermarks besides the attached business logo."
+    else:
+        no_text_clause = NO_IMAGE_TEXT
     # Easter egg: inject the hidden background element into this shot's prompt
     # (set on exactly one shot by _inject_easter_egg).
     egg = shot.get("easter_egg_prompt")
@@ -4246,7 +4254,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
             f"16:9 widescreen cinematic documentary frame, high detail "
             f"illustration, EXACTLY ONE "
             f"continuous scene, one location, no collage, no split panels, "
-            f"no duplicated scenes{NO_IMAGE_TEXT}"
+            f"no duplicated scenes{no_text_clause}"
         )
     facing_txt = {"left": "facing left", "right": "facing right",
                   "front": "facing the camera", "back": "seen from behind",
@@ -4265,7 +4273,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx}{prop_clause} "
         f"16:9 widescreen cinematic documentary frame, high detail "
         f"illustration, EXACTLY ONE continuous "
-        f"scene, no collage, no duplicated figures{NO_IMAGE_TEXT}"
+        f"scene, no collage, no duplicated figures{no_text_clause}"
     )
 
 
@@ -4304,22 +4312,36 @@ def _ask_resolution() -> str:
         print(f"  [WARN] '{resp}' not recognised - enter 1440p, 1080p or 4K")
 
 
-def _ask_image_regen() -> bool:
-    """Ask whether to RESUME existing episode images (keep what's already
-    rendered) or RE-GENERATE everything (overwrite). REGEN_IMAGES env var
-    overrides the prompt ('1'/'yes' = regenerate, '0'/'no' = resume)."""
-    if os.environ.get("REGEN_IMAGES"):
-        return os.environ["REGEN_IMAGES"].strip().lower() in ("1", "yes", "y", "true")
-    print("\n  Image generation mode:")
+def _ask_image_regen() -> tuple[bool, bool]:
+    """Ask whether to RESUME or REGENERATE the episode's images, separately
+    for SHOT images and CHAPTER card images (Joe 2026-08-09).
+
+    Returns (regen_shots, regen_chapters). Env overrides:
+      REGEN_IMAGES / REGEN_SHOTS ('1'/'yes') = regen shots
+      REGEN_CHAPTERS ('1'/'yes') = regen chapter cards
+    If REGEN_IMAGES is set but REGEN_CHAPTERS is not, both follow REGEN_IMAGES.
+    """
+    env_shots = os.environ.get("REGEN_SHOTS", "") or os.environ.get("REGEN_IMAGES", "")
+    if env_shots:
+        s = env_shots.strip().lower() in ("1", "yes", "y", "true")
+        c = os.environ.get("REGEN_CHAPTERS", "").strip().lower() in ("1", "yes", "y", "true")
+        if not os.environ.get("REGEN_CHAPTERS"):
+            c = s  # legacy: REGEN_IMAGES controls both
+        return s, c
+    print("\n  Image generation mode (shot images vs chapter cards are separate):")
     print("  [RESUME]  keep already-rendered images, only generate the missing ones")
     print("  [REGEN]   re-generate ALL images, overwriting existing ones")
-    while True:
-        resp = input("  Resume or regenerate? (R/e): ").strip().lower()
-        if resp in ("", "r", "resume"):
-            return False
-        if resp in ("e", "regen", "regenerate", "regenerate"):
-            return True
-        print(f"  [WARN] '{resp}' not recognised - enter R (resume) or E (regenerate)")
+    def _ask(label: str) -> bool:
+        while True:
+            resp = input(f"  {label}? (R)euse / (E)egenerate [R]: ").strip().lower()
+            if resp in ("", "r", "resume", "reuse"):
+                return False
+            if resp in ("e", "regen", "regenerate"):
+                return True
+            print(f"  [WARN] '{resp}' not recognised - enter R (reuse) or E (regenerate)")
+    regen_shots = _ask("Reuse or regenerate SHOT images")
+    regen_chapters = _ask("Reuse or regenerate CHAPTER CARD images")
+    return regen_shots, regen_chapters
 
 
 def _ask_style_selection(current_style: str = "") -> str:
@@ -9973,6 +9995,7 @@ def _apply_config_env(config: dict) -> None:
     if config.get("style"):
         os.environ["STYLE"] = str(config["style"])
     os.environ["REGEN_IMAGES"] = "1" if config.get("regen_images") else "0"
+    os.environ["REGEN_CHAPTERS"] = "1" if config.get("regen_chapters") else "0"
 
 
 def _episode_setup(default_ep: int):
@@ -10030,7 +10053,7 @@ def _episode_setup(default_ep: int):
                 print("         Only your THUMBNAIL backend is local; continuing.\n")
 
     _cur_style = _active_style_name()
-    regen_images = _ask_image_regen()
+    regen_shots, regen_chapters = _ask_image_regen()
     chosen_style = _ask_style_selection(_cur_style)
     if chosen_style:
         os.environ["STYLE"] = chosen_style
@@ -10038,9 +10061,11 @@ def _episode_setup(default_ep: int):
     if _style_changed:
         print(f"  [STYLE] changed {_cur_style or 'default'} -> {chosen_style} - "
               f"forcing re-generate so the new look applies")
-        regen_images = True
-    os.environ["REGEN_IMAGES"] = "1" if regen_images else "0"
-    print(f"  [IMAGES] mode: {'RE-GENERATE (overwrite all)' if regen_images else 'resume (keep existing)'}\n")
+        regen_shots, regen_chapters = True, True
+    os.environ["REGEN_IMAGES"] = "1" if regen_shots else "0"
+    os.environ["REGEN_CHAPTERS"] = "1" if regen_chapters else "0"
+    print(f"  [IMAGES] mode: shots={'REGEN' if regen_shots else 'resume'}, "
+          f"chapters={'REGEN' if regen_chapters else 'resume'}\n")
 
     article_url, article_title = _pick_story()
     if not article_url:
@@ -10055,7 +10080,8 @@ def _episode_setup(default_ep: int):
         "thumb_model": thumb_model,
         "img_backend": img_backend,
         "img_model": img_model,
-        "regen_images": regen_images,
+        "regen_images": regen_shots,
+        "regen_chapters": regen_chapters,
         "style": chosen_style or "",
         "article_url": article_url,
         "topic": article_title,
