@@ -9160,6 +9160,7 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
         "article_url": article_url,
         "topic": topic,
         "style": _get_style_prompt(),
+        "img_backend": _active_image_backend(),
         "resolution": os.environ.get("RESOLUTION", "1080p"),
         "shots": shots or [],
         "character_sheets": character_sheets or {},
@@ -9547,6 +9548,17 @@ def _resume_episode(state: dict) -> None:
     else:
         print("  [RESUME] SKIP_RESUME_MENU=1 - gap-fill only\n")
     # ---- End interactive resume options ----------------------------------
+
+    # Restore the episode's image backend (Joe 2026-08-09): the resume state
+    # stores which backend (codex/local/fal/runpod) generated the episode, so a
+    # resumed run uses the SAME backend - NOT defaulting to local/ComfyUI and
+    # then stalling on a missing ComfyUI server. The user's explicit backend
+    # choice via the swap-model menu (which sets IMAGE_BACKEND env) wins over
+    # the stored value. No stored value (older state) = keep the env/default.
+    _stored_backend = str(state.get("img_backend") or "").strip().lower()
+    if _stored_backend and not os.environ.get("IMAGE_BACKEND"):
+        os.environ["IMAGE_BACKEND"] = _stored_backend
+        print(f"  [RESUME] Image backend -> {_stored_backend} (from episode state)")
 
     # Resume keeps the exact style the episode was generated with (unless the
     # user overrides with STYLE=<profile>) OR picks a new style interactively.

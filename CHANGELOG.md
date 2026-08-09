@@ -2,6 +2,19 @@
 
 All notable changes to Split Node.
 
+## [1.39.7] - 2026-08-09
+
+### Resume restores the episode's image backend (no more ComfyUI stall)
+
+- The resume state did NOT store which image backend generated the episode, so
+  on resume the backend defaulted to `local` (ComfyUI) even when the episode was
+  generated with `codex`/`fal`/`runpod`. A resumed run would try to build
+  character panels through a ComfyUI server that isn't running and stall on
+  "ComfyUI connection lost". The resume state now stores `img_backend`, and on
+  resume it's restored (so codex-generated episodes resume on codex, skipping
+  panels). The user's explicit backend choice via the swap-model menu still wins
+  over the stored value.
+
 ## [1.39.6] - 2026-08-09
 
 ### FIX false "style changed" -> forced image re-gen on resume
