@@ -2,6 +2,32 @@
 
 All notable changes to Split Node.
 
+## [1.39.0] - 2026-08-09
+
+### HARDENED parallel chapter-card filenames + context-aware logo placement + depth of field
+
+- **FIXED the persistent wrong-filename bug on chapter cards (parallel kept)**.
+  Root cause: after codex generates, the pipeline had a "newest unclaimed file"
+  fallback that, under parallel card generation, could grab ANOTHER card's
+  output and copy it under the wrong name. That fallback is REMOVED - codex
+  reports the exact "Saved at: <path>" it produced for each call, and that
+  deterministic path is the ONLY way a card claims its output. A missing
+  deterministic path now returns failure (clean retry of THAT card) instead of
+  guessing, so a card can never be saved under another card's filename.
+  Verified with real 4-6-way parallel codex tests (distinct outputs, correct
+  mapping) with and without image refs.
+- **Separate chapter-card regen honoured**: `_generate_chapter_card` now checks
+  `REGEN_CHAPTERS` (in addition to legacy `REGEN_IMAGES`) so a stale/wrong
+  cached card is dropped when chapters are regenerated independently.
+- **Context-aware business logo placement**: brand assets now come in three
+  context variants - `screen` (hacker monitor), `building` (exterior HQ/facade
+  logo), and NEW `interior` (logo on the wall behind the reception counter /
+  front desk inside). `_brand_context`, `_match_brand_asset` and `_select_shot_refs`
+  pick the right variant from the scene (interior cues -> interior asset,
+  HQ/exterior -> building, else screen).
+- **Realistic camera depth of field** added to every shot and chapter-card
+  image prompt (natural bokeh, tack-sharp subject, shallow-to-medium DOF).
+
 ## [1.38.6] - 2026-08-09
 
 ### Separate shot/chapter regen prompts + shots drop no-text when a business logo ref is attached

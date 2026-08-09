@@ -4121,6 +4121,10 @@ def _runpod_generate(prompt: str, seed: int, size: str = "1280*720",
 NO_IMAGE_TEXT = (" NO text, NO words, NO letters, NO captions, NO labels, "
                  "NO signage, NO subtitles, NO watermarks, NO typography "
                  "anywhere in the image.")
+# Realistic camera depth of field (Joe 2026-08-09): every image should read like
+# a real camera shot, not a flat render.
+DOF_CLAUSE = (" realistic camera depth of field, natural bokeh background blur, "
+              "tack-sharp subject focus, shallow-to-medium depth of field")
 
 
 def _shot_filename(shot: dict, number: int) -> str:
@@ -4252,7 +4256,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         return (
             f"{SCENE_STYLE}. {scene}{cam_desc}.{narr_ctx}{prop_clause} "
             f"16:9 widescreen cinematic documentary frame, high detail "
-            f"illustration, EXACTLY ONE "
+            f"illustration,{DOF_CLAUSE} EXACTLY ONE "
             f"continuous scene, one location, no collage, no split panels, "
             f"no duplicated scenes{no_text_clause}"
         )
@@ -4272,7 +4276,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     return (
         f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx}{prop_clause} "
         f"16:9 widescreen cinematic documentary frame, high detail "
-        f"illustration, EXACTLY ONE continuous "
+        f"illustration,{DOF_CLAUSE} EXACTLY ONE continuous "
         f"scene, no collage, no duplicated figures{no_text_clause}"
     )
 
@@ -4596,7 +4600,10 @@ def _generate_chapter_card(shot: dict, episode_num: int,
     ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
     ep_dir.mkdir(parents=True, exist_ok=True)
     out = str(ep_dir / _chapter_filename(n, title))
-    _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
+    # REGEN_CHAPTERS controls chapter-card regeneration independently of shots
+    # (Joe 2026-08-09). REGEN_IMAGES is honoured as the legacy "regen all".
+    _regen = ((os.environ.get("REGEN_CHAPTERS", "").strip().lower() in ("1", "yes", "y", "true"))
+              or (os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")))
     if _regen and os.path.isfile(out):
         try:
             os.remove(out)
@@ -4654,7 +4661,7 @@ def _generate_chapter_card(shot: dict, episode_num: int,
             f"negative space in the CENTRE for text to be overlaid later. Dark "
             f"vignette, moody atmosphere, minimal clutter, no people as the "
             f"main subject. 16:9 widescreen cinematic documentary background, "
-            f"high detail illustration."
+            f"high detail illustration,{DOF_CLAUSE}."
             f" {_style_inject(allow_logo=bool(card_refs))}.{brand_clause}"
         )
         print(f"  [CARD] chapter {n:02d} LLM background prompt generated")
@@ -4668,7 +4675,7 @@ def _generate_chapter_card(shot: dict, episode_num: int,
             "Clean, minimal, high contrast, "
             "professional broadcast background plate, no photos, no people, no "
             "objects, open negative space in the centre. 16:9 widescreen, "
-            "high detail illustration."
+            f"high detail illustration,{DOF_CLAUSE}."
         )
     # LLM relevance gate: cross-check the card background against the article
     # topic so it matches the STORY, not an off-topic scene (Joe 2026-08-09).
@@ -5289,6 +5296,11 @@ BRAND_MANIFEST = PROJECT_DIR / "cast_refs" / "logos" / "brands.json"
 BRAND_LOGO_DIR = PROJECT_DIR / "cast_refs" / "logos"
 BRAND_SCREEN_DIR = PROJECT_DIR / "image-assets" / "brand_screens"
 BRAND_BUILDING_DIR = PROJECT_DIR / "image-assets" / "brand_buildings"
+BRAND_INTERIOR_DIR = PROJECT_DIR / "image-assets" / "brand_interiors"
+# Interior cues: logo on a counter / wall behind the counter / reception inside
+INTERIOR_WORDS = ("counter", "reception", "lobby interior", "inside the building",
+                  "interior", "front desk", "behind the counter", "inside their",
+                  "the entrance hall", "store interior", "showroom interior")
 HQ_WORDS = ("headquarters", "hq", "head office", "offices", "office",
             "campus", "building", "plant", "factory", "warehouse", "store",
             "branch", "facility", "laboratory", "lab", "studio", "showroom",
@@ -5595,13 +5607,16 @@ def _extract_brands(article_title: str, paragraphs: list[str],
 
 
 def _brand_context(name: str, texts: list[str]) -> str:
-    """'building' if the text talks about the brand's HQ/physical location,
-    else 'screen'."""
+    """Logo placement context for a brand: 'interior' (counter/wall inside),
+    'building' (exterior HQ/facade), or 'screen'. Joe 2026-08-09."""
     low_name = name.lower()
     for t in texts:
         low = (t or "").lower()
-        if low_name in low and any(w in low for w in HQ_WORDS):
-            return "building"
+        if low_name in low:
+            if any(w in low for w in INTERIOR_WORDS):
+                return "interior"
+            if any(w in low for w in HQ_WORDS):
+                return "building"
     return "screen"
 
 
@@ -5664,12 +5679,17 @@ def _logo_for_prop(prop: str, brands: Optional[dict] = None) -> Optional[str]:
 
 def _generate_brand_asset(brand: str, kind: str, seed: int) -> Optional[str]:
     """Stylized brand asset, cached per (brand, kind):
-      kind='screen'   -> hacker computer screen with the real logo,
-                         refs = [prop style sheet, logo]
-      kind='building' -> the logo on a building, refs = [location style sheet, logo]
-    """
+      kind='screen'    -> hacker computer screen with the real logo,
+                          refs = [prop style sheet, logo]
+      kind='building'  -> the logo on an exterior building / HQ facade,
+                          refs = [location style sheet, logo]
+      kind='interior'  -> the logo on a counter / wall inside the building
+                          (reception, behind the counter, store interior),
+                          refs = [location style sheet, logo]
+    Joe 2026-08-09: logo placement is context-aware."""
     safe = _brand_safe(brand)
-    out_dir = BRAND_SCREEN_DIR if kind == "screen" else BRAND_BUILDING_DIR
+    out_dir = {"screen": BRAND_SCREEN_DIR, "building": BRAND_BUILDING_DIR,
+               "interior": BRAND_INTERIOR_DIR}.get(kind, BRAND_SCREEN_DIR)
     out = out_dir / f"{safe}.png"
     if out.is_file():
         print(f"  [BRAND] reuse {os.path.basename(out)}")
@@ -5678,8 +5698,8 @@ def _generate_brand_asset(brand: str, kind: str, seed: int) -> Optional[str]:
     if not logo:
         print(f"  [BRAND] no logo for '{brand}' - skipping {kind} asset")
         return None
-    if kind == "building" and not os.path.isfile(str(LOCATION_STYLE_REF)):
-        print(f"  [BRAND] no location style sheet - skipping building asset")
+    if kind in ("building", "interior") and not os.path.isfile(str(LOCATION_STYLE_REF)):
+        print(f"  [BRAND] no location style sheet - skipping {kind} asset")
         return None
     if kind == "screen" and not os.path.isfile(str(PROP_STYLE_REF)):
         print(f"  [BRAND] no prop style sheet - skipping screen asset")
@@ -5698,6 +5718,21 @@ def _generate_brand_asset(brand: str, kind: str, seed: int) -> Optional[str]:
             f"screen and NOTHING else. STRICTLY NO people, no humans, no faces, "
             f"no characters, no figures, no silhouettes, no body parts, no hands, "
             f"no persons of any kind anywhere in frame."
+        )
+    elif kind == "interior":
+        prompt = (
+            f"A dramatic interior shot inside the {brand} building: the official "
+            f"{brand} logo on the wall behind the reception counter / front desk, "
+            f"large backlit sign, and the logo on the counter itself, brand colors "
+            f"exactly matching the reference logo image. Modern corporate interior "
+            f"with a clean lobby, warm professional lighting. Use ONLY the painting "
+            f"and render style from the reference artwork - bold animated style, "
+            f"strong stylized brushwork, painterly shading, saturated colors, "
+            f"dramatic lighting, realistic depth of field. The reference images "
+            f"show DIFFERENT scenes - this panel is the {brand} interior and "
+            f"NOTHING else. STRICTLY NO people, no humans, no faces, no characters, "
+            f"no figures, no silhouettes, no body parts, no hands, no persons of "
+            f"any kind anywhere in frame."
         )
     else:
         prompt = (
@@ -5726,12 +5761,13 @@ def _generate_brand_asset(brand: str, kind: str, seed: int) -> Optional[str]:
 
 
 def _scan_brand_assets() -> dict[str, dict[str, str]]:
-    """Rebuild {brand: {'screen': path, 'building': path}} from the on-disk
-    caches + brand manifest (covers resume runs)."""
+    """Rebuild {brand: {'screen': path, 'building': path, 'interior': path}}
+    from the on-disk caches + brand manifest (covers resume runs)."""
     _load_brand_manifest()
     out: dict[str, dict[str, str]] = {}
     for d, kind in ((BRAND_SCREEN_DIR, "screen"),
-                    (BRAND_BUILDING_DIR, "building")):
+                    (BRAND_BUILDING_DIR, "building"),
+                    (BRAND_INTERIOR_DIR, "interior")):
         if d.is_dir():
             for f in sorted(d.glob("*.png")):
                 for name in _KNOWN_BRANDS:
@@ -5742,21 +5778,25 @@ def _scan_brand_assets() -> dict[str, dict[str, str]]:
 
 
 def _match_brand_asset(scene: str, brand_assets: dict) -> Optional[str]:
-    """Pick the right brand asset for a shot: scene mentions a brand -> HQ-ish
-    scene text gets the building asset, otherwise the hacker screen."""
+    """Pick the right brand asset for a shot, context-aware (Joe 2026-08-09):
+    interior scene text (counter/reception/inside) -> interior asset; HQ/exterior
+    -> building asset; otherwise the hacker screen."""
     if not scene or not brand_assets:
         return None
     low = scene.lower()
     for name, assets in brand_assets.items():
         if name.lower() not in low:
             continue
-        if any(w in low for w in HQ_WORDS):
-            if assets.get("building"):
-                return assets["building"]
+        if any(w in low for w in INTERIOR_WORDS) and assets.get("interior"):
+            return assets["interior"]
+        if any(w in low for w in HQ_WORDS) and assets.get("building"):
+            return assets["building"]
         if assets.get("screen"):
             return assets["screen"]
         if assets.get("building"):
             return assets["building"]
+        if assets.get("interior"):
+            return assets["interior"]
     return None
 
 
@@ -6589,10 +6629,16 @@ def _select_shot_refs(shot, char_panels_cache, brand_assets=None, llm_refs=None)
     for bname in llm_brand:
         asset = None
         if is_loc:
-            # Prefer the logo-on-building asset for location shots; fall back to
-            # the screen asset, then the bare logo mark.
-            asset = (brand_assets or {}).get(bname, {}).get("building") \
-                or (brand_assets or {}).get(bname, {}).get("screen")
+            # Context-aware logo asset (Joe 2026-08-09): interior shot -> the
+            # logo-on-counter/wall asset; exterior/HQ -> the building asset;
+            # else the screen asset; then the bare logo mark.
+            _assets = (brand_assets or {}).get(bname, {})
+            if any(w in (shot.get("scene") or "").lower() for w in INTERIOR_WORDS):
+                asset = _assets.get("interior") or _assets.get("building") \
+                    or _assets.get("screen")
+            else:
+                asset = _assets.get("building") or _assets.get("screen") \
+                    or _assets.get("interior")
         if not (asset and os.path.isfile(asset)):
             asset = _find_logo(bname)
         if asset and os.path.isfile(asset):

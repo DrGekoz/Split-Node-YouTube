@@ -406,27 +406,24 @@ class Codex:
                         src = cand
                         self._claimed.add(src)
         if src is None:
-            # Fallback: newest file that appeared during this call (not in
-            # `before`, not already claimed by another thread). Only ever claim
-            # a file that appeared DURING this call - never a stale pre-existing
-            # image (that silently copied an old file and could be double-claimed).
-            after = _scan()
-            with self._lock():
-                candidates = {p: t for p, t in after.items()
-                              if p not in before and p not in self._claimed}
-                if not candidates:
-                    # Rate-limit throttle (Joe 2026-08-09): when codex produced no
-                    # new output (typically a rate limit / 429), do NOT fall back to
-                    # another model and do NOT count a stale file as success. Instead
-                    # back off to a single slow retry per hour until one succeeds,
-                    # then resume the batch.
-                    print("  [CODEX] no new image generated (likely rate-limited) - "
-                          "throttling: 1 retry/hour until success")
-                    return _codex_throttled_retry(self, prompt, out_path, ref_images,
-                                                  timeout, before)
-                src = max(candidates, key=candidates.get)  # newest by mtime
-                self._claimed.add(src)
-        if src is None:
+            # STRICTLY DETERMINISTIC (Joe 2026-08-09): there is NO "newest
+            # unclaimed file" fallback here anymore. That fallback was the root
+            # cause of the wrong-filename bug - under parallel generation, if a
+            # card's "Saved at:" path wasn't parsed, it would guess the newest
+            # file in ~/.codex, which could be ANOTHER concurrently-finished
+            # card's output, and copy that under the wrong name. Now a missing
+            # deterministic path is treated as a genuine failure.
+            # RATE-LIMIT: if codex text shows a rate limit / 429 / too many,
+            # throttle to one retry/hour (Joe's rule - never fall back to another
+            # model). Any other failure returns False so the caller retries THIS
+            # card cleanly. A card can never be saved under another card's name.
+            if re.search(r"(?i)rate\s*limit|429|too\s*many\s*requests|quota|limit\s*exceeded",
+                         out_text):
+                print("  [CODEX] rate-limited - throttling: 1 retry/hour until success")
+                return _codex_throttled_retry(self, prompt, out_path, ref_images,
+                                              timeout, before)
+            print("  [CODEX] could not deterministically locate this call's "
+                  "output ('Saved at:' path missing) - returning failure to retry")
             return False
         try:
             shutil.copy2(src, out_path)
