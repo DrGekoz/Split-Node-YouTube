@@ -1846,9 +1846,8 @@ NARRATION_SYSTEM_PROMPT = (
     "nothing about the topic, then raise complexity beat by beat. Never open with the "
     "most advanced concept.\n"
     "8. EXACT NUMBERS, never vague. Dollar amounts, durations, counts - always "
-    "use the exact figures the ARTICLE states (e.g. '$X million', 'Y months' - "
-    "replace X and Y with the article's own numbers, never an invented or borrowed "
-    "figure from a different story). Never write 'a lot of money' - always write "
+    "use the exact figures the ARTICLE states, never an invented or borrowed "
+    "figure from a different story. Never write 'a lot of money' - always write "
     "the exact figure from the article.\n"
     "9. PLACE ANCHORS: every time the scene shifts, START the new paragraph "
     "with a standalone location sentence using a REAL place from THIS article "
@@ -2212,9 +2211,9 @@ CHAPTER_TITLES_PROMPT = (
     "Write EXACTLY {n} punchy chapter titles (2-6 words each, no period), one "
     "per break, in this format:\n"
     "<paragraph_number> | <Chapter Title>\n"
-    "Example:\n"
-    "4 | The Account That Never Said No\n"
-    "No other text."
+    "Each title must be built from THIS article's content - a distinctive "
+    "image, moment, person or idea actually in the story - never a stock or "
+    "invented title. No other text."
 )
 
 
@@ -2661,8 +2660,8 @@ def _llm_judge_prompt_relevance(prompt: str, narration: str,
             "story. RELEVANT = the scene, setting, objects and people plausibly "
             "belong to this article and illustrate the narration. IRRELEVANT = it "
             "drifts to an unrelated subject with nothing to do with the story "
-            "(e.g. a random Mayan pyramid, an unrelated building or landscape, a "
-            "scene about a different topic). "
+            "(an unrelated building, landscape, person or topic not in the "
+            "article). "
             'Reply ONLY as JSON: {"relevant": true|false, "note": "<if '
             'irrelevant, one short sentence saying what is wrong and what the '
             'scene SHOULD be>"}. No markdown.'
@@ -2913,7 +2912,7 @@ def _build_story_bible(topic: str, paragraphs: list[str]) -> dict:
             '"surface_problem": "the mechanical problem - the hack, scheme, loophole", '
             '"deeper_problem": "the emotional struggle underneath (greed, desperation, revenge, injustice, the need to prove something)", '
             '"protagonist": {"name": "the main person", "role": "their role", "transformation_start": "who they are before", "transformation_end": "who they become / the price paid"}, '
-            '"characters": [{"name": "exact name from article", "role": "their role in the story", "gender": "male|female", "age": "their best-guess age written descriptively from the article: e.g. early 20s, mid 40s, late 60s, or a specific 23-year-old if the article states it. INFER from context (a suspect described as young, a founder with 30 years experience, a retiree, a student). Never leave blank - always give a concrete age descriptor even if you have to estimate", "relation": "how they relate to the protagonist"}], '
+            '"characters": [{"name": "exact name from article", "role": "their role in the story", "gender": "male|female", "age": "a concrete descriptive age written as a natural phrase, always inferred from the article - use any exact age the article states, otherwise describe the age bracket the article implies from its own clues (how the person is described, their experience, their life stage). Never leave blank - always give a concrete age descriptor even if you have to estimate", "relation": "how they relate to the protagonist"}], '
             '"hero_journey": {"status_quo": "...", "call": "...", "assistance": "...", "departure": "...", "trials": "...", "approach": "...", "crisis": "...", "reward": "...", "return": "...", "new_life": "..."}, '
             '"key_numbers": ["exact figures from the article"], '
             '"key_places": ["real places EXPLICITLY named in the article; '
@@ -3132,11 +3131,13 @@ SHOT_SYSTEM_PROMPT = (
     "Respond with EXACTLY ONE LINE of 7 pipe-separated fields, in this exact order, "
     "with NO labels, NO extra text, NO line breaks:\n"
     "<shot type EWS/WS/MS/CU/ECU> | <camera angle: eye-level, low-angle, high-angle, over-the-shoulder, from-behind, side-on> | "
-    "<character NAME or NONE, or comma-separated names for multiple people> | <character role, e.g. lottery mathematician> | "
+    "<character NAME or NONE, or comma-separated names for multiple people> | <character role> | "
     "<full scene description: setting, what the character is DOING, which way each faces, props, lighting, camera framing. 2-4 sentences, action-focused> | "
     "<SFX filename or NONE> | <suspense | neutral | triumphant>\n"
-    "Example line (generic - replace the name with an ACTUAL character from the REAL CHARACTERS list):\n"
-    "MS | low-angle | <character name> | <their role> | <character> sits at a candlelit desk in a cramped 1980s apartment, hunched over a spreadsheet of every number combination, a worn calculator in hand. | mixkit-cinematic-trailer-riser-790.wav | suspense\n"
+    "Format ONLY the pipe-separated line above. The scene description is always "
+    "built from THIS narration paragraph - its real setting, action, people and "
+    "objects - never a stock or invented situation. Every person shown must be a "
+    "REAL CHARACTER from the provided list; never introduce a generic filler person.\n"
     "SFX choices (pick ONE fitting sound, or NONE for calm shots). Match the sound to the "
     "moment - whoosh/sweep for transitions, riser before a reveal, hit for impact, "
     "nature/foley for outdoor or environment-rich scenes, soundscape for creeping tension:\n"
@@ -4143,6 +4144,19 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     if shot.get("shot_type"):
         cam_desc = f", {shot['shot_type']} framing, {angle} camera angle"
     scene = shot.get("scene", "")
+    # ---- GROUND THE IMAGE IN THE ACTUAL NARRATION (Joe 2026-08-09) ----
+    # The shot is generated alongside the exact TTS line the narrator will
+    # speak over it. Feed that narration text into the prompt so the visual
+    # matches the audio 200% - the scene, subject, business, place and action
+    # all come from what is actually said on that shot, not a vague label.
+    narration = str(shot.get("narration") or "").strip()
+    narr_ctx = ""
+    if narration:
+        narr_ctx = (
+            f" The narrator says over THIS shot: \"{narration[:900]}\". "
+            f"Render the scene, subject, business, place and action to match "
+            f"exactly what is being said - every named company, person, place "
+            f"and object in that narration belongs in the frame.")
     # Easter egg: inject the hidden background element into this shot's prompt
     # (set on exactly one shot by _inject_easter_egg).
     egg = shot.get("easter_egg_prompt")
@@ -4168,7 +4182,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         # No character (establishing/landscape/object/hand-closeup shot) - use
         # the scene-only style with zero human language so no person appears.
         return (
-            f"{SCENE_STYLE}. {scene}{cam_desc}, "
+            f"{SCENE_STYLE}. {scene}{cam_desc}.{narr_ctx} "
             f"16:9 widescreen cinematic documentary frame, EXACTLY ONE "
             f"continuous scene, one location, no collage, no split panels, "
             f"no duplicated scenes{NO_IMAGE_TEXT}"
@@ -4187,7 +4201,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         blocks.append(f"{cb} ({facing})")
     char_part = " ".join(blocks)
     return (
-        f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}, "
+        f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx} "
         f"16:9 widescreen cinematic documentary frame, EXACTLY ONE continuous "
         f"scene, no collage, no duplicated figures{NO_IMAGE_TEXT}"
     )
@@ -4368,45 +4382,104 @@ def _black_placeholder(episode_num: int) -> str:
     return out
 
 
+def _chapter_narration_context(shots: list[dict], chapter_num: int) -> str:
+    """All narration text that falls inside ONE chapter (for chapter-card art).
+
+    Walks the ordered shot list: from the given chapter marker shot until the
+    NEXT chapter marker (or the end), collect the narration of every content
+    shot so the chapter-card art is grounded in what the narrator actually says
+    in that chapter - not just a bare title (Joe 2026-08-09).
+    """
+    idxs = [i for i, s in enumerate(shots) if s.get("is_chapter")]
+    if not idxs:
+        return ""
+    pos = None
+    for i in idxs:
+        if int(shots[i].get("chapter_num", 0)) == int(chapter_num):
+            pos = i
+            break
+    if pos is None:
+        return ""
+    end = next((i for i in idxs if i > pos), len(shots))
+    paras = [str(shots[j].get("narration", "")).strip()
+             for j in range(pos + 1, end)
+             if str(shots[j].get("narration", "")).strip()]
+    return " ".join(paras)[:1200]
+
+
+def _detect_brand_in_chapter(title: str, context: str,
+                             brand_assets: dict) -> Optional[str]:
+    """Find the single brand (if any) a chapter card should reference.
+
+    Checks the chapter title AND its narration context against the AI-org
+    alias registry, the curated brand list, and the on-disk logo assets - so
+    'hugging face vaults' resolves to the Hugging Face company and its real
+    logo (Joe 2026-08-09). Returns the brand name or None.
+    """
+    blob = f"{title} {context}".lower()
+    # 1. AI-org aliases (Hugging Face, OpenAI, etc.)
+    for org, (aliases, _q) in AI_ORGS.items():
+        for a in aliases:
+            if re.search(rf"\b{re.escape(a)}\b", blob):
+                if _find_logo(org):
+                    return org
+    # 2. Extracted/known brands with a cached logo asset
+    for name in list(_KNOWN_BRANDS) + list(brand_assets or {}):
+        if name and name.lower() in blob and _find_logo(name):
+            return name
+    return None
+
+
 def _llm_chapter_bg_prompt(title: str, chapter_num: int,
-                           topic: str = None) -> str:
+                           topic: str = None,
+                           context: str = "") -> str:
     """Ask the local LLM to imagine a striking background scene for a chapter.
 
-    The chapter title/name is the only context given - the LLM invents a
-    cinematic, thematically-matched backdrop (setting, mood, objects) that the
-    title card text will sit on top of. Returns a short image-prompt string,
-    or '' if the LLM is unreachable / returns nothing usable.
+    The chapter title plus its actual narration context is given - the LLM
+    invents a cinematic, thematically-matched backdrop (setting, mood, objects)
+    that the title card text will sit on top of. Returns a short image-prompt
+    string, or '' if the LLM is unreachable / returns nothing usable.
     """
     if not topic:
         topic = _IMG_TOPIC
     if not (title or "").strip():
         return ""
     try:
+        ctx_extra = (f" Here is the chapter's narration content to ground the "
+                     f"scene in exactly what happens in this chapter:\n"
+                     f"{context[:900]}") if context.strip() else ""
         msgs = [
             {"role": "system",
              "content": ("You are a documentary title-card art director. Given a "
-                         "chapter title and the EPISODE'S ARTICLE TOPIC, describe a "
-                         "SINGLE striking cinematic background scene (setting, mood, "
-                         "key objects, lighting) that matches BOTH the title's theme "
-                         "AND belongs to the story's world (the article topic). Do NOT "
-                         "drift to an unrelated subject. Return ONLY a 1-2 sentence "
-                         "image prompt. No text, no dialogue, no characters' faces, "
-                         "no words, no watermarks.")},
+                         "chapter title, the EPISODE'S ARTICLE TOPIC, and the "
+                         "chapter's narration content, describe a SINGLE striking "
+                         "cinematic background scene (setting, mood, key objects, "
+                         "lighting) that matches BOTH the title's theme AND belongs "
+                         "to the story's world. Ground it in the actual places and "
+                         "objects the narration describes; never import a setting or "
+                         "subject from outside this story. Do NOT drift to an "
+                         "unrelated subject. Return ONLY a 1-2 sentence image prompt. "
+                         "No text, no dialogue, no characters' faces, no words, no "
+                         "watermarks.")},
             {"role": "user",
              "content": f"ARTICLE TOPIC: {topic or '(not provided)'}\n"
-                        f"Chapter {chapter_num}: {title}. Background scene:"},
+                        f"Chapter {chapter_num}: {title}.{ctx_extra}\n"
+                        f"Background scene:"},
         ]
-        out = _llm_chat(msgs, max_tokens=120, temp=0.7).strip()
+        out = _llm_chat(msgs, max_tokens=140, temp=0.7).strip()
         out = re.sub(r"\s+", " ", out).strip(" '\"")
         if not out or len(out) < 8 or out.lower().startswith("chapter"):
             return ""
-        return out[:300]
+        return out[:320]
     except Exception:
         return ""
 
 
 def _generate_chapter_card(shot: dict, episode_num: int,
-                           topic: str = None) -> Optional[str]:
+                           topic: str = None,
+                           shots: Optional[list] = None,
+                           brand_assets: Optional[dict] = None,
+                           character_sheets: Optional[dict] = None) -> Optional[str]:
     """Render a chapter TITLE CARD image via the active image backend.
 
     GPT Image 2 / Codex CLI renders text very well, so when IMAGE_BACKEND is
@@ -4415,6 +4488,16 @@ def _generate_chapter_card(shot: dict, episode_num: int,
     instead of the old black placeholder + ASS burn. Returns the card path, or
     None when the backend shouldn't render text cards (local Krea -> falls back
     to the black placeholder + ASS burn).
+
+    PREMIUM ART LOGIC (Joe 2026-08-09):
+      - The card background is generated from the chapter title PLUS its actual
+        narration context (the shots that fall inside the chapter), so the art
+        matches what the narrator says, not just a bare title.
+      - If the chapter is about a real business (e.g. 'hugging face vaults' ->
+        the Hugging Face company), its real logo is attached as an image ref
+        and the prompt places the logo on the OUTSKIRTS of the frame (top
+        middle ~15%, top-left, top-right) - never in the centre, which stays
+        open for the title text overlaid later.
     """
     backend = _active_image_backend()
     if backend not in ("codex", "fal"):
@@ -4436,23 +4519,40 @@ def _generate_chapter_card(shot: dict, episode_num: int,
             pass
     if os.path.isfile(out) and os.path.getsize(out) > 1000:
         return out
-    # Joe 2026-08-09: chapter cards render CLEAN - NO baked text. FFmpeg
-    # overlays the 'Chapter N - Title' text onto each card at render time (ASS
-    # chapter burn), so the card is a clean background the text sits on.
+    # ---- PREMIUM: chapter context + business logo ref (Joe 2026-08-09) ----
+    context = _chapter_narration_context(shots or [], n)
+    brand = _detect_brand_in_chapter(title, context, brand_assets or {})
+    card_refs: list[str] = []
+    brand_clause = ""
+    if brand:
+        logo = _find_logo(brand)
+        if logo and os.path.isfile(logo):
+            card_refs.append(logo)
+            # Place the logo on the outskirts, never over the title area.
+            brand_clause = (
+                f" Include the {brand} company logo as a small emblem at the "
+                f"top edge of the frame - top centre (upper ~15% of the image) "
+                f"or tucked into the top-left / top-right corner - kept small "
+                f"and clearly on the outskirts so the CENTRE of the image stays "
+                f"completely open and uncluttered for title text to be overlaid "
+                f"later. The logo should read as a subtle production credit, not "
+                f"the main subject.")
+            print(f"  [CARD] chapter {n:02d} brand ref: {brand} "
+                  f"({os.path.basename(logo)})")
     # COOL BACKGROUND (Joe 2026-08-09): ask the local LLM to imagine a striking,
-    # thematically-matched background for this chapter from its title, instead of
-    # a plain black card. The style prompt is injected as a prefix so the bg
-    # matches the channel's look. Falls back to a clean dark-moody background if
-    # the LLM is unreachable or returns nothing usable.
-    bg = _llm_chapter_bg_prompt(title, n)
+    # thematically-matched background for this chapter from its title + context.
+    # The style prompt is injected as a prefix so the bg matches the channel's
+    # look. Falls back to a clean dark-moody background if the LLM is
+    # unreachable or returns nothing usable.
+    bg = _llm_chapter_bg_prompt(title, n, topic, context)
     if bg:
         prompt = (
-            f"{_style_inject()}. {bg}. A clean cinematic documentary chapter "
-            f"card background with NO text, NO words, NO letters, NO titles, "
-            f"no watermark. The composition is a striking themed backdrop "
-            f"with plenty of open negative space in the centre for text to "
-            f"be overlaid later. Dark vignette, moody atmosphere, minimal "
-            f"clutter, no people as the main subject. 16:9 widescreen "
+            f"{_style_inject()}. {bg}.{brand_clause} A clean cinematic "
+            f"documentary chapter card background with NO text, NO words, NO "
+            f"letters, NO titles, no watermark. The composition is a striking "
+            f"themed backdrop with plenty of open negative space in the CENTRE "
+            f"for text to be overlaid later. Dark vignette, moody atmosphere, "
+            f"minimal clutter, no people as the main subject. 16:9 widescreen "
             f"cinematic documentary background."
         )
         print(f"  [CARD] chapter {n:02d} LLM background prompt generated")
@@ -4460,7 +4560,8 @@ def _generate_chapter_card(shot: dict, episode_num: int,
         prompt = (
             "A cinematic documentary chapter card background. Solid near-black "
             "background with subtle dark atmosphere and a faint moody glow in "
-            "the centre. NO text, NO words, NO letters, NO titles, no "
+            "the centre."
+            f"{brand_clause} NO text, NO words, NO letters, NO titles, no "
             "watermark. Clean, minimal, high contrast, professional broadcast "
             "background plate, no photos, no people, no objects, open negative "
             f"space in the centre. 16:9 widescreen. {_style_inject()}"
@@ -4470,7 +4571,7 @@ def _generate_chapter_card(shot: dict, episode_num: int,
     prompt = _ensure_card_prompt_relevant(prompt, title, n, topic)
     print(f"  [CARD] rendering chapter {n:02d} title card via {backend}...")
     seed = 90000 + n * 137 + episode_num
-    ok = _krea_generate(prompt, seed, out, ref_images=None, denoise=1.0,
+    ok = _krea_generate(prompt, seed, out, ref_images=card_refs or None, denoise=1.0,
                         upscale=True, width=W_RES, height=H_RES,
                         ref_mode="img2img", image_size="landscape_16_9")
     if ok and os.path.isfile(out) and os.path.getsize(out) > 1000:
@@ -5342,8 +5443,8 @@ def _detect_ai_orgs(*texts: str) -> list[str]:
 BRAND_EXTRACT_PROMPT = (
     "You extract real-world businesses from a documentary article.\n"
     "Rules:\n"
-    "1. List ONLY real companies/brands mentioned (e.g. OpenAI, Tesla, Nike, "
-    "Google). Skip generic nouns ('the company', 'the bank'), people, places, "
+    "1. List ONLY real companies/brands actually mentioned in the article. "
+    "Skip generic nouns ('the company', 'the bank'), people, places, "
     "governments, fictional entities and generic product names.\n"
     "2. For each business choose ONE context type:\n"
     "   - 'screen'   if the story is about the company, its product or its "
@@ -6204,7 +6305,66 @@ def _is_business_shot(shot) -> bool:
         r"storefront|lab|the office|their office|at the company)\b", scene))
 
 
-def _select_shot_refs(shot, char_panels_cache, brand_assets=None):
+def _llm_shot_ref_check(shot: dict, brand_assets: Optional[dict] = None,
+                        topic: str = "") -> dict:
+    """LLM decides which image refs a shot actually needs, from its narration.
+
+    Given the shot's narration (the exact TTS line spoken over it) + the scene,
+    the LLM lists every named business/company and every named person that the
+    shot should reference, so the correct logo / real-photo refs get attached.
+    This is the 'check' that decides IF a business or character is being
+    mentioned and WHETHER to use an image-ref - driven by what the narration
+    actually says (Joe 2026-08-09). Returns {"brands": [...], "characters": [...]}
+    (fail-open: empty lists on no topic / LLM unreachable / error).
+    """
+    narration = str(shot.get("narration") or "").strip()
+    scene = str(shot.get("scene") or "").strip()
+    if not narration and not scene:
+        return {"brands": [], "characters": []}
+    # Candidate brands = those with a real ALREADY-CACHED logo file (so the
+    # LLM can only pick something we can actually attach, and we never trigger
+    # a network logo search inside the ref-check - only reuse on-disk assets).
+    brand_names = []
+    if brand_assets:
+        for nm in list(_KNOWN_BRANDS) + list(brand_assets):
+            _logo = BRAND_LOGO_DIR / f"{_brand_safe(nm)}.png"
+            if _logo.is_file():
+                brand_names.append(nm)
+    char_names = [c["name"] for c in _parse_shot_characters(shot)]
+    try:
+        data = _llm_json([
+            {"role": "system", "content":
+                ("You attach reference images to documentary shots. Given the "
+                 "narration spoken over a shot and its scene, list EXACTLY the "
+                 "entities that should appear in the image and therefore need a "
+                 "reference photo attached: every real business/company explicitly "
+                 "named (pick ONLY from the provided brand list), and every named "
+                 "person explicitly present as a subject (pick ONLY from the "
+                 "provided character list). Do NOT list entities merely implied "
+                 "or off-screen. Reply ONLY as JSON: "
+                 '{"brands": ["exact brand name"], "characters": ["exact name"]} '
+                 "with empty arrays when nothing needs a reference. No markdown.")},
+            {"role": "user", "content":
+                f"NARRATION: {narration[:900]}\nSCENE: {scene[:600]}\n"
+                f"AVAILABLE BRANDS: {', '.join(brand_names) if brand_names else '(none)'}\n"
+                f"AVAILABLE CHARACTERS: {', '.join(char_names) if char_names else '(none)'}\n"
+                f"REFS TO ATTACH:"},
+        ], max_tokens=160, temp=0.1)
+        if not isinstance(data, dict):
+            return {"brands": [], "characters": []}
+        def _clean(v):
+            if isinstance(v, list):
+                return [str(x).strip() for x in v if str(x).strip()]
+            if isinstance(v, str) and v.strip():
+                return [v.strip()]
+            return []
+        return {"brands": _clean(data.get("brands")),
+                "characters": _clean(data.get("characters"))}
+    except Exception:
+        return {"brands": [], "characters": []}
+
+
+def _select_shot_refs(shot, char_panels_cache, brand_assets=None, llm_refs=None):
     """Pick the reference image(s) for a shot. Returns (refs, notes).
     refs = image files fed to Krea (char panels, optionally mirrored, + a
     brand logo for business shots). notes = human summary of the choice.
@@ -6263,9 +6423,22 @@ def _select_shot_refs(shot, char_panels_cache, brand_assets=None):
                 continue
         refs.append(panel_path)
         notes.append(f"{ch['name']}: {panel_key} ({facing})")
-    if brand_assets and _is_business_shot(shot):
-        brand = _match_brand_asset(shot.get("scene", ""), brand_assets)
-        if brand and brand not in refs and os.path.isfile(brand):
+    # Brand ref: attach when the scene reads as a business shot (deterministic),
+    # OR when the LLM ref-check decided the narration names a real brand (Joe
+    # 2026-08-09 - the narration is the authoritative source for what the shot
+    # should reference). The logo is always the actual cached asset.
+    llm_brand = (llm_refs or {}).get("brands") or []
+    attach_brands = set()
+    if _is_business_shot(shot):
+        b = _match_brand_asset(shot.get("scene", ""), brand_assets)
+        if b:
+            attach_brands.add(b)
+    for bname in llm_brand:
+        logo = _find_logo(bname)
+        if logo and os.path.isfile(logo):
+            attach_brands.add(logo)
+    for brand in attach_brands:
+        if brand not in refs and os.path.isfile(brand):
             refs.append(brand)
             notes.append(f"brand logo: {os.path.basename(brand)}")
     return refs, "; ".join(notes)
@@ -6710,7 +6883,9 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
               f"in parallel ({_cn} workers)...")
 
         def _render_card(_cs):
-            _c = _generate_chapter_card(_cs, episode_num, topic)
+            _c = _generate_chapter_card(_cs, episode_num, topic,
+                                        shots=shots, brand_assets=brand_assets,
+                                        character_sheets=character_sheets)
             if _c:
                 _cs["image_path"] = _c
                 return (f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
@@ -6740,19 +6915,29 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                     and (_regen or not (s.get("image_path") and os.path.isfile(s.get("image_path", ""))))]
     if _verify_todo and _SHOT_RELEVANCE_ON and topic:
         _rewrites = 0
-        print(f"  [VERIFY] pre-verifying {len(_verify_todo)} shot prompts vs "
-              f"story topic before the parallel batch...")
+        print(f"  [VERIFY] pre-verifying {len(_verify_todo)} shot prompts + "
+              f"ref-check vs story topic before the parallel batch...")
         for _vs in _verify_todo:
             _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
             _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
             if _vp != _base:
                 _rewrites += 1
             _vs["_verified_prompt"] = _vp
+            # LLM ref-check (Joe 2026-08-09): decide which business/character
+            # refs this shot needs FROM ITS NARRATION, so the parallel pool only
+            # does generation. Cached on the shot for _select_shot_refs.
+            _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
         print(f"  [VERIFY] {len(_verify_todo)} prompts verified, {_rewrites} scene "
               f"rewrites applied")
     else:
         for _vs in shots:
             _vs.pop("_verified_prompt", None)
+            _vs.pop("_llm_refs", None)
+        # Still run the LLM ref-check (no relevance gate) so brand/character
+        # refs are attached from narration even when SHOT_RELEVANCE is off.
+        if _verify_todo:
+            for _vs in _verify_todo:
+                _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
 
     _img_iter = (tqdm(shots, desc="  [IMAGES] rendering shots", unit="shot",
                       leave=False) if _HAS_PROGRESS else shots)
@@ -6778,7 +6963,9 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             # card text isn't doubled.
             card = shot.get("image_path")
             if not (card and os.path.isfile(card) and "chapter_" in os.path.basename(card)):
-                card = _generate_chapter_card(shot, episode_num, topic)
+                card = _generate_chapter_card(shot, episode_num, topic,
+                                              shots=shots, brand_assets=brand_assets,
+                                              character_sheets=character_sheets)
             shot["image_path"] = card if card else black
             if card:
                 with _plock:
@@ -6807,7 +6994,8 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock, topic)
         # Panels were built up front by _build_all_character_sheets (before the
         # shot loop); _select_shot_refs just picks the PERFECT panel(s) here.
-        refs, notes = _select_shot_refs(shot, sheets, brand_assets)
+        refs, notes = _select_shot_refs(shot, sheets, brand_assets,
+                                        llm_refs=shot.get("_llm_refs"))
         out_path = str((ep_dir or SHOTS_DIR)
                        / _shot_filename(shot, int(shot.get("narration_idx", idx)) + 1))
         n = len(refs)
@@ -6881,6 +7069,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
     # Drop the pre-verify prompt cache so it doesn't bloat resume state.
     for _s in shots:
         _s.pop("_verified_prompt", None)
+        _s.pop("_llm_refs", None)
     ok = sum(1 for s in shots if s.get("image_path"))
     print(f"  [IMAGES] {ok}/{len(shots)} images generated")
     return shots
@@ -8951,6 +9140,7 @@ def _resume_episode(state: dict) -> None:
     character_sheets = state.get("character_sheets", {})
     location_sheets = state.get("location_sheets", {})
     prop_assets = state.get("prop_assets", {})
+    brand_assets = _scan_brand_assets()
     titles = state.get("titles", [])
     description = state.get("description", "")
     tags = state.get("tags", [])
@@ -9068,7 +9258,9 @@ def _resume_episode(state: dict) -> None:
         print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards "
               f"in parallel ({_image_concurrency()} workers)...")
         def _rcard(_cs):
-            _card = _generate_chapter_card(_cs, episode_num, topic)
+            _card = _generate_chapter_card(_cs, episode_num, topic,
+                                           shots=shots, brand_assets=brand_assets,
+                                           character_sheets=character_sheets)
             if _card:
                 _cs["image_path"] = _card
             return (f"  [CARD] chapter {_cs.get('chapter_num')}: "
@@ -9127,19 +9319,20 @@ def _resume_episode(state: dict) -> None:
         if _SHOT_RELEVANCE_ON and topic:
             _rewrites = 0
             print(f"  [VERIFY] pre-verifying {len(missing_img)} regen prompts "
-                  f"vs story topic...")
+                  f"+ ref-check vs story topic...")
             for _vs in missing_img:
                 _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
                 _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
                 if _vp != _base:
                     _rewrites += 1
                 _vs["_verified_prompt"] = _vp
+                _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
             print(f"  [VERIFY] {len(missing_img)} regen prompts verified, "
                   f"{_rewrites} scene rewrites applied")
         else:
             for _vs in missing_img:
                 _vs.pop("_verified_prompt", None)
-
+                _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
         def _regen_one(idx: int, shot: dict) -> None:
             if _HAS_PROGRESS:
                 with _plock:
@@ -9162,7 +9355,8 @@ def _resume_episode(state: dict) -> None:
                     if ch["name"] not in sheets_cache:
                         print(f"  [SHEET] {ch['name']} not in pre-built cache "
                               f"(face panel had failed) - shot renders w/o face ref")
-            refs, notes = _select_shot_refs(shot, sheets_cache, brand_assets)
+            refs, notes = _select_shot_refs(shot, sheets_cache, brand_assets,
+                                            llm_refs=shot.get("_llm_refs"))
             out_path = str(ep_shot_dir
                            / _shot_filename(shot, int(shot.get("narration_idx", idx)) + 1))
             n = len(refs)
@@ -9224,6 +9418,7 @@ def _resume_episode(state: dict) -> None:
         # Drop the pre-verify prompt cache so it doesn't bloat resume state.
         for _sh in missing_img:
             _sh.pop("_verified_prompt", None)
+            _sh.pop("_llm_refs", None)
         _save("images")
     else:
         print(f"  [RESUME] All {len(shots)} images present")

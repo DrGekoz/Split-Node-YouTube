@@ -2,6 +2,35 @@
 
 All notable changes to Split Node.
 
+## [1.38.0] - 2026-08-09
+
+### Premium adaptive image prompting: chapter cards + narration-grounded shots
+
+- **Chapter cards are now grounded in the actual chapter**. The background
+  prompt is built from the chapter title PLUS the real narration content of the
+  shots inside that chapter, so the art matches what the narrator says - not a
+  bare title.
+- **Business logo refs on chapter cards**: if a chapter is about a real company
+  (e.g. 'hugging face vaults' -> the Hugging Face company), its real cached
+  logo is attached as an image ref and the prompt places it on the OUTSKIRTS of
+  the frame (top middle ~15%, top-left/top-right) - never in the centre, which
+  stays completely open for the title text overlaid later.
+- **Shots are grounded in their actual TTS narration**: every shot prompt now
+  feeds in the exact narration line spoken over that shot, so the rendered
+  scene, subject, business, place and action match the audio 200%.
+- **LLM ref-check for shots**: before the parallel batch, an LLM inspects each
+  shot's narration + scene and decides IF a business or character is being
+  mentioned and WHETHER to attach its image ref (logo / real photo) - the
+  correct ref is chosen from the narration context, not just heuristics. Wired
+  into both fresh and resume paths. Only picks from already-cached logos (never
+  triggers a network logo search in the hot path).
+- **Removed ALL concrete examples from every LLM prompt** (adaptive prompting
+  only): the shot-list example line, chapter-title example, narration rule-8
+  figures, brand-extract example, relevance-judge example, and the story-bible
+  age example. This stops the model from copying a stock scene/place/title
+  (same root cause as the earlier 'Paris, France.' leak) - everything is now
+  derived from the article's own content.
+
 ## [1.37.1] - 2026-08-09
 
 ### Fix: "Paris, France." leaked into narration via the PLACE ANCHORS prompt example
