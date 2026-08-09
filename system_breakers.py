@@ -4076,6 +4076,31 @@ def _runpod_generate(prompt: str, seed: int, size: str = "1280*720",
             time.sleep(3)
     return None
 
+# HARD RULE (Joe 2026-08-09): shot images must NEVER contain any text. Labels
+# (e.g. establishing '/// NAME') are burned by FFmpeg at render time, never in
+# the source art. Appended to every shot prompt.
+NO_IMAGE_TEXT = (" NO text, NO words, NO letters, NO captions, NO labels, "
+                 "NO signage, NO subtitles, NO watermarks, NO typography "
+                 "anywhere in the image.")
+
+
+def _shot_filename(shot: dict, number: int) -> str:
+    """Descriptive shot filename: 'shot{number:02d}_{brief description}.png'
+    e.g. 'shot01_hugging_face_switzerland.png' (Joe 2026-08-09). The
+    description lives ONLY in the filename - the image itself must stay clean
+    (NO_IMAGE_TEXT), and any on-screen label is burned by FFmpeg at render time.
+    `number` = the shot's 1-based narration index (stable across resume)."""
+    name = (shot.get("establishing_name") or "").strip()
+    if not name:
+        narr = (shot.get("narration") or shot.get("scene") or "")
+        words = re.findall(r"[A-Za-z0-9]+", narr)[:4]
+        name = "_".join(words)
+    slug = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").lower()
+    slug = re.sub(r"_+", "_", slug)[:50].strip("_")
+    if not slug:
+        slug = "shot"
+    return f"shot{int(number):02d}_{slug}.png"
+
 def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> str:
     """Build the prompt for ONE shot (shared by full gen and resume regen).
     Discovery logic (Joe 2026-08-06):
@@ -4119,7 +4144,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
             f"{SCENE_STYLE}. {scene}{cam_desc}, "
             f"16:9 widescreen cinematic documentary frame, EXACTLY ONE "
             f"continuous scene, one location, no collage, no split panels, "
-            f"no duplicated scenes"
+            f"no duplicated scenes{NO_IMAGE_TEXT}"
         )
     facing_txt = {"left": "facing left", "right": "facing right",
                   "front": "facing the camera", "back": "seen from behind",
@@ -4137,7 +4162,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     return (
         f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}, "
         f"16:9 widescreen cinematic documentary frame, EXACTLY ONE continuous "
-        f"scene, no collage, no duplicated figures"
+        f"scene, no collage, no duplicated figures{NO_IMAGE_TEXT}"
     )
 
 
@@ -6697,7 +6722,8 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         # Panels were built up front by _build_all_character_sheets (before the
         # shot loop); _select_shot_refs just picks the PERFECT panel(s) here.
         refs, notes = _select_shot_refs(shot, sheets, brand_assets)
-        out_path = str((ep_dir or SHOTS_DIR) / f"shot_{seed}.png")
+        out_path = str((ep_dir or SHOTS_DIR)
+                       / _shot_filename(shot, int(shot.get("narration_idx", idx)) + 1))
         n = len(refs)
         if refs:
             # single ref -> tight identity boost; multiple refs -> lower boost
@@ -6716,9 +6742,9 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             ok = _krea_generate(prompt, seed, out_path,
                                 ref_images=None, denoise=1.0, upscale=True)
         if not ok:
-            # one retry with a fresh seed
+            # one retry with a fresh seed - same descriptive filename (overwrite)
             seed2 = seed + 31337
-            out2 = str((ep_dir or SHOTS_DIR) / f"shot_{seed2}.png")
+            out2 = out_path
             with _plock:
                 print(f"  [SHOT {idx+1}/{len(shots)}] retrying with new seed...")
             if refs:
@@ -8965,7 +8991,8 @@ def _resume_episode(state: dict) -> None:
                         print(f"  [SHEET] {ch['name']} not in pre-built cache "
                               f"(face panel had failed) - shot renders w/o face ref")
             refs, notes = _select_shot_refs(shot, sheets_cache, brand_assets)
-            out_path = str(ep_shot_dir / f"shot_{seed}.png")
+            out_path = str(ep_shot_dir
+                           / _shot_filename(shot, int(shot.get("narration_idx", idx)) + 1))
             n = len(refs)
             if refs:
                 # single ref -> tight identity boost; multiple refs -> lower
@@ -8983,7 +9010,7 @@ def _resume_episode(state: dict) -> None:
                                     ref_images=None, denoise=1.0, upscale=True)
             if not ok:
                 seed2 = seed + 31337
-                out2 = str(ep_shot_dir / f"shot_{seed2}.png")
+                out2 = out_path  # same descriptive filename (overwrite)
                 with _plock:
                     print("  [SHOT] retrying with new seed...")
                 if refs:

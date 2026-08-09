@@ -2,6 +2,21 @@
 
 All notable changes to Split Node.
 
+## [1.35.4] - 2026-08-09
+
+### Shot images are 100% text-free + descriptive filenames
+
+- **NO text in any shot image, ever**: a hard `NO_IMAGE_TEXT` clause (no text,
+  words, letters, captions, labels, signage, subtitles, watermarks, typography)
+  is appended to every shot prompt. All on-screen labels (e.g. establishing
+  `/// NAME`) are burned by FFmpeg at render time - never in the source art.
+- **Descriptive filenames**: shots are now saved as `shot{NN}_{brief}.png` e.g.
+  `shot01_hugging_face_switzerland.png` instead of `shot_{seed}.png`. The name
+  is derived from the establishing label or the narration lead, sanitised +
+  truncated. The description lives ONLY in the filename; the image itself stays
+  clean. Applies to both the fresh and resume paths (retries overwrite the same
+  file).
+
 ## [1.35.3] - 2026-08-09
 
 ### LLM prompt-relevance gate (stops off-story images like the "Mayan pyramid")
