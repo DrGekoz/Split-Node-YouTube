@@ -9223,17 +9223,20 @@ def _set_resume_ep(ep_num: int) -> None:
 
 def _scan_resume_states() -> list:
     """Every valid resume state on disk (legacy + per-episode), newest first.
-    Each carries '_file' + '_ep'. Used for the resume-all batch flow."""
+    Each carries '_file' + '_ep'. Used for the resume-all batch flow.
+
+    Dedupes by EPISODE NUMBER (not filename): the legacy `.resume_state.json`
+    and the per-episode `.resume_state.ep011.json` both describe ep #011, so we
+    keep only the NEWEST state for each episode (files are sorted newest-first)
+    to avoid asking the user to resume the same episode twice in sequence
+    (Joe 2026-08-09)."""
     found = []
-    seen = set()
+    seen_eps = set()
     for f in sorted(PROJECT_DIR.glob(".resume_state*.json"),
                     key=lambda p: p.stat().st_mtime, reverse=True):
         name = f.name
-        if name.endswith(".bak") or name.endswith(".tmp") or name in seen:
+        if name.endswith(".bak") or name.endswith(".tmp"):
             continue
-        # dedupe against the sibling .bak (only keep the live file)
-        base = name.rsplit(".bak", 1)[0] if name.endswith(".bak") else name
-        seen.add(base)
         try:
             state = json.loads(f.read_text())
             if state.get("version") not in (1, 2, 3):
@@ -9241,6 +9244,11 @@ def _scan_resume_states() -> list:
             state["_file"] = str(f)
             m = re.search(r"\.ep(\d{1,3})\.json$", name)
             state["_ep"] = int(m.group(1)) if m else int(state.get("episode_num", 0))
+            ep = state["_ep"]
+            if ep in seen_eps:
+                # Newer state for this episode already collected - skip the older dup.
+                continue
+            seen_eps.add(ep)
             found.append(state)
         except Exception:
             continue

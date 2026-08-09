@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.39.4] - 2026-08-09
+
+### FIX duplicate episode in resume list (dedupe by episode number)
+
+- The resume scan could list the SAME episode twice (once from the legacy
+  `.resume_state.json` and once from the per-episode `.resume_state.ep011.json`,
+  which both describe ep #011), so the user was asked to resume the same episode
+  twice in sequence. `_scan_resume_states` now dedupes by EPISODE NUMBER,
+  keeping only the newest state per episode.
+
 ## [1.39.3] - 2026-08-09
 
 ### FIX title-burn deadlock (ffmpeg stderr pipe)
