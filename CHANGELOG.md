@@ -2,6 +2,12 @@
 
 All notable changes to Split Node.
 
+## [1.35.1] - 2026-08-09
+
+### Fix: upscale daemon reported false "neural upscale failed" for paths with spaces
+
+- The `DONE <out_path> <0|1>` line was parsed with `line.split()` and read `parts[2]` as the ok flag. With a space in the path (e.g. `System Breakers`) the path breaks across tokens, so `parts[2]` is a path segment, not `1` — every upscale reported failure even though the output file was written correctly (cards/shots came out at the right 1920x1080). Now reads `parts[-1]` (the flag is always the last token).
+
 ## [1.35.0] - 2026-08-09
 
 ### Parallel image generation + async upscale queue (fixes FaceUpDAT OOM stall)

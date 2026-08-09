@@ -585,7 +585,10 @@ def _faceupdat_upscale(image_path: str, out_path: str,
                     if line.startswith("DONE"):
                         break
                 parts = line.split()
-                if len(parts) >= 3 and parts[0] == "DONE" and parts[2] == "1":
+                # ok flag is ALWAYS the LAST token. parts[2] is wrong when the
+                # output path contains spaces (e.g. "System Breakers") - the
+                # split() breaks the path across tokens. (Joe 2026-08-09)
+                if len(parts) >= 3 and parts[0] == "DONE" and parts[-1] == "1":
                     return True
                 return False
         except Exception:
