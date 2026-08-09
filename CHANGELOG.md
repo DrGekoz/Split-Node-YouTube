@@ -2,6 +2,25 @@
 
 All notable changes to Split Node.
 
+## [1.38.4] - 2026-08-09
+
+### ~200 prop visuals injected into shots + chapter cards + parallel cards with correct filenames
+
+- **~200 named props** (vaults, libraries, casinos, labs, servers, vehicles,
+  money, security gear...) in a new `prop_visuals.py`. When a shot's narration
+  or scene names a prop, its visual descriptor is injected into the shot prompt
+  so it appears in-frame with the right context (e.g. 'vault' -> a massive
+  steel bank vault; 'academic halls' -> a grand university library). Wired into
+  `_build_shot_prompt` and the chapter-card background.
+- **Chapter cards run in PARALLEL again with CORRECT filenames**: codex now
+  reports the exact "Saved at: <path>" it produced for each invocation, so each
+  call claims its OWN output deterministically - the old "newest unclaimed
+  file" scan could let card A copy card B's art when two finished concurrently
+  (the wrong-filenames bug). Deterministic claim is race-free under parallelism,
+  so cards are fast again while keeping correct names. Falls back to the
+  newest-file scan only if the path can't be parsed.
+- Thumbnail uses the same style prompt as the main video.
+
 ## [1.38.3] - 2026-08-09
 
 ### Fix chapter-card wrong filenames (sequential) + overlap shot verification + business-location logos + thumbnail style

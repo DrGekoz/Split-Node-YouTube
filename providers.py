@@ -32,6 +32,7 @@ Keys are read from environment or the project .env (never committed).
 import json
 import os
 import random
+import re
 import time
 import urllib.request
 import urllib.error
@@ -385,31 +386,48 @@ class Codex:
             print("  [CODEX] timed out generating image")
             return False
 
-        # Claim the NEWEST image that appeared during THIS call (and wasn't
-        # already present or claimed by another thread). Under lock so parallel
-        # threads each pick a distinct file. CRITICAL: we only ever claim a file
-        # that appeared DURING this call (not in `before`) - the old fallback
-        # `{p not in self._claimed}` could grab a STALE pre-existing image when
-        # codex produced nothing new and silently report it as a success (and two
-        # threads could even claim the same stale file). That corrupted bulk runs
-        # (Joe 2026-08-09). No new output = genuine failure -> return False so the
-        # caller's retry/throttle logic handles it.
-        after = _scan()
-        with self._lock():
-            candidates = {p: t for p, t in after.items()
-                          if p not in before and p not in self._claimed}
-            if not candidates:
-                # Rate-limit throttle (Joe 2026-08-09): when codex produced no
-                # new output (typically a rate limit / 429), do NOT fall back to
-                # another model and do NOT count a stale file as success. Instead
-                # back off to a single slow retry per hour until one succeeds,
-                # then resume the batch. Handled by _codex_throttled_retry below.
-                print("  [CODEX] no new image generated (likely rate-limited) - "
-                      "throttling: 1 retry/hour until success")
-                return _codex_throttled_retry(self, prompt, out_path, ref_images,
-                                              timeout, before)
-            src = max(candidates, key=candidates.get)  # newest by mtime
-            self._claimed.add(src)
+        # Claim the output for THIS call DETERMINISTICALLY (Joe 2026-08-09).
+        # Codex prints "Saved at: <path>" in its stdout, naming the exact file
+        # it produced for THIS invocation. Parsing that is race-free under
+        # parallelism - the old "newest unclaimed file" scan could, when two
+        # codex calls finished concurrently, let card A copy card B's output
+        # (and vice-versa), which is exactly the wrong-filenames bug on chapter
+        # cards. We now trust codex's own reported path first, and only fall
+        # back to the newest-unclaimed scan if the path can't be parsed.
+        out_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        src = None
+        m = re.search(r"Saved at:\s*[`'\"]?\s*([A-Za-z]:[^`'\"]+?\.(?:png|jpg|jpeg|webp))",
+                      out_text, re.IGNORECASE)
+        if m:
+            cand = os.path.abspath(m.group(1))
+            if os.path.isfile(cand):
+                with self._lock():
+                    if cand not in self._claimed:
+                        src = cand
+                        self._claimed.add(src)
+        if src is None:
+            # Fallback: newest file that appeared during this call (not in
+            # `before`, not already claimed by another thread). Only ever claim
+            # a file that appeared DURING this call - never a stale pre-existing
+            # image (that silently copied an old file and could be double-claimed).
+            after = _scan()
+            with self._lock():
+                candidates = {p: t for p, t in after.items()
+                              if p not in before and p not in self._claimed}
+                if not candidates:
+                    # Rate-limit throttle (Joe 2026-08-09): when codex produced no
+                    # new output (typically a rate limit / 429), do NOT fall back to
+                    # another model and do NOT count a stale file as success. Instead
+                    # back off to a single slow retry per hour until one succeeds,
+                    # then resume the batch.
+                    print("  [CODEX] no new image generated (likely rate-limited) - "
+                          "throttling: 1 retry/hour until success")
+                    return _codex_throttled_retry(self, prompt, out_path, ref_images,
+                                                  timeout, before)
+                src = max(candidates, key=candidates.get)  # newest by mtime
+                self._claimed.add(src)
+        if src is None:
+            return False
         try:
             shutil.copy2(src, out_path)
         except Exception as e:

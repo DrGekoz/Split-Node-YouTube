@@ -674,12 +674,23 @@ def _describe_style_from_sheets() -> str:
         return ""
 
 
-def _style_inject() -> str:
+def _style_inject(allow_logo: bool = False) -> str:
     """CRITICAL style injection appended to every image prompt (shots, b-roll,
     location/prop sheets, character panels). The style is a NON-NEGOTIABLE
     hard requirement, framed emphatically so the model can't drop or dilute it.
-    Text-only style transfer (no image refs)."""
+    Text-only style transfer (no image refs).
+
+    `allow_logo=True` (Joe 2026-08-09): when a business logo is being used as
+    an image ref (a business-location shot / logo-on-building shot), the style's
+    "no logos" clause is REMOVED so it doesn't conflict with the attached logo
+    ref - the logo is allowed to appear in the frame. For all other shots the
+    "no logos" clause stays (prevents gpt-image-2 hallucinating stray logos).
+    """
     desc = _get_style_prompt().rstrip(".")
+    if allow_logo:
+        # Drop the anti-logo clause so an attached business-logo ref isn't
+        # contradicted by the style prompt.
+        desc = re.sub(r",?\s*(no logos|no logo)\b", "", desc, flags=re.IGNORECASE)
     return (
         f"CRITICAL - THIS IMAGE MUST BE RENDERED STRICTLY IN THE FOLLOWING "
         f"VISUAL STYLE AND NOTHING ELSE: '{desc}'. DO NOT deviate from, "
@@ -2740,7 +2751,7 @@ def _ensure_shot_prompt_relevant(prompt: str, shot: dict,
         if not new_scene:
             break
         shot["scene"] = new_scene
-        prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
+        prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject(allow_logo=_is_business_shot(shot))
     return prompt
 
 
@@ -4144,6 +4155,36 @@ def _chapter_filename(chapter_num: int, title: str) -> str:
         slug = "card"
     return f"chapter_{int(chapter_num):02d}_{slug}.png"
 
+
+# ---- Prop visual injection (Joe 2026-08-09) ----
+# ~200 named props (vaults, libraries, casinos, labs, servers, etc). When a
+# chapter title or a shot's narration/scene mentions a prop keyword, its visual
+# descriptor is injected into the image prompt so the prop actually appears in
+# the frame with correct context (e.g. 'vault' -> a massive steel bank vault).
+def _match_prop_visuals(text: str) -> list[str]:
+    """Return the visual descriptors for every prop keyword found in `text`."""
+    if not text:
+        return []
+    try:
+        from prop_visuals import PROP_VISUALS
+    except Exception:
+        return []
+    low = text.lower()
+    found = []
+    # Longer/compound keys first so 'bank vault' wins over 'vault'/'bank'.
+    for key in sorted(PROP_VISUALS, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(key)}\b", low):
+            found.append(PROP_VISUALS[key])
+    return found
+
+
+def _inject_prop_visuals(text: str) -> str:
+    """Build a prop-injection clause from `text`, or '' if no props match."""
+    descs = _match_prop_visuals(text)
+    if not descs:
+        return ""
+    return " Include these key objects from the scene: " + "; ".join(descs) + "."
+
 def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> str:
     """Build the prompt for ONE shot (shared by full gen and resume regen).
     Discovery logic (Joe 2026-08-06):
@@ -4172,6 +4213,10 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
             f"Render the scene, subject, business, place and action to match "
             f"exactly what is being said - every named company, person, place "
             f"and object in that narration belongs in the frame.")
+    # PROP VISUALS (Joe 2026-08-09): if the narration/scene names a known prop
+    # (vault, library, casino, server, etc), inject its visual descriptor so it
+    # appears in the frame with the right context.
+    prop_clause = _inject_prop_visuals(f"{narration} {scene}")
     # Easter egg: inject the hidden background element into this shot's prompt
     # (set on exactly one shot by _inject_easter_egg).
     egg = shot.get("easter_egg_prompt")
@@ -4197,7 +4242,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         # No character (establishing/landscape/object/hand-closeup shot) - use
         # the scene-only style with zero human language so no person appears.
         return (
-            f"{SCENE_STYLE}. {scene}{cam_desc}.{narr_ctx} "
+            f"{SCENE_STYLE}. {scene}{cam_desc}.{narr_ctx}{prop_clause} "
             f"16:9 widescreen cinematic documentary frame, high detail "
             f"illustration, EXACTLY ONE "
             f"continuous scene, one location, no collage, no split panels, "
@@ -4217,7 +4262,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         blocks.append(f"{cb} ({facing})")
     char_part = " ".join(blocks)
     return (
-        f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx} "
+        f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx}{prop_clause} "
         f"16:9 widescreen cinematic documentary frame, high detail "
         f"illustration, EXACTLY ONE continuous "
         f"scene, no collage, no duplicated figures{NO_IMAGE_TEXT}"
@@ -4543,6 +4588,12 @@ def _generate_chapter_card(shot: dict, episode_num: int,
     brand = _detect_brand_in_chapter(title, context, brand_assets or {})
     card_refs: list[str] = []
     brand_clause = ""
+    # PROP VISUALS (Joe 2026-08-09): if the chapter title/context names a known
+    # prop (vault, library, casino, server...), inject its visual descriptor so
+    # the prop appears in the card background (e.g. 'hugging face vaults' ->
+    # a massive vault).
+    card_prop_clause = _inject_prop_visuals(f"{title} {context}")
+
     if brand:
         logo = _find_logo(brand)
         if logo and os.path.isfile(logo):
@@ -4569,14 +4620,14 @@ def _generate_chapter_card(shot: dict, episode_num: int,
         # channel style + logo/brand injections AFTER (Joe 2026-08-09). The
         # title is the anchor; style/brand are finishing touches, never the lead.
         prompt = (
-            f"{bg}. A clean cinematic documentary chapter card background with "
+            f"{bg}.{card_prop_clause} A clean cinematic documentary chapter card background with "
             f"NO text, NO words, NO letters, NO titles, no watermark. The "
             f"composition is a striking themed backdrop with plenty of open "
             f"negative space in the CENTRE for text to be overlaid later. Dark "
             f"vignette, moody atmosphere, minimal clutter, no people as the "
             f"main subject. 16:9 widescreen cinematic documentary background, "
             f"high detail illustration."
-            f" {_style_inject()}.{brand_clause}"
+            f" {_style_inject(allow_logo=bool(card_refs))}.{brand_clause}"
         )
         print(f"  [CARD] chapter {n:02d} LLM background prompt generated")
     else:
@@ -4584,6 +4635,7 @@ def _generate_chapter_card(shot: dict, episode_num: int,
             "A cinematic documentary chapter card background. Solid near-black "
             "background with subtle dark atmosphere and a faint moody glow in "
             "the centre."
+            f"{card_prop_clause}"
             f" {_style_inject()}.{brand_clause} NO text, NO words, NO letters, "
             "NO titles, no watermark. Clean, minimal, high contrast, "
             "professional broadcast background plate, no photos, no people, no "
@@ -6965,7 +7017,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         for _vs in chunk:
             if _vs.get("_verified_prompt"):
                 continue
-            _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
+            _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject(allow_logo=_is_business_shot(_vs))
             _vp = _base
             if _SHOT_RELEVANCE_ON and topic:
                 _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
@@ -6975,18 +7027,19 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
         return rewrites
 
-    # ---- CHAPTER CARDS FIRST (SEQUENTIAL - fixes wrong-filename race) ----
-    # Generate ALL chapter title cards up front, ONE AT A TIME, BEFORE the
-    # parallel shot pool. Codex output detection grabs the NEWEST generated
-    # image per call; if cards run CONCURRENTLY their "newest" scans race and
-    # each card can copy another card's output -> cards get the WRONG filename /
-    # wrong art (Joe 2026-08-09). Sequential rendering eliminates that entirely.
-    # While the cards render, a background thread LLM-verifies + ref-checks ALL
-    # shot prompts so the LLM is busy during card generation (overlap).
+    # ---- CHAPTER CARDS FIRST (PARALLEL, deterministic filenames) ----
+    # Generate ALL chapter title cards up front, in PARALLEL, BEFORE the shot
+    # pool. Card filenames are now SAFE under parallelism: codex prints the
+    # exact "Saved at: <path>" it produced for each call, so each card claims
+    # its OWN output deterministically (no more "newest unclaimed file" race
+    # where card A copied card B's art -> wrong filenames). While the cards
+    # render, a background thread LLM-verifies + ref-checks ALL shot prompts so
+    # the LLM is busy during card generation (overlap) (Joe 2026-08-09).
     _chap_shots = [s for s in shots if s.get("is_chapter")]
     if _chap_shots and backend in ("codex", "fal"):
+        _cn = _image_concurrency()
         print(f"  [CARDS] rendering {len(_chap_shots)} chapter title cards "
-              f"SEQUENTIALLY (avoids codex output race)...")
+              f"in PARALLEL ({_cn} workers, deterministic filenames)...")
         # Kick off the LLM shot-prompt verification in the background NOW so it
         # runs while the cards generate.
         _verify_future = None
@@ -7006,8 +7059,13 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             return (f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
                     f"black placeholder")
 
-        for _cs in _chap_shots:
-            print(_render_card(_cs))
+        if _cn > 1 and len(_chap_shots) > 1:
+            with ThreadPoolExecutor(max_workers=_cn) as _ex:
+                for _msg in _ex.map(_render_card, _chap_shots):
+                    print(_msg)
+        else:
+            for _cs in _chap_shots:
+                print(_render_card(_cs))
         if _verify_future is not None:
             _verify_future.result()
 
@@ -7073,7 +7131,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         # when the gate was off during the pre-pass).
         prompt = shot.get("_verified_prompt")
         if not prompt:
-            prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
+            prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject(allow_logo=_is_business_shot(shot))
             # LLM relevance gate (Joe 2026-08-09): cross-check the prompt against the
             # article topic; rewrite the scene + rebuild if it drifted off-story.
             prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock, topic)
@@ -9383,8 +9441,9 @@ def _resume_episode(state: dict) -> None:
                                and "chapter_" in os.path.basename(s["image_path"]))
                           or _force_regen)]
     if _chap_missing:
+        _cn2 = _image_concurrency()
         print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards "
-              f"SEQUENTIALLY (avoids codex output race)...")
+              f"in PARALLEL ({_cn2} workers, deterministic filenames)...")
         def _rcard(_cs):
             _card = _generate_chapter_card(_cs, episode_num, topic,
                                            shots=shots, brand_assets=brand_assets,
@@ -9393,8 +9452,13 @@ def _resume_episode(state: dict) -> None:
                 _cs["image_path"] = _card
             return (f"  [CARD] chapter {_cs.get('chapter_num')}: "
                     f"{'OK' if _card else 'black placeholder'}")
-        for _cs2 in _chap_missing:
-            print(_rcard(_cs2))
+        if _cn2 > 1 and len(_chap_missing) > 1:
+            with ThreadPoolExecutor(max_workers=_cn2) as _ex2:
+                for _msg2 in _ex2.map(_rcard, _chap_missing):
+                    print(_msg2)
+        else:
+            for _cs2 in _chap_missing:
+                print(_rcard(_cs2))
     if missing_img:
         print(f"\n[IMAGES] Regenerating {len(missing_img)} missing shots...")
         # ---- Rebuild the episode world assets the fresh run never finished ----
@@ -9515,7 +9579,7 @@ def _resume_episode(state: dict) -> None:
         def _verify_chunk(chunk: list) -> int:
             rewrites = 0
             for _vs in chunk:
-                _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
+                _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject(allow_logo=_is_business_shot(_vs))
                 _vp = _base
                 if _SHOT_RELEVANCE_ON and topic:
                     _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
