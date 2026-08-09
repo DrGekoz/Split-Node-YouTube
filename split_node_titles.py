@@ -27,6 +27,7 @@ import math
 import os
 import random
 import subprocess
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -373,6 +374,20 @@ def burn_titles(video_path: str, ass_path: str, out_path: str,
     except Exception as e:
         print(f"  [TITLES] Burn launch failed: {e}")
         return False
+    # Drain stderr in a background thread so the ~64KB stderr pipe can NEVER fill
+    # and deadlock ffmpeg (libass emits lots of font/warning output). The parent
+    # must read stderr continuously while it reads stdout, otherwise ffmpeg
+    # blocks writing stderr and the whole burn hangs (Joe 2026-08-09). Collect
+    # stderr so it can be surfaced if the burn fails.
+    stderr_buf = []
+    def _drain_stderr():
+        try:
+            for line in proc.stderr:
+                stderr_buf.append(line)
+        except Exception:
+            pass
+    _s_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    _s_thread.start()
     pbar = None
     if _HAS_TQDM and total > 0:
         pbar = _tqdm(total=total, unit="s", desc="  [TITLES] Burn",
@@ -399,8 +414,9 @@ def burn_titles(video_path: str, ass_path: str, out_path: str,
             last_sec = sec
     except Exception:
         pass
-    stderr = proc.stderr.read() if proc.stderr else ""
     proc.wait()
+    _s_thread.join(timeout=5)
+    stderr = "".join(stderr_buf)
     if pbar:
         pbar.close()
         print()

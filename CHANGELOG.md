@@ -2,6 +2,19 @@
 
 All notable changes to Split Node.
 
+## [1.39.3] - 2026-08-09
+
+### FIX title-burn deadlock (ffmpeg stderr pipe)
+
+- The pass-2 title burn (`split_node_titles.burn_titles`) could HANG: it read
+  ffmpeg's stdout for the progress bar but did NOT drain stderr until after
+  stdout ended. libass emits a lot of stderr output (font warnings), and once
+  that filled the ~64KB stderr pipe, ffmpeg blocked writing stderr while the
+  parent blocked reading stdout - a classic pipe deadlock that froze the burn
+  after the render was done. stderr is now drained in a background thread
+  throughout the burn (and collected so it can be surfaced on failure).
+- Verified with a real tiny-clip burn: completes instantly, no deadlock.
+
 ## [1.39.2] - 2026-08-09
 
 ### TTS gap-fill now runs BEFORE image generation on resume
