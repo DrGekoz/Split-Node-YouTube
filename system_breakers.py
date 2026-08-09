@@ -9731,12 +9731,23 @@ def _resume_episode(state: dict) -> None:
                        if not s.get("is_chapter") and (s.get("narration") or "").strip()]
         print(f"\n[TTS] REGEN - re-speaking ALL {len(missing_tts)} narration clips")
     else:
+        # GAP-FILL (Joe 2026-08-09): reuse any clip already on disk, matching
+        # BOTH the narrator file (narration_XX.wav) and the per-character clone
+        # file (narration_XX_char.wav, used when voice_map.json maps this shot's
+        # character to a different voice). Only generate what's actually missing.
         missing_tts = []
         for s in shots:
             _nidx = s.get("narration_idx", 0)
+            _voice = _lookup_voice(s.get("character", "NONE"))
             _disk = str(ep_dir / f"narration_{_nidx:02d}.wav")
+            _disk_char = str(ep_dir / f"narration_{_nidx:02d}_char.wav")
+            # Prefer the exact clip for this shot's voice (char variant if the
+            # shot uses a clone voice, else the narrator variant).
+            if _voice and os.path.isfile(_disk_char) and os.path.getsize(_disk_char) > 1000:
+                s["tts_path"] = _disk_char
+                continue
             if os.path.isfile(_disk) and os.path.getsize(_disk) > 1000:
-                s["tts_path"] = _disk  # reuse what's already on disk
+                s["tts_path"] = _disk
                 continue
             missing_tts.append(s)
     if missing_tts:
@@ -9744,10 +9755,13 @@ def _resume_episode(state: dict) -> None:
               f"({len(shots) - len(missing_tts)} already on disk)...")
         for idx, shot in enumerate(missing_tts):
             nidx = shot.get("narration_idx", idx)
+            _voice = _lookup_voice(shot.get("character", "NONE"))
             out = str(ep_dir / f"narration_{nidx:02d}.wav")
+            if _voice:
+                out = str(ep_dir / f"narration_{nidx:02d}_char.wav")
             shot["tts_path"] = out
             speak = _strip_stage_directions(shot.get("narration") or "")
-            ok = _pocket_tts_generate(speak, out)
+            ok = _pocket_tts_generate(speak, out, voice=_voice)
             if ok:
                 _normalize_voice_0db(out)
                 print(f"  [TTS] {_get_audio_duration(out):.1f}s - {speak[:50]}...")

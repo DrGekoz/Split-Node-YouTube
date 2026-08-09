@@ -2,6 +2,19 @@
 
 All notable changes to Split Node.
 
+## [1.39.1] - 2026-08-09
+
+### TTS resume gap-fill fixes
+
+- When TTS regenerate = no, the resume flow now correctly gap-fills: it checks
+  which narration clips are already on disk and only generates what's missing.
+- Fixed the gap-fill to match BOTH the narrator clip (`narration_XX.wav`) AND
+  the per-character clone clip (`narration_XX_char.wav`, used when a shot's
+  character maps to a different voice via voice_map.json). Previously it only
+  looked for the narrator file, so character-voiced shots were incorrectly
+  re-spoken with the narrator voice even when their clip already existed.
+- Missing clips are now generated with the correct per-character voice.
+
 ## [1.39.0] - 2026-08-09
 
 ### HARDENED parallel chapter-card filenames + context-aware logo placement + depth of field
