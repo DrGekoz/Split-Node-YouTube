@@ -2,6 +2,34 @@
 
 All notable changes to Split Node.
 
+## [1.36.0] - 2026-08-09
+
+### Batch multi-video pipeline + resume-all + reliable async upscaling
+
+- **Batch mode**: the run prompt now asks "How many videos?" (default 1). For
+  each video it runs the exact setup flow (episode number, paragraph count,
+  resolution, thumbnail provider/model, image provider/model, style, story)
+  before moving to the next, then generates them all. Every episode gets its
+  own resume state file (`.resume_state.ep{NNN}.json`) so episodes in a batch
+  can be resumed independently.
+- **Resume-all**: on startup it scans every resume state on disk (legacy
+  `.resume_state.json` + per-episode files) and asks per episode whether to
+  resume it; answering yes to all runs them all in sequence.
+- **Parallel orchestration**: a fresh batch runs ALL LLM/script stages first
+  and queues TTS for every episode. For local Krea 2 the image pass waits for
+  all TTS (GPU contention); for codex/API backends image generation runs
+  simultaneously with TTS, in parallel across episodes.
+- **FIX - async upscale worker crash**: the per-image upscale progress bar
+  overran its estimated total, making tqdm throw `unsupported format string
+  passed to NoneType.__format__`. This killed the worker thread *before* it
+  joined the upscale thread, so the upscaled output was never finalized and
+  every shot stayed at the source resolution (the "waiting to be upscaled"
+  symptom). The bar is now capped at its estimate and the worker always joins
+  the upscale thread. RealESRGAN x2 estimate tuned to avoid overrun.
+- Generated image paths are logged with each shot, and each image's upscale
+  shows a live progress bar plus a `[UPSCALE] OK <name> (WxH) in X.Xs`
+  completion line.
+
 ## [1.35.5] - 2026-08-09
 
 ### Chapter cards: relevance vs title + article, parallel gen, descriptive filenames; upscale visibility

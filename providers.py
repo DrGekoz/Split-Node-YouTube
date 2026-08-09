@@ -469,13 +469,23 @@ def _upscale_worker_loop():
             _th = _threading.Thread(target=_run)
             _th.start()
             if _bar is not None:
-                while _th.is_alive():
-                    time.sleep(0.1)
-                    _bar.update(min(0.1, time.time() - _t0 - _bar.n))
-                _th.join()
-                _bar.n = _est
-                _bar.refresh()
-                _bar.close()
+                try:
+                    while _th.is_alive():
+                        time.sleep(0.1)
+                        # Cap the update so the bar NEVER overruns its estimated
+                        # total - tqdm throws "unsupported format string passed
+                        # to NoneType" (percentage computes to None) once n > total,
+                        # which killed the worker before _th.join() and left the
+                        # upscaled output unwritten (Joe 2026-08-09: shots looked
+                        # stuck "waiting to be upscaled").
+                        _remain = _est - _bar.n
+                        if _remain > 0:
+                            _bar.update(min(0.1, _remain))
+                finally:
+                    _th.join()
+                    _bar.n = _est
+                    _bar.refresh()
+                    _bar.close()
             else:
                 _th.join()
             _ok = _res.get("ok")
@@ -495,14 +505,16 @@ def _upscale_worker_loop():
 
 
 def _estimate_upscale_seconds(image_path: str) -> float:
-    """Rough per-image upscale time from source pixel count (1.5e-6 s/px on the
-    RealESRGAN x2 daemon) so the progress bar has a plausible total. Clamped."""
+    """Rough per-image upscale time from source pixel count (2.6e-6 s/px on the
+    RealESRGAN x2 daemon, plus a daemon warm-up allowance on the first call) so
+    the progress bar has a plausible total that doesn't overrun. Clamped."""
     try:
         from PIL import Image
         w, h = Image.open(image_path).size
-        return max(0.5, min(15.0, w * h * 1.5e-6 + 0.5))
+        est = w * h * 2.6e-6 + 0.8
     except Exception:
-        return 2.0
+        est = 3.0
+    return max(1.0, min(30.0, est))
 
 
 def _start_upscale_worker():

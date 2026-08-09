@@ -2642,11 +2642,14 @@ def _set_img_topic(topic: str) -> None:
     _IMG_TOPIC = (topic or "").strip()
 
 
-def _llm_judge_prompt_relevance(prompt: str, narration: str) -> tuple:
+def _llm_judge_prompt_relevance(prompt: str, narration: str,
+                                topic: str = None) -> tuple:
     """Judge whether an image prompt is relevant to the article topic.
     Returns (relevant, note). Fail-open (True, '') when no topic, gate off,
-    LM Studio unreachable, or on error."""
-    if not _SHOT_RELEVANCE_ON or not _IMG_TOPIC or not _llm_fast_reachable():
+    LM Studio unreachable, or on error. `topic` defaults to the module topic."""
+    if not topic:
+        topic = _IMG_TOPIC
+    if not _SHOT_RELEVANCE_ON or not topic or not _llm_fast_reachable():
         return True, ""
     try:
         sys = (
@@ -2665,7 +2668,7 @@ def _llm_judge_prompt_relevance(prompt: str, narration: str) -> tuple:
         data = _llm_json([
             {"role": "system", "content": sys},
             {"role": "user", "content":
-                f"ARTICLE TOPIC: {_IMG_TOPIC}\n\n"
+                f"ARTICLE TOPIC: {topic}\n\n"
                 f"NARRATION: {narration}\n\n"
                 f"IMAGE PROMPT: {prompt}\n"},
         ], max_tokens=160, temp=0.1)
@@ -2677,9 +2680,12 @@ def _llm_judge_prompt_relevance(prompt: str, narration: str) -> tuple:
         return True, ""
 
 
-def _llm_rewrite_scene(narration: str, old_scene: str, note: str) -> str:
+def _llm_rewrite_scene(narration: str, old_scene: str, note: str,
+                       topic: str = None) -> str:
     """Rewrite a shot's scene so it directly illustrates the narration and stays
     on-topic with the article. Returns new scene text or '' on failure."""
+    if not topic:
+        topic = _IMG_TOPIC
     try:
         sys = (
             "You are a documentary scene director. Given the ARTICLE TOPIC, the "
@@ -2693,7 +2699,7 @@ def _llm_rewrite_scene(narration: str, old_scene: str, note: str) -> str:
         out = _llm_chat([
             {"role": "system", "content": sys},
             {"role": "user", "content":
-                f"ARTICLE TOPIC: {_IMG_TOPIC}\n\n"
+                f"ARTICLE TOPIC: {topic}\n\n"
                 f"NARRATION: {narration}\n\n"
                 f"PREVIOUS SCENE (irrelevant): {old_scene}\n\n"
                 f"PROBLEM: {note}\n\nNEW SCENE:"},
@@ -2706,13 +2712,15 @@ def _llm_rewrite_scene(narration: str, old_scene: str, note: str) -> str:
 
 def _ensure_shot_prompt_relevant(prompt: str, shot: dict,
                                  character_sheets: Optional[dict],
-                                 lock) -> str:
+                                 lock, topic: str = None) -> str:
     """Relevance-gate a shot prompt against the article topic. If the prompt
     drifts off-topic, rewrite the shot's scene and rebuild up to N retries.
     Fail-open (returns the prompt unchanged) when no topic or LLM errors."""
+    if not topic:
+        topic = _IMG_TOPIC
     for attempt in range(1, _SHOT_RELEVANCE_RETRIES + 1):
         relevant, note = _llm_judge_prompt_relevance(
-            prompt, shot.get("narration", ""))
+            prompt, shot.get("narration", ""), topic)
         if relevant:
             return prompt
         _log = f"[RELEVANCE] shot miss ({attempt}/{_SHOT_RELEVANCE_RETRIES}): {note}"
@@ -2722,7 +2730,7 @@ def _ensure_shot_prompt_relevant(prompt: str, shot: dict,
         else:
             print(f"  {_log}")
         new_scene = _llm_rewrite_scene(
-            shot.get("narration", ""), shot.get("scene", ""), note)
+            shot.get("narration", ""), shot.get("scene", ""), note, topic)
         if not new_scene:
             break
         shot["scene"] = new_scene
@@ -2730,18 +2738,21 @@ def _ensure_shot_prompt_relevant(prompt: str, shot: dict,
     return prompt
 
 
-def _ensure_card_prompt_relevant(prompt: str, title: str, n: int) -> str:
+def _ensure_card_prompt_relevant(prompt: str, title: str, n: int,
+                                 topic: str = None) -> str:
     """Relevance-gate a chapter card background prompt. If it drifts off-topic,
     re-run the (topic-anchored) background prompt and rebuild, up to N retries."""
+    if not topic:
+        topic = _IMG_TOPIC
     for attempt in range(1, _SHOT_RELEVANCE_RETRIES + 1):
         # Judge checks the chapter card prompt against BOTH the article topic
-        # (via _IMG_TOPIC) AND the chapter name itself (Joe 2026-08-09).
+        # and the chapter name itself (Joe 2026-08-09).
         relevant, note = _llm_judge_prompt_relevance(
-            prompt, f"CHAPTER CARD {n}: {title}")
+            prompt, f"CHAPTER CARD {n}: {title}", topic)
         if relevant:
             return prompt
         print(f"  [CARD] relevance miss ({attempt}/{_SHOT_RELEVANCE_RETRIES}): {note}")
-        bg = _llm_chapter_bg_prompt(title, n)
+        bg = _llm_chapter_bg_prompt(title, n, topic)
         if not bg:
             break
         prompt = (f"{_style_inject()}. {bg}. A clean cinematic documentary "
@@ -4355,7 +4366,8 @@ def _black_placeholder(episode_num: int) -> str:
     return out
 
 
-def _llm_chapter_bg_prompt(title: str, chapter_num: int) -> str:
+def _llm_chapter_bg_prompt(title: str, chapter_num: int,
+                           topic: str = None) -> str:
     """Ask the local LLM to imagine a striking background scene for a chapter.
 
     The chapter title/name is the only context given - the LLM invents a
@@ -4363,6 +4375,8 @@ def _llm_chapter_bg_prompt(title: str, chapter_num: int) -> str:
     title card text will sit on top of. Returns a short image-prompt string,
     or '' if the LLM is unreachable / returns nothing usable.
     """
+    if not topic:
+        topic = _IMG_TOPIC
     if not (title or "").strip():
         return ""
     try:
@@ -4377,7 +4391,7 @@ def _llm_chapter_bg_prompt(title: str, chapter_num: int) -> str:
                          "image prompt. No text, no dialogue, no characters' faces, "
                          "no words, no watermarks.")},
             {"role": "user",
-             "content": f"ARTICLE TOPIC: {_IMG_TOPIC or '(not provided)'}\n"
+             "content": f"ARTICLE TOPIC: {topic or '(not provided)'}\n"
                         f"Chapter {chapter_num}: {title}. Background scene:"},
         ]
         out = _llm_chat(msgs, max_tokens=120, temp=0.7).strip()
@@ -4389,7 +4403,8 @@ def _llm_chapter_bg_prompt(title: str, chapter_num: int) -> str:
         return ""
 
 
-def _generate_chapter_card(shot: dict, episode_num: int) -> Optional[str]:
+def _generate_chapter_card(shot: dict, episode_num: int,
+                           topic: str = None) -> Optional[str]:
     """Render a chapter TITLE CARD image via the active image backend.
 
     GPT Image 2 / Codex CLI renders text very well, so when IMAGE_BACKEND is
@@ -4450,7 +4465,7 @@ def _generate_chapter_card(shot: dict, episode_num: int) -> Optional[str]:
         )
     # LLM relevance gate: cross-check the card background against the article
     # topic so it matches the STORY, not an off-topic scene (Joe 2026-08-09).
-    prompt = _ensure_card_prompt_relevant(prompt, title, n)
+    prompt = _ensure_card_prompt_relevant(prompt, title, n, topic)
     print(f"  [CARD] rendering chapter {n:02d} title card via {backend}...")
     seed = 90000 + n * 137 + episode_num
     ok = _krea_generate(prompt, seed, out, ref_images=None, denoise=1.0,
@@ -6604,7 +6619,8 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                         context: Optional[dict] = None,
                         location_sheets: Optional[dict] = None,
                         prop_assets: Optional[dict] = None,
-                        brand_assets: Optional[dict] = None) -> list[dict]:
+                        brand_assets: Optional[dict] = None,
+                        topic: str = "") -> list[dict]:
     """Generate ALL shot images locally with Krea 2 Turbo (ComfyUI) to
     1920x1080 (in-graph FaceUpDAT upscale from 1280x720) + style-card grade.
 
@@ -6680,7 +6696,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
               f"in parallel ({_cn} workers)...")
 
         def _render_card(_cs):
-            _c = _generate_chapter_card(_cs, episode_num)
+            _c = _generate_chapter_card(_cs, episode_num, topic)
             if _c:
                 _cs["image_path"] = _c
                 return (f"  [CARD] chapter {_cs.get('chapter_num', 1)}: "
@@ -6720,7 +6736,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             # card text isn't doubled.
             card = shot.get("image_path")
             if not (card and os.path.isfile(card) and "chapter_" in os.path.basename(card)):
-                card = _generate_chapter_card(shot, episode_num)
+                card = _generate_chapter_card(shot, episode_num, topic)
             shot["image_path"] = card if card else black
             if card:
                 with _plock:
@@ -6741,7 +6757,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         prompt = _build_shot_prompt(shot, character_sheets) + " " + _style_inject()
         # LLM relevance gate (Joe 2026-08-09): cross-check the prompt against the
         # article topic; rewrite the scene + rebuild if it drifted off-story.
-        prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock)
+        prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock, topic)
         # Panels were built up front by _build_all_character_sheets (before the
         # shot loop); _select_shot_refs just picks the PERFECT panel(s) here.
         refs, notes = _select_shot_refs(shot, sheets, brand_assets)
@@ -8599,6 +8615,16 @@ def _preflight() -> bool:
     print()
     return ok
 
+def _resume_file_for(ep_num: int) -> Path:
+    """Resume-state path for a specific episode: .resume_state.ep{NNN}.json for
+    ep>0, else the legacy .resume_state.json. Thread-safe (derived from the ep
+    number, no global mutation) so a batch can save/resume many episodes in
+    parallel without clobbering each other."""
+    return (PROJECT_DIR / f".resume_state.ep{int(ep_num):03d}.json"
+            if ep_num and int(ep_num) > 0
+            else PROJECT_DIR / ".resume_state.json")
+
+
 def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topic: str = "",
                        shots: Optional[list] = None, character_sheets: Optional[dict] = None,
                        titles: Optional[list] = None, description: str = "",
@@ -8608,7 +8634,8 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
                        anchor_events: Optional[list] = None,
                        location_sheets: Optional[dict] = None,
                        prop_assets: Optional[dict] = None,
-                       target_paras: int = 0) -> None:
+                       target_paras: int = 0,
+                       resume_file: Optional[Path] = None) -> None:
     """Save episode state so it can be resumed if interrupted."""
     state = {
         "version": 3,
@@ -8633,14 +8660,15 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
         "anchor_events": anchor_events or [],
     }
     try:
-        tmp = RESUME_FILE.with_suffix(".tmp")
+        rf = resume_file or _resume_file_for(episode_num)
+        tmp = rf.with_suffix(".tmp")
         tmp.write_text(json.dumps(state, indent=2, default=str))
-        tmp.replace(RESUME_FILE)
+        tmp.replace(rf)
         # Backup: keep the previous good state alongside the main file so a
         # lost/corrupt/overwritten main file can never silently kill the
         # resume prompt (load falls back to the .bak).
         try:
-            RESUME_FILE.with_name(RESUME_FILE.name + ".bak").write_text(
+            rf.with_name(rf.name + ".bak").write_text(
                 json.dumps(state, indent=2, default=str))
         except Exception:
             pass
@@ -8672,14 +8700,52 @@ def _load_resume_state() -> Optional[dict]:
     return None
 
 
-def _clear_resume_state() -> None:
+def _clear_resume_state(episode_num: int = 0, resume_file: Optional[Path] = None) -> None:
     try:
-        for f in (RESUME_FILE, RESUME_FILE.with_name(RESUME_FILE.name + ".bak")):
+        rf = resume_file or _resume_file_for(episode_num)
+        for f in (rf, rf.with_name(rf.name + ".bak")):
             if f.exists():
                 f.unlink()
         print("  [STATE] Resume state cleared")
     except Exception:
         pass
+
+
+def _set_resume_ep(ep_num: int) -> None:
+    """Point the module-level RESUME_FILE at a specific episode's state file so a
+    single process can save/load/resume MANY episodes in one batch. ep_num<=0
+    -> the legacy single .resume_state.json."""
+    global RESUME_FILE
+    if ep_num and int(ep_num) > 0:
+        RESUME_FILE = PROJECT_DIR / f".resume_state.ep{int(ep_num):03d}.json"
+    else:
+        RESUME_FILE = PROJECT_DIR / ".resume_state.json"
+
+
+def _scan_resume_states() -> list:
+    """Every valid resume state on disk (legacy + per-episode), newest first.
+    Each carries '_file' + '_ep'. Used for the resume-all batch flow."""
+    found = []
+    seen = set()
+    for f in sorted(PROJECT_DIR.glob(".resume_state*.json"),
+                    key=lambda p: p.stat().st_mtime, reverse=True):
+        name = f.name
+        if name.endswith(".bak") or name.endswith(".tmp") or name in seen:
+            continue
+        # dedupe against the sibling .bak (only keep the live file)
+        base = name.rsplit(".bak", 1)[0] if name.endswith(".bak") else name
+        seen.add(base)
+        try:
+            state = json.loads(f.read_text())
+            if state.get("version") not in (1, 2, 3):
+                continue
+            state["_file"] = str(f)
+            m = re.search(r"\.ep(\d{1,3})\.json$", name)
+            state["_ep"] = int(m.group(1)) if m else int(state.get("episode_num", 0))
+            found.append(state)
+        except Exception:
+            continue
+    return found
 
 
 def _yn(prompt: str, default: bool = False) -> bool:
@@ -8952,7 +9018,7 @@ def _resume_episode(state: dict) -> None:
         print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards "
               f"in parallel ({_image_concurrency()} workers)...")
         def _rcard(_cs):
-            _card = _generate_chapter_card(_cs, episode_num)
+            _card = _generate_chapter_card(_cs, episode_num, topic)
             if _card:
                 _cs["image_path"] = _card
             return (f"  [CARD] chapter {_cs.get('chapter_num')}: "
@@ -9015,7 +9081,7 @@ def _resume_episode(state: dict) -> None:
                       + " " + _style_inject())
             # LLM relevance gate (Joe 2026-08-09): cross-check the prompt against
             # the article topic; rewrite the scene + rebuild if it drifted off-story.
-            prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock)
+            prompt = _ensure_shot_prompt_relevant(prompt, shot, character_sheets, _plock, topic)
             if face_lock and _active_image_backend() != "codex":
                 # Panels were built up front by _build_all_character_sheets -
                 # just confirm every char in this shot is present.
@@ -9220,7 +9286,7 @@ def _resume_episode(state: dict) -> None:
     print(f"  Shots: {len(shots)} | Stage: {stage} -> upload")
 
     _cleanup_stt_artifacts(episode_num)
-    _clear_resume_state()
+    _clear_resume_state(episode_num)
 
 
 def _ask_paragraph_target() -> int:
@@ -9267,8 +9333,8 @@ def _ask_paragraph_target() -> int:
             except ValueError:
                 continue
 
-
 def main():
+    # ---- CLI flag handlers (kept from the original single-file flow) ----
     if "--setup-discord" in sys.argv:
         try:
             import discord_bot
@@ -9328,23 +9394,93 @@ def main():
             p = _find_logo(org)
             print(f"  {org}: {p or 'FAILED (no SERPAPI_API_KEY? see .env)'}")
         return
+
+    # ---- Orchestrator: resume-all scan, then single or fresh batch ----
     print_banner()
     _preflight()
 
-    # Check for a resumable episode (state survives crashes until completion)
-    resume_state = _load_resume_state()
-    if resume_state:
-        ep = resume_state.get("episode_num", 0)
-        stg = resume_state.get("stage", "?")
-        resp = input(f"\n  Resume episode #{ep:03d} (stage '{stg}')? [Y/n]: ").strip().lower()
-        if resp not in ("n", "no"):
-            _resume_episode(resume_state)
-            return
-        print("  [RESUME] Skipping - starting a fresh episode")
+    # 1. Offer to resume EVERY existing resume state (legacy + per-episode).
+    states = _scan_resume_states()
+    to_resume = []
+    if states:
+        print(f"\n  [RESUME] Found {len(states)} saved episode(s) in progress:")
+        for st in states:
+            ep = st.get("episode_num", st.get("_ep", 0))
+            stg = st.get("stage", "?")
+            resp = input(f"    Resume episode #{ep:03d} (stage '{stg}')? [Y/n]: ").strip().lower()
+            if resp not in ("n", "no"):
+                to_resume.append(st)
+        if to_resume:
+            if len(to_resume) == 1:
+                print(f"  [RESUME] Resuming {len(to_resume)} episode\n")
+            else:
+                print(f"  [RESUME] Resuming {len(to_resume)} episodes in sequence\n")
+            run_resume_all(to_resume)
+            # If resumed episodes fully completed, continue to fresh batch for the rest
+            states_after = [s for s in states if s not in to_resume]
+            if not _yn("  Start a FRESH batch of new videos as well? [y/N]", default=False):
+                input("  Press Enter to exit...")
+                return
+        else:
+            print("  [RESUME] Skipping all saved episodes - starting fresh\n")
 
-    # Ask for the episode number every run (default = last + 1)
+    # 2. Ask how many videos for the fresh batch.
+    resp = input(f"\n  How many videos to generate in this batch? (1 for a single video) [1]: ").strip()
+    try:
+        count = int(resp) if resp else 1
+    except ValueError:
+        count = 1
+    count = max(1, min(count, 50))
+    if count == 1:
+        print("\n  Single-video mode\n")
+    else:
+        print(f"\n  BATCH MODE: {count} videos\n")
+
+    # 3. Run the exact setup flow once per video (topic, models, length,
+    #    resolution, etc), then process them all.
     last_ep = _load_episode_num()
     default_ep = last_ep + 1
+    configs = []
+    for i in range(count):
+        ep_num = default_ep + i
+        print(f"\n{'='*60}\n  VIDEO {i+1}/{count} - SETUP (Episode #{ep_num:03d})\n{'='*60}")
+        cfg = _episode_setup(ep_num)
+        if cfg is None:
+            print("  [SETUP] Skipped this video (no story / aborted).")
+            continue
+        configs.append(cfg)
+        # next video picks up after this episode's number
+        default_ep = cfg["episode_num"] + 1
+
+    if not configs:
+        print("  [HALT] No videos to generate.")
+        input("  Press Enter to exit...")
+        return
+
+    if len(configs) == 1:
+        run_episode(configs[0])
+    else:
+        run_fresh_batch(configs)
+
+    print("\n  All done! Press Enter to exit.")
+    input()
+
+
+def _apply_config_env(config: dict) -> None:
+    os.environ["RESOLUTION"] = str(config.get("resolution", "1080p"))
+    os.environ["THUMBNAIL_BACKEND"] = str(config.get("thumb_backend", "fal"))
+    if config.get("thumb_model"):
+        os.environ["THUMBNAIL_MODEL"] = str(config["thumb_model"])
+    os.environ["IMAGE_BACKEND"] = str(config.get("img_backend", "local"))
+    os.environ["IMAGE_MODEL"] = str(config.get("img_model", "krea2-turbo"))
+    if config.get("style"):
+        os.environ["STYLE"] = str(config["style"])
+    os.environ["REGEN_IMAGES"] = "1" if config.get("regen_images") else "0"
+
+
+def _episode_setup(default_ep: int):
+    """Run ALL setup prompts for ONE video. Returns a config dict, or None if the
+    user aborted / no story was found. Does no heavy generation."""
     resp = input(f"  Episode number? (enter for {default_ep}): ").strip()
     try:
         episode_num = int(resp) if resp else default_ep
@@ -9353,44 +9489,30 @@ def main():
         episode_num = default_ep
     print(f"\n  Episode #{episode_num:03d}")
 
-    # 1a. Video length: paragraph target up front, with estimated runtime +
-    #     confirm/change loop. Persisted to resume state so a resumed job
-    #     sticks with the count it started with (never re-asked).
     target_paras = _ask_paragraph_target()
     print(f"  [LENGTH] Target {target_paras} narration paragraphs\n")
 
-    # 1b. Output resolution: 1080p or 4K (affects the image upscale target AND
-    #     the final FFmpeg video output). Persisted to resume state.
     res = _ask_resolution()
     os.environ["RESOLUTION"] = res
     print(f"  [RES] Output resolution: {res.upper()} "
           f"({_get_output_resolution()[0]}x{_get_output_resolution()[1]})\n")
 
-    # 1c. Thumbnail provider: local / fal / runpod (sets THUMBNAIL_BACKEND).
     thumb_backend, thumb_model = _ask_thumbnail_backend()
     os.environ["THUMBNAIL_BACKEND"] = thumb_backend
     if thumb_model:
         os.environ["THUMBNAIL_MODEL"] = thumb_model
     print(f"  [THUMB] Thumbnail provider: {thumb_backend} ({thumb_model})\n")
 
-    # 1c1. Episode image provider: local / fal / runpod / codex (sets
-    #      IMAGE_BACKEND / IMAGE_MODEL for ALL shot images). Ask separately
-    #      from the thumbnail provider - they can use different backends.
     img_backend, img_model = _ask_image_backend()
     os.environ["IMAGE_BACKEND"] = img_backend
     os.environ["IMAGE_MODEL"] = img_model
     print(f"  [IMG] Episode image provider: {img_backend} ({img_model})\n")
 
-    # 1c2. ComfyUI gate AFTER the backends are chosen: only the LOCAL image
-    #      backend needs the ComfyUI server (Krea 2 gen). Codex / fal / runpod
-    #      run fine without it (FaceUpDAT upscale runs directly in Python).
-    #      Warn if a local backend was picked but ComfyUI is down, and let the
-    #      user swap to a cloud backend rather than blocking the whole run.
+    # ComfyUI gate (only local backends need it)
     _needs_comfy = (thumb_backend == "local" or img_backend == "local")
     if _needs_comfy:
         try:
-            req = urllib.request.Request("http://127.0.0.1:8188/system_stats",
-                                         method="GET")
+            req = urllib.request.Request("http://127.0.0.1:8188/system_stats", method="GET")
             with urllib.request.urlopen(req, timeout=4) as r:
                 _comfy_ok = r.status == 200
         except Exception:
@@ -9405,15 +9527,11 @@ def main():
                               "n = abort): ").strip().lower()
                 if _cont in ("n", "no"):
                     print("  [ABORT] ComfyUI not running. Start it, then re-run.")
-                    return
+                    return None
                 print("  [OK] Continuing with local backend despite ComfyUI being down.\n")
             else:
-                # Only thumbnail is local - episode images are fine, just warn.
                 print("         Only your THUMBNAIL backend is local; continuing.\n")
 
-    # 1d. Image generation mode: resume existing or re-generate (overwrite).
-    #     Then pick the style; a style DIFFERENT from the current/resume style
-    #     forces re-generate so the new look actually applies to the images.
     _cur_style = _active_style_name()
     regen_images = _ask_image_regen()
     chosen_style = _ask_style_selection(_cur_style)
@@ -9427,80 +9545,70 @@ def main():
     os.environ["REGEN_IMAGES"] = "1" if regen_images else "0"
     print(f"  [IMAGES] mode: {'RE-GENERATE (overwrite all)' if regen_images else 'resume (keep existing)'}\n")
 
-    # 1. Find a story
     article_url, article_title = _pick_story()
     if not article_url:
         print("  [HALT] No story found. Check RSS feeds.")
-        input("  Press Enter to exit...")
-        return
-    topic = article_title
+        return None
 
-    # 2. Fetch article
+    return {
+        "episode_num": episode_num,
+        "target_paras": target_paras,
+        "resolution": res,
+        "thumb_backend": thumb_backend,
+        "thumb_model": thumb_model,
+        "img_backend": img_backend,
+        "img_model": img_model,
+        "regen_images": regen_images,
+        "style": chosen_style or "",
+        "article_url": article_url,
+        "topic": article_title,
+    }
+
+
+def _phase_llm(config: dict):
+    """Run ALL the LLM stages for one episode (article -> narration -> shots ->
+    world assets) and START its TTS worker. Returns an ep_ctx dict, or None."""
+    _apply_config_env(config)
+    episode_num = config["episode_num"]
+    article_url = config["article_url"]
+    topic = config["topic"]
+    target_paras = config["target_paras"]
+
     paragraphs = fetch_article_paragraphs(article_url)
     if paragraphs:
-        # LLM relevance rating: discard paragraphs scoring <= 4/10 so
-        # off-topic webpage content (ads, self-promo) never reaches the narration
-        paragraphs = _rate_paragraph_relevance(article_title, paragraphs)
+        paragraphs = _rate_paragraph_relevance(topic, paragraphs)
     if not paragraphs:
         print("  [HALT] Could not extract article content.")
-        input("  Press Enter to exit...")
-        return
+        return None
 
-    # 2a. STORY BIBLE FIRST: lock the structure + REAL character roster from
-    #     the article, BEFORE the script is written. The narration is then
-    #     written to FOLLOW this bible (FERN visual hook + Isaac's hero's
-    #     journey / deeper-problem framework).
     print("\n[BIBLE] Building story bible from the article (before script)...")
-    story_bible = _build_story_bible(article_title, paragraphs)
+    story_bible = _build_story_bible(topic, paragraphs)
 
-    # 3. Stage 1: narration script (follows the story bible)
     narration = _build_narration_script(paragraphs, target_paras, bible=story_bible)
-
-    # 3b. Rate each narration segment against the topic, discard <= 4/10
     if narration:
-        narration = _rate_paragraph_relevance(article_title, narration)
+        narration = _rate_paragraph_relevance(topic, narration)
         if not narration:
             print("  [FILTER] All narration segments off-topic, rebuilding from filtered article...")
             narration = _build_narration_script(paragraphs, target_paras, bible=story_bible)
-
-    # 3b1. Drop back-to-back same-location repeats BEFORE chapter/anchors/
-    #      establishing so every derived index map stays aligned.
     narration = _dedupe_consecutive_locations(narration)
-
-    # 3c. Chapter pass: insert 'Chapter N - Title' paragraphs (black cards)
     narration, chapter_events = _insert_chapter_markers(narration)
-    # 3d. Location/timeline anchors -> red/green bottom-left typewriter titles
     anchor_events = _extract_anchor_events(narration)
 
-    # 3d1. Establishing shots: inject a wide/full establishing frame shot before
-    #      the first mention of each unique location and character, so a new
-    #      place/person gets a proper establishing shot (with shutter cut) on
-    #      first introduction instead of jumping straight into the scene.
     establishing_map = {}
     if story_bible:
         narration, establishing_map = _inject_establishing_shots(
             narration, bible=story_bible, anchor_events=anchor_events)
 
-    # 3e. START TTS IN PARALLEL: queue ALL narration into PocketTTS in a
-    # background thread, while the main thread builds the bible, scene board
-    # and images. TTS and image gen run at the same time.
+    # START TTS IN PARALLEL (background thread) so it runs while we build the
+    # world + images (codex/API) below.
     tts_thread, tts_results, tts_stop = _start_tts_worker(narration, episode_num)
 
-    # 3f. Episode world (works for ANY topic/environment/location)
-    context = _build_episode_context(article_title, paragraphs)
-
-    # 3g. Director's bible: deeper problem, transformation, chapter moods,
-    #     hero paragraphs (ECU magnification) - the plan before any image.
-    bible = _build_directors_bible(article_title, narration)
-
-    # 3h. Scene board: one storyboard card per narration beat, saved to the
-    #     episode folder for review before image generation.
-    _build_scene_board(narration, article_title, episode_num)
-
-    # 3i. Duration planning: per-chapter runtime estimates vs target length.
+    context = _build_episode_context(topic, paragraphs)
+    bible = _build_directors_bible(topic, narration)
+    _build_scene_board(narration, topic, episode_num)
     _plan_durations(narration)
 
-    # 3j. Style test frame (active image backend) + human review gate.
+    # Style test frame (no human gate - Joe 2026-08-09)
     style_test = str(SHOTS_DIR / f"ep{episode_num:03d}" / "style_test.png")
     st_env = ", ".join(context.get("environments", [])) or "the primary setting"
     print(f"\n[STYLE] generating style test frame ({_active_image_backend()})...")
@@ -9510,37 +9618,22 @@ def main():
         4242 + episode_num, style_test)
     if os.path.isfile(style_test):
         print(f"  [STYLE] test frame: {style_test}")
-        # No human gate here - Joe 2026-08-09: removed the "Approve style +
-        # director's bible?" prompt so unattended codex runs don't stall. The
-        # bible is used as-is; style changes are handled by the STYLE env var.
     else:
         print("  [STYLE] test frame failed (ComfyUI not running?) - continuing")
 
-    # 4. Stage 2: shot list from narration (bible + episode world injected;
-    #    chapter paras become black cards). Merge the story bible's REAL
-    #    character roster into the directors bible so the shot list uses only
-    #    the article's actual people (never a stale/invented name).
     _shot_bible = dict(bible or {})
     if story_bible and story_bible.get("characters"):
         _shot_bible["characters"] = story_bible["characters"]
     shots = _build_shot_list(narration, bible=_shot_bible, context=context,
                              establishing_map=establishing_map)
 
-    # 4a. Easter egg: ask whether to hide one, pick the egg (duck pope built-in
-    #     or add-new), and inject it into EXACTLY one shot of the episode.
     easter_egg = _ask_easter_egg()
     if easter_egg:
         _inject_easter_egg(shots, easter_egg)
 
-    # 4b. Stage 2b: character sheets for every named character (bible's
-    #     gender/age drive the archetype so the cast matches the article)
     character_sheets = _build_character_sheets(shots, narration, bible=story_bible)
-    # 4c0. Brand logos: detect AI companies/models and real businesses in the
-    #      article, ensure their logos are cached (search -> cache -> reuse),
-    #      and render the context-appropriate asset: hacker computer screen
-    #      (entity/product talk, prop style sheet + logo) or logo on a
-    #      building (HQ talk, location style sheet + logo).
-    brands = _extract_brands(article_title, paragraphs, narration)
+
+    brands = _extract_brands(topic, paragraphs, narration)
     if brands:
         print(f"\n  [BRAND] businesses detected: {', '.join(brands)}")
         for _b, _ctx in brands.items():
@@ -9552,51 +9645,72 @@ def main():
         print("\n  [BRAND] no businesses/AI models detected - no brand assets")
     brand_assets = _scan_brand_assets()
 
-    # 4c. Stage 2c: stylized location sheets (6-grid per location) + prop
-    #     assets (front/back each) from the episode world - the STYLE chain:
-    #     style plate styles these ASSETS, shots then use ONLY the styled
-    #     assets as refs (no style plate in the shot).
     location_sheets = _build_location_sheets(
-        context, 42000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}",
-        brands=brands)
+        context, 42000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}", brands=brands)
     prop_assets = _build_prop_assets(
-        context, 43000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}",
-        brands=brands)
+        context, 43000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}", brands=brands)
+
     _save_resume_state("story", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
                        anchor_events=anchor_events,
                        location_sheets=location_sheets, prop_assets=prop_assets,
                        target_paras=target_paras)
 
-    # 4z. Wait for ALL TTS to finish BEFORE generating images. TTS (PocketTTS)
-    #     and image gen (ComfyUI/Krea) both hammer the GPU - running them
-    #     concurrently causes VRAM contention. Finish every narration clip
-    #     first, then free the GPU for the image pass.
+    return {
+        "config": config,
+        "episode_num": episode_num, "article_url": article_url, "topic": topic,
+        "target_paras": target_paras, "paragraphs": paragraphs,
+        "narration": narration, "chapter_events": chapter_events,
+        "anchor_events": anchor_events, "context": context, "bible": bible,
+        "story_bible": story_bible, "shot_bible": _shot_bible,
+        "shots": shots, "character_sheets": character_sheets,
+        "brands": brands, "brand_assets": brand_assets,
+        "location_sheets": location_sheets, "prop_assets": prop_assets,
+        "tts_thread": tts_thread, "tts_results": tts_results, "tts_stop": tts_stop,
+    }
+
+
+def _phase_tts_join(ep_ctx: dict) -> None:
+    _apply_config_env(ep_ctx["config"])
     print("\n[TTS] Waiting for ALL narration clips to finish before image generation...")
-    tts_thread.join(timeout=1800)
-    _finalize_tts(shots, tts_results, episode_num)
-    _save_resume_state("tts", episode_num, article_url, topic, shots,
-                       character_sheets, chapter_events=chapter_events,
-                       anchor_events=anchor_events,
-                       location_sheets=location_sheets, prop_assets=prop_assets,
-                       target_paras=target_paras)
+    ep_ctx["tts_thread"].join(timeout=1800)
+    _finalize_tts(ep_ctx["shots"], ep_ctx["tts_results"], ep_ctx["episode_num"])
+    _save_resume_state("tts", ep_ctx["episode_num"], ep_ctx["article_url"], ep_ctx["topic"],
+                       ep_ctx["shots"], ep_ctx["character_sheets"],
+                       chapter_events=ep_ctx["chapter_events"], anchor_events=ep_ctx["anchor_events"],
+                       location_sheets=ep_ctx["location_sheets"], prop_assets=ep_ctx["prop_assets"],
+                       target_paras=ep_ctx["target_paras"])
 
-    # 5. Generate images (Krea 2 Turbo local, character sheet prepended,
-    #    angle-matched view, face-lock portraits).
-    _set_img_topic(topic)   # for the LLM prompt-relevance gate (Joe 2026-08-09)
-    shots = _generate_all_shots(shots, character_sheets, episode_num=episode_num,
-                                context=context,
-                                location_sheets=location_sheets,
-                                prop_assets=prop_assets,
-                                brand_assets=brand_assets)
-    _save_resume_state("images", episode_num, article_url, topic, shots,
-                       character_sheets, chapter_events=chapter_events,
-                       anchor_events=anchor_events,
-                       location_sheets=location_sheets, prop_assets=prop_assets,
-                       target_paras=target_paras)
 
-    # 6b. Title pass: whisper the voice track, resolve exact title times so
-    #     the typewriter/glitch/shutter SFX + title cards match the narration.
+def _phase_images(ep_ctx: dict) -> None:
+    _apply_config_env(ep_ctx["config"])
+    ep_ctx["shots"] = _generate_all_shots(
+        ep_ctx["shots"], ep_ctx["character_sheets"], episode_num=ep_ctx["episode_num"],
+        context=ep_ctx["context"], location_sheets=ep_ctx["location_sheets"],
+        prop_assets=ep_ctx["prop_assets"], brand_assets=ep_ctx["brand_assets"],
+        topic=ep_ctx["topic"])
+    _save_resume_state("images", ep_ctx["episode_num"], ep_ctx["article_url"], ep_ctx["topic"],
+                       ep_ctx["shots"], ep_ctx["character_sheets"],
+                       chapter_events=ep_ctx["chapter_events"], anchor_events=ep_ctx["anchor_events"],
+                       location_sheets=ep_ctx["location_sheets"], prop_assets=ep_ctx["prop_assets"],
+                       target_paras=ep_ctx["target_paras"])
+
+
+def _phase_finish(ep_ctx: dict) -> None:
+    _apply_config_env(ep_ctx["config"])
+    episode_num = ep_ctx["episode_num"]
+    topic = ep_ctx["topic"]
+    article_url = ep_ctx["article_url"]
+    shots = ep_ctx["shots"]
+    character_sheets = ep_ctx["character_sheets"]
+    chapter_events = ep_ctx["chapter_events"]
+    anchor_events = ep_ctx["anchor_events"]
+    location_sheets = ep_ctx["location_sheets"]
+    prop_assets = ep_ctx["prop_assets"]
+    target_paras = ep_ctx["target_paras"]
+    story_bible = ep_ctx["story_bible"]
+
+    # 6b. Title pass: whisper the voice track, resolve exact title times.
     title_events = []
     person_events = []
     if shots:
@@ -9609,24 +9723,19 @@ def main():
         clip_starts = _compute_clip_starts(shots)
         title_events = _build_resolved_title_events(
             chapter_events, anchor_events + person_events, words, clip_starts)
-        # Establishing shots render clean - merge their FFmpeg '/// NAME' labels
-        # so every establishing frame gets exactly one burned label (Joe 2026-08-09).
         title_events = _merge_establishing_titles(
             title_events, _build_establishing_events(shots, clip_starts))
         for ev in title_events:
             print(f"    [{ev['kind']}] @{ev['start']:.2f}s '{ev.get('text', ev.get('title', ''))}'")
         _save_resume_state("titles", episode_num, article_url, topic, shots,
                            character_sheets, chapter_events=chapter_events,
-                           anchor_events=anchor_events,
-                           location_sheets=location_sheets, prop_assets=prop_assets,
-                       target_paras=target_paras)
+                           anchor_events=anchor_events, location_sheets=location_sheets,
+                           prop_assets=prop_assets, target_paras=target_paras)
 
-    # 7. Render 1080p with full audio mix (voice+music+SFX+title SFX), black
-    #    chapter placeholders, shutter black frames, then burn the titles.
+    # 7. Render 1080p with full audio mix, then burn the titles.
     video_path = _render_video(shots, episode_num, title_events)
     if not video_path:
         print("  [HALT] Video render failed.")
-        input("  Press Enter to exit...")
         return
     _save_resume_state("video", episode_num, article_url, topic, shots,
                        character_sheets, titles=[], description="",
@@ -9638,10 +9747,7 @@ def main():
     if egg_report:
         print(f"\n  {egg_report}")
 
-    # 8. Titles + description (3 titles scored by Google Trends + YouTube
-    #    competition, best first). Uses the story bible's visual hook +
-    #    deeper question (FERN framework). Chapters + Discord link appended
-    #    below as usual.
+    # 8. Titles + description
     titles = _generate_titles(topic, episode_num, bible=story_bible)
     for i, t in enumerate(titles):
         print(f"  Title {i+1}: {t}")
@@ -9667,14 +9773,13 @@ def main():
                        location_sheets=location_sheets, prop_assets=prop_assets,
                        target_paras=target_paras)
 
-    # 10. Upload to Split Node channel
+    # 10. Upload
+    video_id = None
     if YOUTUBE_UPLOAD_ENABLED:
         print(f"\n  {'='*50}\n  YOUTUBE UPLOAD ({CHANNEL_NAME})\n  {'='*50}")
         print(f"  Video: {video_path}")
         title = titles[0] if titles else f"#{episode_num:03d} - {topic[:60]}"
         print(f"  Title: {title}")
-        # Auto-upload setup: if the user hasn't authorized yet, prompt for
-        # their YouTube API secret .json (instructions + link in the log).
         _ensure_youtube_secret()
         video_id = _upload_video_with_progress(video_path, title, description, tags_str)
         if video_id and thumb_ok:
@@ -9683,7 +9788,6 @@ def main():
             _add_video_to_playlist(video_id)
             EPISODE_COUNTER_FILE.write_text(str(episode_num))
             print(f"  [OK] Episode #{episode_num:03d} uploaded! https://youtu.be/{video_id}")
-            # Announce to Discord: wait 60s, then post description + hype + link
             _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60,
                                        description=description)
         else:
@@ -9705,10 +9809,88 @@ def main():
     print(f"  Video:   {video_path}")
     if YOUTUBE_UPLOAD_ENABLED:
         print(f"  YouTube: {f'https://youtu.be/{video_id}' if video_id else 'NOT UPLOADED'}")
-    print(f"\n  Done! Press Enter to exit.")
     _cleanup_stt_artifacts(episode_num)
-    _clear_resume_state()
-    input()
+    _clear_resume_state(episode_num)
+
+
+def run_episode(config: dict) -> None:
+    """Single-video pipeline (uses per-episode resume state)."""
+    print(f"\n  {'='*60}\n  EPISODE #{config['episode_num']:03d}\n  {'='*60}")
+    ep_ctx = _phase_llm(config)
+    if not ep_ctx:
+        return
+    if config["img_backend"] == "local":
+        # local Krea: TTS fully done first (GPU contention), then images
+        _phase_tts_join(ep_ctx)
+        _phase_images(ep_ctx)
+    else:
+        # codex/API: images run DURING TTS (remote gen, no local GPU)
+        _phase_images(ep_ctx)
+        _phase_tts_join(ep_ctx)
+    _phase_finish(ep_ctx)
+
+
+def run_resume_all(states: list) -> None:
+    """Resume every chosen episode state, in sequence."""
+    for st in states:
+        ep = st.get("episode_num", st.get("_ep", 0))
+        stg = st.get("stage", "?")
+        print(f"\n  {'='*60}\n  RESUMING Episode #{ep:03d} (stage '{stg}')\n  {'='*60}")
+        try:
+            _resume_episode(st)
+        except Exception as e:
+            print(f"  [RESUME] Episode #{ep:03d} failed: {e}")
+            continue
+
+
+def run_fresh_batch(configs: list) -> None:
+    """Batch pipeline for N fresh videos.
+
+    Phase 1: run ALL LLM stages for every video and queue TTS for all.
+    Phase 2: image gen for all.
+      - local Krea 2 selected -> image gen for all AFTER all TTS is done (GPU).
+      - codex/API (thumbnail + image) -> image gen runs SIMULTANEOUSLY with TTS.
+    Phase 3: render/metadata/thumbnail/upload each."""
+    print(f"\n{'='*60}\n  BATCH: generating {len(configs)} videos\n{'='*60}")
+
+    # Phase 1: LLM + start TTS for ALL
+    ctxs = []
+    for cfg in configs:
+        print(f"\n--- Episode #{cfg['episode_num']:03d}: LLM / script ---")
+        ctx = _phase_llm(cfg)
+        if ctx:
+            ctxs.append(ctx)
+    if not ctxs:
+        print("  [HALT] No episodes could be prepared.")
+        return
+
+    local = all(c.get("img_backend") == "local" for c in configs)
+    if local:
+        # local Krea: finish ALL TTS first (GPU contention), then image gen all.
+        for ctx in ctxs:
+            _phase_tts_join(ctx)
+        for ctx in ctxs:
+            print(f"\n--- Episode #{ctx['episode_num']:03d}: images ---")
+            _phase_images(ctx)
+    else:
+        # codex/API: image gen for all episodes in parallel, DURING TTS.
+        _cap = max(1, min(int(os.environ.get("BATCH_CONCURRENCY", "2")), len(ctxs)))
+
+        def _img(ctx):
+            print(f"\n--- Episode #{ctx['episode_num']:03d}: images (parallel, during TTS) ---")
+            _phase_images(ctx)
+
+        with ThreadPoolExecutor(max_workers=_cap) as _ex:
+            list(_ex.map(_img, ctxs))
+        for ctx in ctxs:
+            _phase_tts_join(ctx)
+
+    # Phase 3: finish each (whisper titles -> render -> metadata -> thumb -> upload)
+    for ctx in ctxs:
+        print(f"\n--- Episode #{ctx['episode_num']:03d}: finish (render/upload) ---")
+        _phase_finish(ctx)
+
+    print(f"\n{'='*60}\n  BATCH COMPLETE ({len(ctxs)} videos)\n{'='*60}")
 
 if __name__ == "__main__":
     main()

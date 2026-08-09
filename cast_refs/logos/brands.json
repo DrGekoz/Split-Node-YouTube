@@ -1,8 +1,8 @@
 {
   "brands": {
-    "PostNL": "screen",
-    "DHL": "screen",
-    "DNB": "screen",
-    "BioCatch": "screen"
+    "OpenAI": "building",
+    "Anthropic": "screen",
+    "Hugging Face": "building",
+    "Coast Runners": "screen"
   }
 }
