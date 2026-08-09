@@ -2,6 +2,34 @@
 
 All notable changes to Split Node.
 
+## [1.38.1] - 2026-08-09
+
+### Fix run stall + pipelined chunked shot generation + chapter-card title-only logos
+
+- **FIX the random stall**: the pre-verify pass ran the LLM relevance gate AND
+  the ref-check on ALL shots up front (2 LLM calls x N shots) with zero
+  progress output - so when LM Studio got busy, each call could hang on the
+  180s timeout and the whole run died before generating a single image. Now
+  shots process in chunks.
+- **Pipelined chunked generation (5 at a time)**: the LLM verifies + ref-checks
+  a chunk of `SHOT_CHUNK_SIZE` (default 5) shots (the go-ahead), then those 5
+  fire in PARALLEL to codex, and while they generate the LLM verifies the NEXT
+  5 in a background thread (overlap) - the LLM never idles and codex never
+  waits on the LLM. Clear per-chunk `[CHUNK n] rendering (shots ...)` progress.
+  Fresh + resume paths. Override chunk size with `SHOT_CHUNK_SIZE`.
+- **Ref-check fail-fast**: added a deterministic keyword path (narration/scene
+  literally naming a cached brand or known character attaches the ref with NO
+  LLM call) and a reachability gate so the ref-check never hangs 180s when LM
+  Studio is busy.
+- **Chapter-card logo only when the title names the business**: the logo
+  image-ref is attached ONLY if the chapter TITLE itself contains the company
+  name (e.g. 'hugging face vaults' -> Hugging Face logo). A company that only
+  appears in the narration context informs the background scene but does NOT
+  get a logo ref.
+- **Chapter-card main prompt = title-derived background FIRST**, then the
+  channel style + logo injections AFTER (style/brand are finishing touches,
+  never the lead).
+
 ## [1.38.0] - 2026-08-09
 
 ### Premium adaptive image prompting: chapter cards + narration-grounded shots

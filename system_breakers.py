@@ -4411,21 +4411,23 @@ def _detect_brand_in_chapter(title: str, context: str,
                              brand_assets: dict) -> Optional[str]:
     """Find the single brand (if any) a chapter card should reference.
 
-    Checks the chapter title AND its narration context against the AI-org
-    alias registry, the curated brand list, and the on-disk logo assets - so
-    'hugging face vaults' resolves to the Hugging Face company and its real
-    logo (Joe 2026-08-09). Returns the brand name or None.
+    Joe 2026-08-09: the logo image-ref is only attached when the chapter TITLE
+    itself actually names the business (e.g. 'hugging face vaults' -> Hugging
+    Face). The narration context may mention a company that isn't in the title
+    - that should inform the background scene, NOT attach a logo (the logo is
+    a deliberate on-card credit tied to the chapter's subject, and the title is
+    the reliable signal). Returns the brand name or None.
     """
-    blob = f"{title} {context}".lower()
-    # 1. AI-org aliases (Hugging Face, OpenAI, etc.)
+    title_blob = f"{title}".lower()
+    # 1. AI-org aliases (Hugging Face, OpenAI, etc.) - title must name it.
     for org, (aliases, _q) in AI_ORGS.items():
         for a in aliases:
-            if re.search(rf"\b{re.escape(a)}\b", blob):
+            if re.search(rf"\b{re.escape(a)}\b", title_blob):
                 if _find_logo(org):
                     return org
-    # 2. Extracted/known brands with a cached logo asset
+    # 2. Extracted/known brands - only if the TITLE names it AND we have a logo.
     for name in list(_KNOWN_BRANDS) + list(brand_assets or {}):
-        if name and name.lower() in blob and _find_logo(name):
+        if name and name.lower() in title_blob and _find_logo(name):
             return name
     return None
 
@@ -4546,14 +4548,17 @@ def _generate_chapter_card(shot: dict, episode_num: int,
     # unreachable or returns nothing usable.
     bg = _llm_chapter_bg_prompt(title, n, topic, context)
     if bg:
+        # MAIN PROMPT = the chapter-title-derived background FIRST, then the
+        # channel style + logo/brand injections AFTER (Joe 2026-08-09). The
+        # title is the anchor; style/brand are finishing touches, never the lead.
         prompt = (
-            f"{_style_inject()}. {bg}.{brand_clause} A clean cinematic "
-            f"documentary chapter card background with NO text, NO words, NO "
-            f"letters, NO titles, no watermark. The composition is a striking "
-            f"themed backdrop with plenty of open negative space in the CENTRE "
-            f"for text to be overlaid later. Dark vignette, moody atmosphere, "
-            f"minimal clutter, no people as the main subject. 16:9 widescreen "
-            f"cinematic documentary background."
+            f"{bg}. A clean cinematic documentary chapter card background with "
+            f"NO text, NO words, NO letters, NO titles, no watermark. The "
+            f"composition is a striking themed backdrop with plenty of open "
+            f"negative space in the CENTRE for text to be overlaid later. Dark "
+            f"vignette, moody atmosphere, minimal clutter, no people as the "
+            f"main subject. 16:9 widescreen cinematic documentary background."
+            f" {_style_inject()}.{brand_clause}"
         )
         print(f"  [CARD] chapter {n:02d} LLM background prompt generated")
     else:
@@ -4561,10 +4566,10 @@ def _generate_chapter_card(shot: dict, episode_num: int,
             "A cinematic documentary chapter card background. Solid near-black "
             "background with subtle dark atmosphere and a faint moody glow in "
             "the centre."
-            f"{brand_clause} NO text, NO words, NO letters, NO titles, no "
-            "watermark. Clean, minimal, high contrast, professional broadcast "
-            "background plate, no photos, no people, no objects, open negative "
-            f"space in the centre. 16:9 widescreen. {_style_inject()}"
+            f" {_style_inject()}.{brand_clause} NO text, NO words, NO letters, "
+            "NO titles, no watermark. Clean, minimal, high contrast, "
+            "professional broadcast background plate, no photos, no people, no "
+            "objects, open negative space in the centre. 16:9 widescreen."
         )
     # LLM relevance gate: cross-check the card background against the article
     # topic so it matches the STORY, not an off-topic scene (Joe 2026-08-09).
@@ -6331,6 +6336,25 @@ def _llm_shot_ref_check(shot: dict, brand_assets: Optional[dict] = None,
             if _logo.is_file():
                 brand_names.append(nm)
     char_names = [c["name"] for c in _parse_shot_characters(shot)]
+
+    # FAST PATH (Joe 2026-08-09): a deterministic keyword match first. If the
+    # narration/scene literally names a cached brand or a known character, attach
+    # it WITHOUT an LLM call - this keeps the ref-check near-instant for the
+    # common case and never stalls the pre-verify pass.
+    low_text = f"{narration} {scene}".lower()
+    fast_brands, fast_chars = [], []
+    for _bn in brand_names:
+        if _bn.lower() in low_text:
+            fast_brands.append(_bn)
+    for _cn in char_names:
+        if _cn.lower() in low_text:
+            fast_chars.append(_cn)
+    # Fast path wins only if it found something definite; otherwise fall back to
+    # the LLM for ambiguous mentions. Fail-open to empty on any LLM problem.
+    if fast_brands or fast_chars:
+        return {"brands": fast_brands, "characters": fast_chars}
+    if not _llm_fast_reachable():
+        return {"brands": [], "characters": []}
     try:
         data = _llm_json([
             {"role": "system", "content":
@@ -6901,44 +6925,37 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             for _cs in _chap_shots:
                 print(_render_card(_cs))
 
-    # ---- PROMPT PRE-VERIFICATION PASS (Joe 2026-08-09) ----
-    # Build + relevance-gate EVERY shot's final prompt up front, SEQUENTIALLY,
-    # BEFORE the parallel batch is fired to codex. This catches off-topic shots
-    # (and rewrites their scenes) so a bad prompt can't sneak through mid-batch
-    # and waste a whole parallel slot on an unrelated image. The verified
-    # prompt is cached on the shot and reused by _render_one, so the parallel
-    # pool only does the actual generation (no per-shot LLM latency in the
-    # hot loop). Only runs for shots that will actually generate.
+    # ---- CHUNKED PRE-VERIFY + RENDER (Joe 2026-08-09) ----
+    # Process shots in chunks of CHUNK_SIZE (default 5): for each chunk we run
+    # the LLM prompt pre-verification + ref-check on JUST that chunk (giving the
+    # LLM the go-ahead), then fire those shots in PARALLEL, then move to the
+    # next chunk. This avoids the old stall where ALL shots were LLM-verified
+    # up front (2 LLM calls x N shots) with no visible progress - a busy LM
+    # Studio could hang the whole run on a 180s per-call timeout before a single
+    # image was generated. Now each chunk prints progress and only ever blocks
+    # on CHUNK_SIZE LLM calls at a time.
+    CHUNK = max(1, min(int(os.environ.get("SHOT_CHUNK_SIZE", "5")), len(shots) or 1))
     _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
-    _verify_todo = [s for s in shots
-                    if not s.get("is_chapter")
-                    and (_regen or not (s.get("image_path") and os.path.isfile(s.get("image_path", ""))))]
-    if _verify_todo and _SHOT_RELEVANCE_ON and topic:
-        _rewrites = 0
-        print(f"  [VERIFY] pre-verifying {len(_verify_todo)} shot prompts + "
-              f"ref-check vs story topic before the parallel batch...")
-        for _vs in _verify_todo:
-            _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
-            _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
-            if _vp != _base:
-                _rewrites += 1
-            _vs["_verified_prompt"] = _vp
-            # LLM ref-check (Joe 2026-08-09): decide which business/character
-            # refs this shot needs FROM ITS NARRATION, so the parallel pool only
-            # does generation. Cached on the shot for _select_shot_refs.
-            _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
-        print(f"  [VERIFY] {len(_verify_todo)} prompts verified, {_rewrites} scene "
-              f"rewrites applied")
-    else:
-        for _vs in shots:
-            _vs.pop("_verified_prompt", None)
-            _vs.pop("_llm_refs", None)
-        # Still run the LLM ref-check (no relevance gate) so brand/character
-        # refs are attached from narration even when SHOT_RELEVANCE is off.
-        if _verify_todo:
-            for _vs in _verify_todo:
-                _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
+    _todo = [s for s in shots
+             if not s.get("is_chapter")
+             and (_regen or not (s.get("image_path") and os.path.isfile(s.get("image_path", ""))))]
 
+    def _verify_chunk(chunk: list) -> int:
+        """LLM pre-verify + ref-check ONE chunk. Returns rewrite count."""
+        rewrites = 0
+        for _vs in chunk:
+            _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
+            _vp = _base
+            if _SHOT_RELEVANCE_ON and topic:
+                _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
+                if _vp != _base:
+                    rewrites += 1
+            _vs["_verified_prompt"] = _vp
+            _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
+        return rewrites
+
+    # Chapter shots (if any) are handled inline in _render_one via the pre-pass
+    # cards; they're excluded from _todo above. Everything else is chunked.
     _img_iter = (tqdm(shots, desc="  [IMAGES] rendering shots", unit="shot",
                       leave=False) if _HAS_PROGRESS else shots)
 
@@ -7051,13 +7068,54 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
             with _plock:
                 _img_iter.update(1)
 
+    # PIPELINED CHUNKED RENDER: LLM verifies a chunk (the go-ahead), then that
+    # chunk fires in PARALLEL while the LLM verifies the NEXT chunk in a
+    # background thread (overlap) - the LLM never idles and codex never waits on
+    # the LLM. Gives visible per-chunk progress and never blocks on more than
+    # CHUNK LLM calls at once (Joe 2026-08-09).
+    from concurrent.futures import ThreadPoolExecutor as _TPE
     _n = _image_concurrency()
-    if _n > 1 and len(shots) > 1:
-        with ThreadPoolExecutor(max_workers=_n) as ex:
-            list(ex.map(_render_one, range(len(shots)), shots))
-    else:
-        for idx, shot in enumerate(shots):  # not _img_iter: manual update() below
-            _render_one(idx, shot)
+    _chunks = [shots[i:i + CHUNK] for i in range(0, len(shots), CHUNK)]
+
+    def _verify_todo_chunk(chunk: list) -> int:
+        todo = [s for s in chunk if s in _todo]
+        if not todo:
+            return 0
+        rw = _verify_chunk(todo)
+        labels = ", ".join(str(s.get("narration_idx", 0) + 1) for s in todo)
+        print(f"  [VERIFY] chunk ({labels}):{', ' + str(rw) + ' rewrites' if rw else ''}")
+        return rw
+
+    def _render_chunk(cstart: int, chunk: list) -> None:
+        labels = ", ".join(str(s.get("narration_idx", 0) + 1) for s in chunk
+                           if s in _todo)
+        if labels:
+            print(f"  [CHUNK {cstart//CHUNK + 1}] rendering ({labels}) - "
+                  f"firing in parallel ({min(_n, len(chunk))} workers)...")
+        if _n > 1 and len(chunk) > 1:
+            with ThreadPoolExecutor(max_workers=_n) as ex:
+                list(ex.map(_render_one, range(cstart, cstart + len(chunk)), chunk))
+        else:
+            for _j, shot in enumerate(chunk):
+                _render_one(cstart + _j, shot)
+
+    # Prime: verify chunk 0's todo up front so the first render has its prompts.
+    _verify_todo_chunk(_chunks[0])
+    _next_verify = None
+    for _ci, _chunk in enumerate(_chunks):
+        _cstart = _ci * CHUNK
+        # Kick off LLM verification of the NEXT chunk in a background thread so
+        # it overlaps with the CURRENT chunk's codex generation.
+        if _ci + 1 < len(_chunks):
+            _next_verify = _TPE(max_workers=1).submit(_verify_todo_chunk, _chunks[_ci + 1])
+        else:
+            _next_verify = None
+        # Render the CURRENT chunk (its prompts are verified) in the main thread.
+        _render_chunk(_cstart, _chunk)
+        # Block until the NEXT chunk's verification finishes so its prompts are
+        # ready for the next iteration's render.
+        if _next_verify is not None:
+            _next_verify.result()
     # Wait for the async upscale queue to drain so every shot is at the final
     # resolution before the render pass consumes them (Joe 2026-08-09). The
     # queue lets codex fire prompts back-to-back while the upscaler catches up.
@@ -9312,27 +9370,6 @@ def _resume_episode(state: dict) -> None:
                     if _HAS_PROGRESS else missing_img)
         _plock = threading.Lock()
 
-        # ---- PROMPT PRE-VERIFICATION PASS (resume, Joe 2026-08-09) ----
-        # Build + relevance-gate every regen shot's prompt up front, before the
-        # parallel regen pool fires to codex, so a bad prompt can't waste a
-        # parallel slot. Cached on the shot; _regen_one reuses it.
-        if _SHOT_RELEVANCE_ON and topic:
-            _rewrites = 0
-            print(f"  [VERIFY] pre-verifying {len(missing_img)} regen prompts "
-                  f"+ ref-check vs story topic...")
-            for _vs in missing_img:
-                _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
-                _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
-                if _vp != _base:
-                    _rewrites += 1
-                _vs["_verified_prompt"] = _vp
-                _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
-            print(f"  [VERIFY] {len(missing_img)} regen prompts verified, "
-                  f"{_rewrites} scene rewrites applied")
-        else:
-            for _vs in missing_img:
-                _vs.pop("_verified_prompt", None)
-                _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
         def _regen_one(idx: int, shot: dict) -> None:
             if _HAS_PROGRESS:
                 with _plock:
@@ -9401,13 +9438,68 @@ def _resume_episode(state: dict) -> None:
                 with _plock:
                     _re_iter.update(1)
 
+        # ---- PIPELINED CHUNKED PRE-VERIFY + REGEN (resume, Joe 2026-08-09) ----
+        # Process shots in chunks of SHOT_CHUNK_SIZE (default 5). The LLM
+        # verifies + ref-checks a chunk (the go-ahead), then that chunk renders
+        # in PARALLEL while a background thread LLM-verifies the NEXT chunk
+        # (overlap), so the LLM is never idle and we never stall pre-verifying
+        # ALL shots up front. Never blocks on more than one chunk's LLM calls.
         _rn = _image_concurrency()
-        if _rn > 1 and len(missing_img) > 1:
-            with ThreadPoolExecutor(max_workers=_rn) as ex:
-                list(ex.map(_regen_one, range(len(missing_img)), missing_img))
-        else:
-            for _i, _sh in enumerate(missing_img):
-                _regen_one(_i, _sh)
+        _RCHUNK = max(1, min(int(os.environ.get("SHOT_CHUNK_SIZE", "5")),
+                             len(missing_img) or 1))
+
+        def _verify_chunk(chunk: list) -> int:
+            rewrites = 0
+            for _vs in chunk:
+                _base = _build_shot_prompt(_vs, character_sheets) + " " + _style_inject()
+                _vp = _base
+                if _SHOT_RELEVANCE_ON and topic:
+                    _vp = _ensure_shot_prompt_relevant(_base, _vs, character_sheets, None, topic)
+                    if _vp != _base:
+                        rewrites += 1
+                _vs["_verified_prompt"] = _vp
+                _vs["_llm_refs"] = _llm_shot_ref_check(_vs, brand_assets, topic)
+            return rewrites
+
+        def _render_chunk(cstart: int, chunk: list) -> None:
+            _rlabels = ", ".join(str(s.get("narration_idx", 0) + 1) for s in chunk)
+            print(f"  [CHUNK {cstart//_RCHUNK + 1}/{max(1,(len(missing_img)+_RCHUNK-1)//_RCHUNK)}] "
+                  f"rendering {len(chunk)} (shots {_rlabels}) - "
+                  f"firing in parallel ({min(_rn, len(chunk))} workers)...")
+            if _rn > 1 and len(chunk) > 1:
+                with ThreadPoolExecutor(max_workers=_rn) as _ex3:
+                    list(_ex3.map(_regen_one, range(cstart, cstart + len(chunk)), chunk))
+            else:
+                for _i, _sh in enumerate(chunk):
+                    _regen_one(cstart + _i, _sh)
+
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        _chunks = [missing_img[i:i + _RCHUNK] for i in range(0, len(missing_img), _RCHUNK)]
+        # Prime the pipeline: verify chunk 0 up front so the first render has
+        # its prompts ready, then overlap each subsequent verify with the prior
+        # chunk's render.
+        _rw0 = _verify_chunk(_chunks[0])
+        if _rw0:
+            print(f"  [CHUNK 1] {_rw0} scene rewrites applied")
+        _next_verify = None
+        for _ci, _chunk in enumerate(_chunks):
+            _cstart = _ci * _RCHUNK
+            # Kick off LLM verification of the NEXT chunk in a background thread
+            # so it overlaps with the CURRENT chunk's codex generation (the LLM
+            # never idles, and codex never waits on the LLM).
+            if _ci + 1 < len(_chunks):
+                _next_verify = _TPE(max_workers=1).submit(_verify_chunk, _chunks[_ci + 1])
+            else:
+                _next_verify = None
+            # Render the CURRENT chunk (its prompts are verified) in the main
+            # thread, in parallel with the background next-chunk verify.
+            _render_chunk(_cstart, _chunk)
+            # Block until the NEXT chunk's verification finishes so its prompts
+            # are ready for the next loop iteration's render.
+            if _next_verify is not None:
+                _rw = _next_verify.result()
+                if _rw:
+                    print(f"  [CHUNK {_ci + 2}] {_rw} scene rewrites applied")
         # Drain the async upscale queue so every regen shot is at the final
         # resolution before the next stage consumes them (Joe 2026-08-09).
         try:
