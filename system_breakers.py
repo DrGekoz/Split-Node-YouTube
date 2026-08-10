@@ -1608,6 +1608,88 @@ _STAGE_DIR_KEYWORDS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Narration <-> clip integrity map (Joe 2026-08-10)
+# ---------------------------------------------------------------------------
+# A resume gap-fill MUST NOT reuse a clip that narrates a DIFFERENT story. If
+# an episode folder still holds narration_XX.wav from an earlier article (same
+# episode number was reused, or a script rebuild changed the lines), reusing by
+# filename alone plays stale narration over the new shots/cards/description.
+# We record a short hash of each clip's SPOKEN text in a sidecar (ep_dir
+# /narration_map.json) every time a clip is generated, and only reuse a clip on
+# gap-fill when its recorded hash matches the shot's CURRENT narration text.
+_NARRATION_MAP = "narration_map.json"
+
+
+def _tts_text_normal(text: str) -> str:
+    """Normalize narration for hash-matching: strip stage directions, collapse
+    whitespace, lowercase. Two clips that speak the same line must hash equal."""
+    t = _strip_stage_directions(text or "").strip()
+    return " ".join(t.lower().split())
+
+
+def _tts_map_path(ep_dir) -> Path:
+    return Path(ep_dir) / _NARRATION_MAP
+
+
+def _tts_map_load(ep_dir) -> dict:
+    try:
+        return json.loads(_tts_map_path(ep_dir).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _tts_map_save(ep_dir, m: dict) -> None:
+    try:
+        _tts_map_path(ep_dir).write_text(json.dumps(m, indent=0))
+    except Exception:
+        pass
+
+
+def _tts_map_record(ep_dir, nidx: int, text: str, char: bool = False) -> None:
+    """Record the hash of the narration just spoken into clip nidx. The 'char'
+    flag distinguishes the per-character clone variant (narration_XX_char.wav)
+    from the narrator variant (narration_XX.wav)."""
+    m = _tts_map_load(ep_dir)
+    key = f"char_{nidx}" if char else str(nidx)
+    m[key] = _tts_text_normal(text)
+    _tts_map_save(ep_dir, m)
+
+
+def _tts_clip_matches(ep_dir, nidx: int, text: str, char: bool = False,
+                      path: Optional[str] = None) -> bool:
+    """True only if a clip exists for this index AND its recorded narration
+    matches the current text. Used by gap-fill to reject stale clips from a
+    different story (Joe 2026-08-10)."""
+    if path and (not os.path.isfile(path) or os.path.getsize(path) <= 1000):
+        return False
+    if not path:
+        p = str(Path(ep_dir) / f"narration_{nidx:02d}{'_char' if char else ''}.wav")
+        if not os.path.isfile(p) or os.path.getsize(p) <= 1000:
+            return False
+    m = _tts_map_load(ep_dir)
+    key = f"char_{nidx}" if char else str(nidx)
+    return m.get(key) == _tts_text_normal(text)
+
+
+def _ensure_tts_sidecar(ep_dir) -> None:
+    """Backfill the narration_map for clips already on disk when none exists
+    (older episodes). Without a map we can't prove a clip matches its line, so
+    we conservatively RE-SPEAK: stale narration from a previous story must
+    never silently ride along on a resume. A fresh run writes the map, so this
+    only affects pre-fix state files."""
+    m = _tts_map_load(ep_dir)
+    if m:
+        return
+    any_clip = any(Path(ep_dir).glob("narration_*.wav"))
+    if not any_clip:
+        return
+    print("  [TTS] no narration_map found with existing clips - treating all "
+          "clips as stale (will re-speak) to avoid stale-narration mismatch")
+    _tts_map_save(ep_dir, {})
+
+
+
 def _strip_stage_directions(text: str) -> str:
     """Remove parenthetical/bracketed stage directions the LLM sneaks into
     narration (e.g. '(Waitshifting context slightly to...)' or '[cut to
@@ -7432,7 +7514,7 @@ def _tts_worker(narration_paras: list[str], episode_num: int,
             results[i] = None
             continue
         out = str(ep_dir / f"narration_{i:02d}.wav")
-        if os.path.isfile(out) and os.path.getsize(out) > 1000:
+        if _tts_clip_matches(ep_dir, i, text, char=False, path=out):
             results[i] = out
             print(f"  [TTS {i+1}/{len(narration_paras)}] reused ({_get_audio_duration(out):.1f}s)")
             continue
@@ -7442,6 +7524,7 @@ def _tts_worker(narration_paras: list[str], episode_num: int,
                 _normalize_voice_0db(out)
                 ok = os.path.isfile(out) and os.path.getsize(out) > 1000
                 if ok:
+                    _tts_map_record(ep_dir, i, text)
                     break
             time.sleep(1 + attempt)
         if ok:
@@ -7479,17 +7562,22 @@ def _finalize_tts(shots: list[dict], results: dict, episode_num: int) -> None:
         voice = _lookup_voice(shot.get("character", "NONE"))
         if voice:
             out_v = str(ep_dir / f"narration_{nidx:02d}_char.wav")
+            if _tts_clip_matches(ep_dir, nidx, shot["narration"], char=True, path=out_v):
+                shot["tts_path"] = out_v
+                continue
             if _pocket_tts_generate(shot["narration"], out_v, voice=voice):
                 _normalize_voice_0db(out_v)
+                _tts_map_record(ep_dir, nidx, shot["narration"], char=True)
                 shot["tts_path"] = out_v
                 continue
         path = results.get(nidx)
-        if path and os.path.isfile(path):
+        if path and _tts_clip_matches(ep_dir, nidx, shot["narration"], char=False, path=path):
             shot["tts_path"] = path
         else:
-            # fallback: any file written by the worker at this narration index
+            # fallback: only accept a file written by the worker at this index
+            # if its recorded narration matches the shot's current text.
             cand = str(ep_dir / f"narration_{nidx:02d}.wav")
-            shot["tts_path"] = cand if os.path.isfile(cand) else None
+            shot["tts_path"] = (cand if _tts_clip_matches(ep_dir, nidx, shot["narration"], char=False, path=cand) else None)
     ok = sum(1 for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"]))
     print(f"  [TTS] {ok}/{len(shots)} clips ready (0dB)")
 
@@ -9443,6 +9531,11 @@ def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
     via voice_map.json). Also strips leaked stage directions before speaking."""
     ep_dir = TTS_TEMP / f"ep_{episode_num}"
     ep_dir.mkdir(parents=True, exist_ok=True)
+    # Integrity guard (Joe 2026-08-10): if this episode folder already holds
+    # clips but has NO narration_map sidecar, we cannot prove any clip matches
+    # its line (it may be stale narration from an earlier/different story that
+    # reused this episode number). Force a re-speak rather than risk it.
+    _ensure_tts_sidecar(ep_dir)
     if regen_tts:
         missing_tts = [s for s in shots
                        if not s.get("is_chapter") and (s.get("narration") or "").strip()]
@@ -9452,18 +9545,22 @@ def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
         # BOTH the narrator file (narration_XX.wav) and the per-character clone
         # file (narration_XX_char.wav, used when voice_map.json maps this shot's
         # character to a different voice). Only generate what's actually missing.
+        # Joe 2026-08-10: reuse is now CONTENT-GATED - a clip is only reused if
+        # its recorded narration matches this shot's CURRENT text, so a stale
+        # clip from a different story can never be reused by filename alone.
         missing_tts = []
         for s in shots:
             _nidx = s.get("narration_idx", 0)
             _voice = _lookup_voice(s.get("character", "NONE"))
+            _narr = (s.get("narration") or "").strip()
             _disk = str(ep_dir / f"narration_{_nidx:02d}.wav")
             _disk_char = str(ep_dir / f"narration_{_nidx:02d}_char.wav")
             # Prefer the exact clip for this shot's voice (char variant if the
             # shot uses a clone voice, else the narrator variant).
-            if _voice and os.path.isfile(_disk_char) and os.path.getsize(_disk_char) > 1000:
+            if _voice and _tts_clip_matches(ep_dir, _nidx, _narr, char=True, path=_disk_char):
                 s["tts_path"] = _disk_char
                 continue
-            if os.path.isfile(_disk) and os.path.getsize(_disk) > 1000:
+            if _tts_clip_matches(ep_dir, _nidx, _narr, char=False, path=_disk):
                 s["tts_path"] = _disk
                 continue
             missing_tts.append(s)
@@ -9474,13 +9571,16 @@ def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
             nidx = shot.get("narration_idx", idx)
             _voice = _lookup_voice(shot.get("character", "NONE"))
             out = str(ep_dir / f"narration_{nidx:02d}.wav")
+            _is_char = False
             if _voice:
                 out = str(ep_dir / f"narration_{nidx:02d}_char.wav")
+                _is_char = True
             shot["tts_path"] = out
             speak = _strip_stage_directions(shot.get("narration") or "")
             ok = _pocket_tts_generate(speak, out, voice=_voice)
             if ok:
                 _normalize_voice_0db(out)
+                _tts_map_record(ep_dir, nidx, speak, char=_is_char)
                 print(f"  [TTS] {_get_audio_duration(out):.1f}s - {speak[:50]}...")
             else:
                 print(f"  [TTS] FAILED - {speak[:50]}...")

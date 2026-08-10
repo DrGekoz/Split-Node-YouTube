@@ -2,6 +2,36 @@
 
 All notable changes to Split Node.
 
+## [1.40.0] - 2026-08-10
+
+### Fix: stale TTS narration reused on resume -> video/description mismatch
+
+- **The bug (ep11):** the narration clips on disk (`tts_temp/ep_11/narration_XX.wav`)
+  spoke a COMPLETELY DIFFERENT story (a Meta/New-Mexico youth lawsuit) than the
+  shots, chapter cards, and description (the AI-agents article). A resume gap-fill
+  reused any clip named `narration_XX.wav` purely by filename, so a leftover clip
+  from an earlier article that reused the same episode number got played over the
+  new visuals. Result: the burned chapter titles ("Cracking Hugging Face Vaults
+  Open") came from the shot data while the TTS actually said "Anvil drops in Santa
+  Fe" - an unmissable mismatch between spoken chapter names and on-screen/description
+  titles.
+- **The fix:** every time a narration clip is generated we now write a sidecar
+  (`tts_temp/ep_N/narration_map.json`) recording a normalized hash of the text that
+  was spoken, per narration index (and per-character `char_N` variant). All TTS
+  reuse points (fresh worker, resume gap-fill, finalize) now only reuse a clip when
+  its recorded hash matches the shot's CURRENT narration text. A clip from a
+  different story can never be reused by filename alone again.
+- **Conservative migration:** if an episode folder already holds clips but has NO
+  narration_map (i.e. a pre-fix state file), `_ensure_tts_sidecar` forces a re-speak
+  of every line rather than risk stale narration riding along.
+
+## [1.39.10] - 2026-08-10
+
+### Unattended runs exit cleanly on EOF
+
+- `_yn` and a new `_pause` helper tolerate closed stdin, so a piped/unattended run
+  finishes and exits without an `EOFError` traceback at the trailing prompts.
+
 ## [1.39.9] - 2026-08-10
 
 ### Fix: YouTube upload HTTP 400 "invalidDescription" on long episodes
