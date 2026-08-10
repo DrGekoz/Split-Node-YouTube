@@ -8179,6 +8179,16 @@ def _build_resolved_title_events(chapter_events: list[dict],
     anchor events : start = whisper time of the date/location phrase.
     """
     resolved = []
+    # Full number-word map (digits + spoken words + ordinals) for 1..12 so a
+    # chapter's number is found even when whisper hears "five"/"5"/"fifth".
+    num_words = {
+        1: ["one", "1", "1st", "first"], 2: ["two", "2", "2nd", "second"],
+        3: ["three", "3", "3rd", "third"], 4: ["four", "4", "4th", "fourth"],
+        5: ["five", "5", "5th", "fifth"], 6: ["six", "6", "6th", "sixth"],
+        7: ["seven", "7", "7th", "seventh"], 8: ["eight", "8", "8th", "eighth"],
+        9: ["nine", "9", "9th", "ninth"], 10: ["ten", "10", "10th", "tenth"],
+        11: ["eleven", "11", "11th", "eleventh"], 12: ["twelve", "12", "12th", "twelfth"],
+    }
     # chapter -> find when "chapter N" is spoken
     for ev in chapter_events:
         pi = ev["para_idx"]
@@ -8190,16 +8200,30 @@ def _build_resolved_title_events(chapter_events: list[dict],
         end = (clip_starts[pi + 1] if pi + 1 < len(clip_starts) else
                (clip_starts[pi] + 5.0)) if pi < len(clip_starts) else fallback + 4.0
         t = None
-        num_words = {1: ["one", "1"], 2: ["two", "2"], 3: ["three", "3"],
-                     4: ["four", "4"], 5: ["five", "5"], 6: ["six", "6"]}
         if words:
+            # SEARCH WINDOW (Joe 2026-08-10): only look for this chapter's
+            # "Chapter N" inside its OWN narration clip window
+            # [clip_starts[pi], clip_starts[pi+1]], never the whole transcript.
+            # Searching globally made whisper's number mis-hears cross-match to
+            # the WRONG chapter (ep12: Ch5@655s landed before Ch3@686s, and the
+            # 7-9 map gap dumped Ch9 at 0.00s).
+            lo = clip_starts[pi] if pi < len(clip_starts) else 0.0
+            hi = (clip_starts[pi + 1] if pi + 1 < len(clip_starts) else
+                  (clip_starts[pi] + 8.0 if pi < len(clip_starts) else 8.0))
+            my_nums = set(num_words.get(ev["chapter"], []))
             for i, w in enumerate(words):
+                if w["start"] < lo - 0.2 or w["start"] > hi + 0.2:
+                    continue
                 wl = w["word"].strip(".,!?;:()\"'").lower()
                 if wl != "chapter":
                     continue
-                nxt = words[i + 1]["word"].strip(".,!?;:()\"'-").lower() if i + 1 < len(words) else ""
-                if nxt in num_words.get(ev["chapter"], []):
-                    t = w["start"]
+                # "chapter" followed (within 3 words) by this chapter's number
+                for j in range(i + 1, min(i + 4, len(words))):
+                    nxt = words[j]["word"].strip(".,!?;:()\"'-").lower()
+                    if nxt in my_nums:
+                        t = w["start"]
+                        break
+                if t is not None:
                     break
             # Find the end of the spoken title: the last word spoken within the
             # chapter card's clip (between this card's start and the next clip's

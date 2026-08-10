@@ -2,6 +2,22 @@
 
 All notable changes to Split Node.
 
+## [1.40.1] - 2026-08-10
+
+### Fix: chapter card timings scrambled on burn (whisper number cross-match)
+
+- ep12's chapter NAMES were correct (the v1.40.0 narration-integrity fix held),
+  but the burned card TIMES were out of order (Ch5@655s before Ch3@686s, Ch9
+  dumped at 0.00s). `_build_resolved_title_events` searched the WHOLE whisper
+  transcript for any "chapter" + number, so a number mis-heard in one clip could
+  cross-match to a different chapter. Also its number map only covered 1-6, so
+  7-9 always fell back to the raw clip start.
+- **Fix:** the "Chapter N" search is now confined to each chapter's OWN narration
+  clip window `[clip_starts[pi], clip_starts[pi+1]]`, and the number map is
+  expanded to 1-12 (digits + spoken + ordinals), with "chapter" matching the
+  number within the next 3 words. Verified: stray numbers in other clips are
+  ignored and all 9 chapters resolve in monotonic order.
+
 ## [1.40.0] - 2026-08-10
 
 ### Fix: stale TTS narration reused on resume -> video/description mismatch
