@@ -2,6 +2,21 @@
 
 All notable changes to Split Node.
 
+## [1.39.8] - 2026-08-09
+
+### Resume "no to everything" = true gap-fill (old-state backend auto-detect)
+
+- Selecting "no" to every regen option should just continue the episode where
+  it left off, reusing all existing images/TTS/clips. For episodes saved before
+  the backend was recorded, the resume could default to `local`/ComfyUI and
+  stall trying to build panels on a missing server.
+- Added old-state backend detection: if the episode's folder has real
+  `chapter_*.png` card images (>2KB), it was generated on codex/fal (local uses
+  black placeholder cards), so the resume now infers the codex backend - skipping
+  panel generation and using real-person photo refs, no ComfyUI required.
+  Combined with v1.39.7's stored-backend restore, a "no to everything" resume is
+  now a clean gap-fill that picks up exactly where it stopped.
+
 ## [1.39.7] - 2026-08-09
 
 ### Resume restores the episode's image backend (no more ComfyUI stall)

@@ -9556,6 +9556,22 @@ def _resume_episode(state: dict) -> None:
     # choice via the swap-model menu (which sets IMAGE_BACKEND env) wins over
     # the stored value. No stored value (older state) = keep the env/default.
     _stored_backend = str(state.get("img_backend") or "").strip().lower()
+    if not _stored_backend and not os.environ.get("IMAGE_BACKEND"):
+        # Old-state fallback (Joe 2026-08-09): episodes generated on codex/fal
+        # render REAL chapter-card image files (chapter_XX_card.png); the local
+        # Krea backend uses black placeholder cards instead. So if real chapter
+        # cards exist on disk, this episode was generated on codex/fal and must
+        # resume on that backend (skip panels, use real-person refs) - NOT
+        # default to local/ComfyUI and stall on a missing server.
+        ep_shot_dir0 = SHOTS_DIR / f"ep{int(episode_num):03d}"
+        _real_cards = list(ep_shot_dir0.glob("chapter_*.png")) \
+            if ep_shot_dir0.is_dir() else []
+        _real_cards = [c for c in _real_cards
+                       if os.path.getsize(str(c)) > 2000]  # real image, not placeholder
+        if _real_cards:
+            _stored_backend = "codex"  # infer the cloud card backend
+            print(f"  [RESUME] detected {len(_real_cards)} real chapter-card "
+                  f"image(s) -> resuming on codex backend (no ComfyUI needed)")
     if _stored_backend and not os.environ.get("IMAGE_BACKEND"):
         os.environ["IMAGE_BACKEND"] = _stored_backend
         print(f"  [RESUME] Image backend -> {_stored_backend} (from episode state)")
