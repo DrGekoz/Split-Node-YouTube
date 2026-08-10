@@ -9283,10 +9283,24 @@ def _scan_resume_states() -> list:
     return found
 
 
+def _pause(prompt: str = "  Press Enter to exit...") -> None:
+    """Wait for Enter, but return immediately when stdin is closed
+    (unattended/piped run) so a finished pipeline exits cleanly."""
+    try:
+        input(prompt)
+    except EOFError:
+        return
+
+
 def _yn(prompt: str, default: bool = False) -> bool:
     """Simple yes/no prompt. Returns the default on empty/unknown input."""
     while True:
-        resp = input(prompt).strip().lower()
+        try:
+            resp = input(prompt).strip().lower()
+        except EOFError:
+            # stdin closed (unattended/piped run finished) - take the default
+            # so a completed pipeline exits cleanly instead of traceback-ing.
+            return default
         if not resp:
             return default
         if resp in ("y", "yes"):
@@ -10077,7 +10091,7 @@ def main():
             # If resumed episodes fully completed, continue to fresh batch for the rest
             states_after = [s for s in states if s not in to_resume]
             if not _yn("  Start a FRESH batch of new videos as well? [y/N]", default=False):
-                input("  Press Enter to exit...")
+                _pause()
                 return
         else:
             print("  [RESUME] Skipping all saved episodes - starting fresh\n")
@@ -10112,7 +10126,7 @@ def main():
 
     if not configs:
         print("  [HALT] No videos to generate.")
-        input("  Press Enter to exit...")
+        _pause()
         return
 
     if len(configs) == 1:
@@ -10121,7 +10135,7 @@ def main():
         run_fresh_batch(configs)
 
     print("\n  All done! Press Enter to exit.")
-    input()
+    _pause()
 
 
 def _apply_config_env(config: dict) -> None:
