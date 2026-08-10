@@ -8859,11 +8859,21 @@ def _upload_video_with_progress(video_path: str, title: str, description: str,
     if not creds:
         return None
     file_size = os.path.getsize(video_path)
+    # YouTube caps the video description at 5000 chars. The LLM description +
+    # Discord pitch + full chapter list routinely exceeds it, which makes the
+    # resumable-upload INIT return HTTP 400 "invalidDescription". Clamp to the
+    # limit on a newline boundary so the upload never 400s on metadata (Joe).
+    if description and len(description) > 4990:
+        _cut = description[:4990]
+        _nl = _cut.rfind("\n")
+        if _nl > 3000:
+            _cut = _cut[:_nl]
+        description = _cut.rstrip() + "\n\n[Full description truncated to YouTube's 5000-char limit]"
     body = {
         "snippet": {
             "title": title,
             "description": description,
-            "tags": tags_str.split(","),
+            "tags": tags_str.split(",")[:499],  # YouTube max 500 tags
             "categoryId": "24",
         },
         "status": {

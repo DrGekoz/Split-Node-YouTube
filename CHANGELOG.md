@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.39.9] - 2026-08-10
+
+### Fix: YouTube upload HTTP 400 "invalidDescription" on long episodes
+
+- The resumable-upload INIT returned HTTP 400 with reason `invalidDescription`
+  when the episode description (LLM text + Discord pitch + full whisper-matched
+  chapter list) exceeded YouTube's 5000-char cap. The upload silently failed at
+  the end of an otherwise-complete render (ep11). `_upload_video_with_progress`
+  now clamps the description to ~4990 chars on a newline boundary before the
+  init call, so metadata never 400s. Also caps tags at 499 (YouTube max 500).
+
 ## [1.39.8] - 2026-08-09
 
 ### Resume "no to everything" = true gap-fill (old-state backend auto-detect)

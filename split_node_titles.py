@@ -298,6 +298,24 @@ def build_title_ass(events: list[dict], out_path: str,
     # row per collision so cards never overlap on the bottom-left.
     tw_evs = [ev for ev in events
               if ev.get("kind") in ("location", "person")]
+    # SERIALIZE (Joe 2026-08-09): a typewriter title occupies
+    # start .. start+5.2s (0.7 type + 4.0 hold + 0.5 glitch). If two typewriter
+    # titles would be on screen at the SAME time, push the later one to start
+    # AFTER the earlier one's window ends, so only ONE title ever shows at once
+    # (no more unreadable stacking/overlap). Chapter cards occupy the CENTRE so
+    # they don't collide with the bottom-left typewriter row.
+    _TW_WINDOW = 5.2
+    tw_sorted = sorted(tw_evs, key=lambda e: e.get("start", 0))
+    _last_tw_end = -1.0
+    for ev in tw_sorted:
+        s = ev.get("start", 0)
+        if s < _last_tw_end:
+            # Overlaps the previous title -> shift to start after it finishes.
+            ev["start"] = _last_tw_end
+            s = _last_tw_end
+            print(f"  [TITLES] serialized {ev['kind']} '{ev.get('text','')[:24]}' -> "
+                  f"@{s:.2f}s (avoid overlap)")
+        _last_tw_end = s + _TW_WINDOW
     for ev in tw_evs:
         if ev.get("kind") == "person":
             ev["_stack_up"] = sum(
@@ -355,7 +373,13 @@ def burn_titles(video_path: str, ass_path: str, out_path: str,
     sub_filter = f"subtitles={aname}"
     _fonts_dir = Path(__file__).resolve().parent / "fonts"
     if _fonts_dir.is_dir() and any(_fonts_dir.iterdir()):
-        _fd = str(_fonts_dir).replace("\\", "/").replace(":", "\\:")
+        # Pass fontsdir as a RELATIVE path from the video's directory (the
+        # process cwd). An absolute path like "F:/aaaaaVIBECODING/System
+        # Breakers/fonts" contains a COLON and a SPACE, which ffmpeg's filter
+        # parser splits on even when backslash-escaped (fails with "No option
+        # name near..."). The relative path has neither, so it parses cleanly
+        # and libass still resolves the .ass font names (Joe 2026-08-09).
+        _fd = os.path.relpath(str(_fonts_dir), start=str(vdir)).replace("\\", "/")
         sub_filter += f":fontsdir={_fd}"
     cmd = [
         "ffmpeg", "-y", "-v", "error",
