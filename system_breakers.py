@@ -152,24 +152,27 @@ YOUTUBE_BASE_TAGS = [
 ]
 
 # RSS feeds for the niche (fallback pool - primary source is HN Algolia search).
-# Expanded Aug 2026 with AI / tech / security feeds to serve the trend-scan
-# categories (hacker, beat-the-system, lottery, AI, tech).
 # Expanded Aug 2026 (money-hack focus): the flagship topic is MONEY HACKS /
 # lottery loopholes - ordinary people finding legal ways to make money / beat
 # the odds. Money-hack and lottery feeds are listed FIRST and polled first so
 # they surface before the other topics.
+# NOTE (2026-08-12): the list was audited by testing every feed live. Dead /
+# broken feeds were REMOVED (forbes/money 404, businessinsider/money 404,
+# wired/tech 404, smartmoney + pennyhoarder + securityweekly malformed XML,
+# marktechpost 403, Reddit /r/* 429 rate-limited). Only feeds that actually
+# return parseable items are kept.
 RSS_FEEDS = [
     # ---- MONEY HACKS / LOTTERY LOOPHOLES (main topic - polled first) ----
-    "https://www.thepennyhoarder.com/feed/",            # money-saving hacks
-    "https://money.com/feed/",                          # personal finance hacks
-    "https://www.nerdwallet.com/blog/feed/",            # credit-card / bank hacks
-    "https://www.forbes.com/money/feed/",               # money / wealth
-    "https://www.businessinsider.com/feeds/rss/money/", # money / side hustles
-    "https://feeds.feedburner.com/Zerohedge",           # markets / loopholes
-    "https://www.smartmoney.com/feed",                  # investing / cash
-    "https://www.creditcards.com/feed/",                # rewards / cashback hacks
-    "https://www.reddit.com/r/personalfinance/.rss",    # everyday money tricks
-    "https://www.reddit.com/r/Frugal/.rss",             # money-saving hacks
+    "https://www.moneycrashers.com/feed/",            # money hacks / saving / side income
+    "https://www.wisebread.com/feed/",                # frugal living / money hacks
+    "https://lifehacker.com/rss",                     # life + money hacks
+    "https://money.com/feed/",                        # personal finance hacks
+    "https://www.nerdwallet.com/blog/feed/",          # credit-card / bank hacks
+    "https://www.creditcards.com/feed/",              # rewards / cashback hacks
+    "https://feeds.feedburner.com/Zerohedge",         # markets / loopholes
+    "https://finance.yahoo.com/news/rssindex",        # money / markets news
+    "https://feeds.content.dowjones.io/public/rss/mw_marketpulse",  # MarketWatch
+    "https://fortune.com/feed/",                      # money / business
     # ---- security / hacker ----
     "https://www.wired.com/feed/tag/cybersecurity/latest/rss",
     "https://krebsonsecurity.com/feed/",
@@ -180,19 +183,13 @@ RSS_FEEDS = [
     "https://www.schneier.com/feed/atom/",
     "https://therecord.media/feed",
     "https://grahamcluley.com/feed/",
-    "https://securityweekly.com/feed/",
-    # tech / startup / exploits
+    # ---- general / tech (beat-the-system stories surface here) ----
     "https://news.ycombinator.com/rss",
     "https://arstechnica.com/feed/",
     "https://techcrunch.com/feed/",
     "https://www.theverge.com/rss/index.xml",
-    "https://www.wired.com/feed/tag/tech/latest/rss",
-    # AI
     "https://venturebeat.com/feed/",
     "https://www.technologyreview.com/feed/",
-    "https://www.marktechpost.com/feed/",
-    "https://syncedreview.com/feed/",
-    # general news (beat-the-system stories surface here)
     "https://feeds.bbci.co.uk/news/technology/rss.xml",
     "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://www.theguardian.com/technology/rss",
@@ -203,6 +200,8 @@ RSS_FEEDS = [
 # HN Algolia search queries - tuned to the niche: math beating the lottery,
 # hackers making money, loopholes exploited. MONEY-HACK / lottery queries are
 # listed FIRST and polled first so they surface ahead of the other topics.
+# Expanded 2026-08-12 with more money-hack terms to widen the primary pool
+# (HN was exhausting on the old query set).
 HN_SEARCH_QUERIES = [
     # ---- MONEY HACKS / LOTTERY LOOPHOLES (main topic - polled first) ----
     "lottery loophole",
@@ -223,6 +222,12 @@ HN_SEARCH_QUERIES = [
     "math professor lottery",
     "lottery algorithm",
     "poker math win",
+    "beat the lottery",
+    "lottery fraud caught",
+    "poker player millions",
+    "hustler made money",
+    "made millions online",
+    "bank loophole money",
     # ---- hackers making money / exploits ----
     "hacker made millions",
     "exploit bank millions",
@@ -1395,17 +1400,23 @@ def _collect_candidate_stories(used: set, skip: set,
                     continue
                 text = f"{it['title']} {it['description']}".lower()
                 score = _story_score(it["title"], it["description"])
-                if score >= 3:
-                    it["score"] = score
+                # Gate (Joe 2026-08-12): accept either a strong niche-score hit
+                # OR a money-hack / lottery-loophole story. Money-hack is the
+                # FLAGSHIP topic now, so a story that matches the money-priority
+                # keywords qualifies even if it scores low on the legacy
+                # lottery/hack niche keywords (e.g. cashback / reward-point /
+                # side-hustle content from the money feeds).
+                is_money = _money_priority(f"{it['title']} {it['description']}")
+                if score >= 3 or is_money:
+                    it["score"] = max(score, 3)  # floor so money stories aren't down-weighted
                     it["hn_points"] = 0
                     trend_rel, matched_term = _trend_relevance(
                         f"{it['title']} {it['description']}", trend_topics)
                     it["trend_rel"] = trend_rel
                     it["trend_term"] = matched_term
-                    it["money_priority"] = 1 if _money_priority(
-                        f"{it['title']} {it['description']}") else 0
+                    it["money_priority"] = 1 if is_money else 0
                     it["final_score"] = round(
-                        0.5 * min(score * 10, 100) + 0.3 * trend_rel, 1)
+                        0.5 * min(it["score"] * 10, 100) + 0.3 * trend_rel, 1)
                     seen_titles.add(tkey)
                     matches.append(it)
             if len(matches) >= 8:
