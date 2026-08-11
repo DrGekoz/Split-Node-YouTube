@@ -1186,6 +1186,78 @@ def _save_rejected_article(url: str):
     REJECTED_ARTICLES_FILE.write_text(json.dumps(rejected, indent=2))
 
 
+# ---------------------------------------------------------------------------
+# Curated seed story library (Joe 2026-08-12)
+#
+# The RSS/HN pools keep exhausting because they return the same lottery/loophole
+# stories, which get marked used or rejected. To guarantee an UNLIMITED supply
+# of REAL, on-topic stories (lottery loopholes, bank/ATM glitches, money hacks,
+# advantage plays, arbitrage), the pipeline draws from a pre-verified seed
+# library FIRST. Every entry in stories_seed.json is a real published story
+# from a major outlet (CBS, NYT, Guardian, BBC, Vice, Bloomberg...). Add more
+# verified stories to that file to grow the pool forever. Once a seed story is
+# made into an episode it's added to `used` like any other, so it never repeats.
+# ---------------------------------------------------------------------------
+SEED_STORIES_FILE = PROJECT_DIR / "stories_seed.json"
+SEED_MAX = int(os.environ.get("SEED_MAX", "0"))  # 0 = unlimited (use all not-used)
+
+def _load_seed_stories() -> list[dict]:
+    """Load the curated verified seed story library. Returns [] if missing/corrupt."""
+    if not SEED_STORIES_FILE.is_file():
+        return []
+    try:
+        data = json.loads(SEED_STORIES_FILE.read_text(encoding="utf-8"))
+        return list(data.get("stories", []))
+    except Exception as e:
+        print(f"  [SEED] could not load {SEED_STORIES_FILE.name}: {e}")
+        return []
+
+
+def _seed_candidates(used: set, skip: set) -> list[dict]:
+    """Seed stories not yet used/rejected, scored as high-priority money-hack
+    candidates (they're verified on-topic, so they qualify regardless of the
+    legacy niche keywords). Sorted so the strongest money/loophole categories
+    surface first."""
+    out = []
+    seen_titles = set()
+    for s in _load_seed_stories():
+        url = (s.get("url") or "").strip()
+        title = (s.get("title") or "").strip()
+        if not url or not title:
+            continue
+        if url in used or url in skip:
+            continue
+        tkey = re.sub(r"[^a-z0-9]+", "", title.lower())
+        if tkey and tkey in seen_titles:
+            continue
+        seen_titles.add(tkey)
+        cat = s.get("category", "")
+        cat_boost = {"lottery-loophole": 3, "bank-glitch": 3, "money-glitch": 3,
+                     "casino-advantage": 2, "rewards-hack": 2, "arbitrage": 2}.get(cat, 1)
+        # Seed stories are pre-verified and on-topic: give them a high base score
+        # so they always outrank any weak RSS/HN hit, and flag them as MONEY-HACK.
+        out.append({
+            "title": title,
+            "link": url,
+            "description": s.get("beat", ""),
+            "score": max(8, cat_boost * 4),       # niche score floor
+            "hn_points": 0,
+            "date": s.get("date", ""),
+            "trend_rel": 0,
+            "trend_term": "",
+            "money_priority": 1,                   # flagship topic
+            "from_seed": True,
+            "category": cat,
+            "final_score": round(min(50 + cat_boost * 10, 100), 1),
+        })
+    # Order: money/loophole/glitch categories first, then higher score.
+    out.sort(key=lambda x: (x.get("category", ""), x.get("final_score", 0)),
+             reverse=True)
+    if SEED_MAX and SEED_MAX > 0:
+        out = out[:SEED_MAX]
+    return out
+
+
 def _parse_item_date(it: dict) -> float:
     """Best-effort epoch timestamp for an article item (for recency sort).
     Returns 0.0 when the date is missing/unparseable (oldest bucket)."""
@@ -1348,7 +1420,19 @@ def _collect_candidate_stories(used: set, skip: set,
     seen_titles = set()
     trend_topics = trend_topics or {}
 
-    # -- Primary: HN Algolia niche search --
+    # -- Primary: curated SEED library first (Joe 2026-08-12) ----------------
+    # These are pre-verified REAL stories (lottery loopholes, bank glitches,
+    # money hacks, advantage plays) so they always provide a solid, on-topic
+    # pool that never depends on live RSS/HN availability. They surface ahead
+    # of everything else and get flagged [MONEY-HACK] in the pick prompt.
+    for it in _seed_candidates(used, skip):
+        seen_links.add(it["link"])
+        seen_titles.add(re.sub(r"[^a-z0-9]+", "", it["title"].lower()))
+        matches.append(it)
+    if matches:
+        print(f"  [SEED] {len(matches)} curated verified stories available")
+
+    # -- Secondary: HN Algolia niche search --
     queries = HN_SEARCH_QUERIES[:]
     random.shuffle(queries)
     for query in queries:

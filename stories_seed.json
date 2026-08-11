@@ -1,0 +1,173 @@
+{
+  "_comment": "Curated seed library of VERIFIED, REAL true stories about ordinary people who gamed the system - lottery loopholes, bank/ATM glitches, money hacks, advantage plays, arbitrage. These are all real published stories (major outlets: CBS, NYT, Guardian, BBC, Vice, etc). The pipeline draws from this pool FIRST (guaranteed on-topic + real), then falls back to HN Algolia search + RSS feeds for fresh material. Add verified stories here to grow the pool. Each entry: title, url, category, one-line beat.",
+  "stories": [
+    {
+      "title": "Jerry and Marge Selbee: how a retired couple won millions using a lottery loophole",
+      "url": "https://www.cbsnews.com/news/jerry-and-marge-selbee-how-a-retired-couple-won-millions-using-a-lottery-loophole-60-minutes/",
+      "category": "lottery-loophole",
+      "beat": "A Michigan retired couple exploited a legal flaw in the Winfall lottery - buying huge volumes of losing tickets when the jackpot rolled down made the expected value positive - and quietly won $26 million over nine years."
+    },
+    {
+      "title": "Jerry and Marge go large: the Selbee lottery loophole payoff",
+      "url": "https://www.cbsnews.com/news/jerry-and-marge-go-large-selbee-lottery-loophole-60-minutes-2022-06-10/",
+      "category": "lottery-loophole",
+      "beat": "Follow-up on the Selbees: how the retired couple scaled their lottery roll-down arbitrage into a multi-million-dollar operation and what happened when MIT students discovered the same edge."
+    },
+    {
+      "title": "Dan Saunders: the Australian bartender who blew $1.6 million on an ATM glitch",
+      "url": "https://www.vice.com/en/article/this-australian-bartender-dan-saunders-found-an-atm-bank-glitch-hack-and-blew-16-million-dollars/",
+      "category": "bank-glitch",
+      "beat": "A Sydney bartender discovered a bank glitch let him withdraw more than his balance, blew roughly $1.6 million on a spending spree, then went to prison - and Australia's highest court later quashed his fraud convictions."
+    },
+    {
+      "title": "Crypto.com accidentally transferred $10.5 million to an Australian woman",
+      "url": "https://www.theguardian.com/technology/2022/aug/31/crypto-com-accidentally-transfers-10-5-million-australian-woman-melbourne-cryptocurrency",
+      "category": "money-glitch",
+      "beat": "A refund typo at Crypto.com sent $10.5 million to a Melbourne woman who never asked for it - she bought a mansion, and a legal battle followed over whether she had to give it back."
+    },
+    {
+      "title": "The Crypto.com $10.5 million accidental transfer trial",
+      "url": "https://www.theguardian.com/technology/2022/oct/11/crypto-com-accidental-transfer-10-5-million-trial-australia-couple-cryptocurrency",
+      "category": "money-glitch",
+      "beat": "The court case over the Crypto.com $10.5 million windfall: the woman and her partner claimed they thought it was a prize, while the exchange fought to claw the money back."
+    },
+    {
+      "title": "The man who blew a fortune when the bank paid out on a glitch",
+      "url": "https://www.bbc.com/news/magazine-38256124",
+      "category": "bank-glitch",
+      "beat": "An Australian man discovered an unlimited-credit bank error and went on a wild spending spree - the story of what happens when a banking glitch hands someone a fortune."
+    },
+    {
+      "title": "The Pudding Guy: how David Phillips flew around the world for free on pudding",
+      "url": "https://www.theatlantic.com/business/archive/2016/02/the-pudding-guy/460046/",
+      "category": "rewards-hack",
+      "beat": "A California man bought $3,000 of Healthy Choice pudding to cash in a 10 million frequent-flyer-mile promotion, then spent years flying first-class around the world - the original points arbitrage."
+    },
+    {
+      "title": "Planet Money: The Pudding Guy",
+      "url": "https://www.npr.org/sections/money/2019/01/09/683660851/episode-391-the-pudding-guy",
+      "category": "rewards-hack",
+      "beat": "NPR's Planet Money on the man who gamed a frequent-flyer miles promotion by buying pudding - a perfect example of legal arbitrage against a marketing loophole."
+    },
+    {
+      "title": "How MIT students worked a system to win the Massachusetts lottery",
+      "url": "https://www.nytimes.com/2012/08/08/business/how-mit-students-worked-a-system-to-win-the-lottery.html",
+      "category": "lottery-loophole",
+      "beat": "MIT students found a legal edge in the Massachusetts Cash WinFall lottery - a roll-down jackpot mechanic that made buying tickets in bulk mathematically profitable."
+    },
+    {
+      "title": "Joan Ginther won the lottery four times: luck or math?",
+      "url": "https://www.washingtonpost.com/lifestyle/magazine/joan-ginther-won-the-lottery-4-times-was-it-luck-or-math/2011/12/15/gIQAs4O0uO_story.html",
+      "category": "lottery-loophole",
+      "beat": "A Texas statistics professor won major lottery jackpots four separate times - the Washington Post investigates whether it was a mathematical edge, not luck."
+    },
+    {
+      "title": "How Stefan Mandel won the lottery 14 times using mathematics",
+      "url": "https://www.businessinsider.com/how-stefan-mandel-won-the-lottery-14-times-2018-8",
+      "category": "lottery-loophole",
+      "beat": "Romanian-Australian economist Stefan Mandel mathematically covered the entire ticket space to guarantee wins, beating 14 different lotteries across the world."
+    },
+    {
+      "title": "The Australian man who spent $2.1 million after a bank glitch - convictions quashed",
+      "url": "https://www.abc.net.au/news/2016-12-01/man-who-spent-$2.1m-after-bank-glitch-has-convictions-quashed/8083818",
+      "category": "bank-glitch",
+      "beat": "An Australian man went on a spending spree after a bank glitch gave him endless credit; his fraud convictions were later quashed by the country's highest court."
+    },
+    {
+      "title": "Runaway millionaires: Leo Gao and Kara Hurring",
+      "url": "https://www.nzherald.co.nz/nz/runaway-millionaires-leo-gao-and-kara-hurring-where-are-they-now/7M3V3C3N74QZ6W2X6YI2P6Z4RU/",
+      "category": "bank-glitch",
+      "beat": "A New Zealand couple were accidentally given a multi-million-dollar overdraft by Westpac, fled to China, and triggered an international manhunt."
+    },
+    {
+      "title": "The Chase Bank 'infinite money' check glitch",
+      "url": "https://www.theguardian.com/us-news/article/2024/sep/02/chase-bank-system-glitch",
+      "category": "money-glitch",
+      "beat": "A Chase Bank glitch let customers write and deposit checks they couldn't cover, briefly creating 'infinite money' - and viral TikTokers tried to exploit it."
+    },
+    {
+      "title": "JPMorgan sues customers over the TikTok bank glitch",
+      "url": "https://www.theguardian.com/business/2024/oct/29/jpmorgan-sues-customers-glitch-tiktok-bank-atm-checks",
+      "category": "money-glitch",
+      "beat": "JPMorgan sued customers who exploited a check-deposit glitch that went viral on TikTok, trying to claw back the 'infinite money' withdrawals."
+    },
+    {
+      "title": "The power of arbitrage",
+      "url": "https://marginalrevolution.com/marginalrevolution/2009/12/the-power-of-arbitrage.html",
+      "category": "arbitrage",
+      "beat": "A conceptual look at arbitrage - buying where something is underpriced and selling where it is overpriced - the quiet edge at the heart of many money hacks."
+    },
+    {
+      "title": "Is there a secret formula to winning the lottery?",
+      "url": "https://www.thelotter.com/blog/guides/is-there-a-secret-formula-to-winning-lottery/",
+      "category": "lottery-loophole",
+      "beat": "An exploration of whether lotteries with roll-down jackpots can be beaten mathematically - and the real examples of people who did it."
+    },
+    {
+      "title": "The mint coins credit-card hack",
+      "url": "https://www.latimes.com/archives/la-xpm-2011-dec-08/la-fi-mo-mint-coins-credit-cards-20111208-story.html",
+      "category": "rewards-hack",
+      "beat": "People exploited a credit-card rewards loophole by buying thousands of dollars of US Mint coins that were shipped free, then paying them off for profit and miles."
+    },
+    {
+      "title": "How this couple won $26 million in the lottery",
+      "url": "https://www.forbes.com/sites/zackfriedman/2019/01/29/how-this-couple-won-26-million-in-the-lottery/",
+      "category": "lottery-loophole",
+      "beat": "The story of the Michigan couple who legally beat the lottery with a roll-down jackpot flaw and turned $26 million in winnings into a business."
+    },
+    {
+      "title": "Chase Bank TikTok infinite-money glitch check fraud",
+      "url": "https://www.cbsnews.com/news/chase-bank-tiktok-infinite-money-glitch-check-fraud/",
+      "category": "money-glitch",
+      "beat": "CBS on the Chase check-deposit glitch that went viral on TikTok - customers who thought they'd found an infinite-money hack and the fraud fallout."
+    },
+    {
+      "title": "How this math genius won the lottery 14 times",
+      "url": "https://www.cnbc.com/2018/08/10/how-this-math-genius-won-the-lottery-14-times.html",
+      "category": "lottery-loophole",
+      "beat": "CNBC on Romanian mathematician Stefan Mandel, who used combinatorics to cover every ticket combination and legally win 14 lotteries."
+    },
+    {
+      "title": "Crypto.com accidentally sent a woman $10.5 million and didn't notice for months",
+      "url": "https://www.bloomberg.com/news/articles/2022-09-02/crypto-com-accidentally-sent-a-woman-10-5-million-and-didn-t-notice-for-months",
+      "category": "money-glitch",
+      "beat": "Bloomberg's investigation into how Crypto.com lost track of a $10.5 million mistaken transfer for months, and the legal fight to recover it."
+    },
+    {
+      "title": "The man who got $2.1 million for free from his bank and got away with it",
+      "url": "https://www.smh.com.au/business/banking-and-finance/the-man-who-got-2-1m-for-free-from-his-bank-and-got-away-with-it-20161201-gt1sut.html",
+      "category": "bank-glitch",
+      "beat": "The Australian man who exploited a bank error to access unlimited credit, spent $2.1 million, and had his convictions overturned."
+    },
+    {
+      "title": "Dan Saunders ATM glitch - Wikipedia",
+      "url": "https://en.wikipedia.org/wiki/Dan_Saunders_ATM_glitch",
+      "category": "bank-glitch",
+      "beat": "The documented story of Dan Saunders, whose bank glitch let him withdraw far beyond his balance - the definitive account of the ATM error."
+    },
+    {
+      "title": "Romanian mathematician hacked the lottery system",
+      "url": "https://www.independent.co.uk/news/world/americas/how-to-win-lottery-romanian-mathematician-hacked-system-stefan-mandel-a8527556.html",
+      "category": "lottery-loophole",
+      "beat": "The Independent on Stefan Mandel, the Romanian economist who mathematically hacked lottery systems and won 14 times."
+    },
+    {
+      "title": "The gambler who cracked the horse-racing code",
+      "url": "https://www.tbsnews.net/feature/gambler-who-cracked-horse-racing-code",
+      "category": "casino-advantage",
+      "beat": "The story of a gambler who used mathematics and data modeling to crack horse-racing betting - an advantage play against the bookmakers."
+    },
+    {
+      "title": "Bill Benter: the gambler who beat horse racing with math",
+      "url": "https://www.casino.org/blog/bill-benter/",
+      "category": "casino-advantage",
+      "beat": "Bill Benter built a computer model that beat Hong Kong horse racing for decades, winning an estimated $1 billion - the ultimate advantage play."
+    },
+    {
+      "title": "Blackjack player breaks the bank at Atlantic City",
+      "url": "https://science.slashdot.org/story/12/03/22/1825242/blackjack-player-breaks-the-bank-at-atlantic-city",
+      "category": "casino-advantage",
+      "beat": "The card-counting saga of a blackjack player who legally beat casinos at Atlantic City and the ban that followed."
+    }
+  ]
+}
