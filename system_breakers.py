@@ -3891,6 +3891,40 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
         scene = parsed.get("scene", "")
         sfx = parsed.get("sfx", "NONE")
         tone = parsed.get("tone", "neutral")
+        # RETRY parse failures (Joe 2026-08-12): a transient LLM timeout/truncation
+        # used to DROP the sentence entirely (no shot -> no image/TTS -> a missing
+        # beat in the video). Retry the LLM once, then fall back to a generic shot
+        # so NO sentence is ever lost.
+        if not scene:
+            for _r in range(2):
+                print(f"  [LLM] Shot {i+1}: parse failed, retrying ({_r+1}/2)...")
+                time.sleep(0.5)
+                _txt = _llm_chat([
+                    {"role": "system", "content": SHOT_SYSTEM_PROMPT},
+                    {"role": "user", "content": (
+                        f"{ctx_line}NARRATION PARAGRAPH {i+1} of {len(narration_paras)}:\n"
+                        f"{para[:1200]}\n\nCreate the shot for this paragraph.")}
+                ], max_tokens=400, temp=0.8)
+                _p = _parse_shot_response(_txt)
+                scene = _p.get("scene", "").strip()
+                if scene:
+                    shot_type = _p.get("shot_type", shot_type)
+                    angle = _p.get("angle", angle)
+                    character = _p.get("character", character)
+                    character_role = _p.get("character_role", character_role)
+                    sfx = _p.get("sfx", "NONE")
+                    tone = _p.get("tone", "neutral")
+                    break
+            if not scene:
+                print(f"  [LLM] Shot {i+1}: still failing - generic fallback scene (sentence kept)")
+                shot_type = shot_type or "MS"
+                angle = angle or "eye-level"
+                character = character or "NONE"
+                character_role = character_role or "character in the story"
+                scene = (f"3D animated character in a dark cinematic documentary "
+                         f"scene, dramatic lighting, {RENDER_STYLE}")
+                sfx = "NONE"
+                tone = "neutral"
 
         # Normalize character name: strip role-y artifacts, keep the name itself
         character = character.strip().strip(".").strip()
@@ -9961,6 +9995,11 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
                        location_sheets: Optional[dict] = None,
                        prop_assets: Optional[dict] = None,
                        target_paras: int = 0,
+                       narration: Optional[list] = None,
+                       context: Optional[dict] = None,
+                       bible: Optional[dict] = None,
+                       sentence_para_map: Optional[dict] = None,
+                       establishing_map: Optional[dict] = None,
                        resume_file: Optional[Path] = None) -> None:
     """Save episode state so it can be resumed if interrupted."""
     state = {
@@ -9985,6 +10024,14 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
         "video_id": video_id,
         "chapter_events": chapter_events or [],
         "anchor_events": anchor_events or [],
+        # Shot-list regeneration support (Joe 2026-08-12): persist the flattened
+        # narration + world context so a resume can re-run the shot list to fill
+        # parse-failed/missing shots without a full script rebuild.
+        "narration": narration or [],
+        "context": context or {},
+        "bible": bible or {},
+        "sentence_para_map": sentence_para_map or {},
+        "establishing_map": establishing_map or {},
     }
     try:
         rf = resume_file or _resume_file_for(episode_num)
@@ -10318,6 +10365,58 @@ def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
         print(f"  [RESUME] All {len(shots)} TTS clips present")
 
 
+def _regenerate_shot_list_for_resume(state: dict) -> list:
+    """Re-run the shot-list LLM on resume to fill parse-failed/missing shots
+    (Joe 2026-08-12). Reuses the stored narration + world context; carries
+    forward each existing shot's image/tts by narration_idx so good shots keep
+    their generated art and only missing sentences get fresh shots. Returns the
+    merged shot list (or the existing one if regeneration isn't possible)."""
+    existing = list(state.get("shots") or [])
+    narration = list(state.get("narration") or [])
+    if not narration:
+        print("  [SHOTLIST] no stored narration - use 'Rebuild the narration SCRIPT' instead")
+        return existing
+    topic = state.get("topic", "")
+    context = state.get("context") or {}
+    bible = state.get("bible") or {}
+    sentence_para_map = state.get("sentence_para_map") or \
+        {i: p for i, p in enumerate(narration)}
+    establishing_map = state.get("establishing_map") or {}
+    # Rebuild world context from the article if it wasn't persisted.
+    if (not context or not bible) and state.get("article_url"):
+        try:
+            paragraphs = fetch_article_paragraphs(state["article_url"])
+            if paragraphs and not context:
+                context = _build_episode_context(topic, paragraphs)
+            if not bible:
+                bible = _build_directors_bible(topic, narration)
+        except Exception as e:
+            print(f"  [SHOTLIST] could not rebuild world context: {e}")
+    old = {}
+    for s in existing:
+        i = int(s.get("narration_idx", -1))
+        if i >= 0:
+            old.setdefault(i, s)
+    _shot_bible = dict(bible or {})
+    new_shots = _build_shot_list(narration, bible=_shot_bible, context=context,
+                                 establishing_map=establishing_map,
+                                 sentence_para_map=sentence_para_map)
+    carried = 0
+    for ns in new_shots:
+        i = int(ns.get("narration_idx", -1))
+        if i in old:
+            o = old[i]
+            for k in ("image_path", "tts_path", "is_chapter", "chapter_num",
+                      "chapter_title", "is_establishing", "establishing_kind",
+                      "is_key", "key_words", "foley"):
+                if k in o:
+                    ns[k] = o[k]
+            carried += 1
+    print(f"  [SHOTLIST] regenerated {len(new_shots)} shots "
+          f"(carried forward {carried} existing image/tts)")
+    return new_shots
+
+
 def _resume_episode(state: dict) -> None:
     """Resume a partially-completed episode from saved state.
 
@@ -10361,9 +10460,21 @@ def _resume_episode(state: dict) -> None:
         _regen_img = _yn("    Regenerate ALL images (overwrite)? [y/N]: ")
         _regen_clips = _yn("    Regenerate ALL video clips (re-render from images)? [y/N]: ")
         _swap_model = _yn("    Swap the image-gen model (backend/model)? [y/N]: ")
+        _regen_shotlist = _yn("    Regenerate the SHOT LIST (re-run shot-list LLM to fill parse-failed/missing shots)? [y/N]: ")
         if _regen_clips:
             os.environ["REGEN_CLIPS"] = "1"
             print("  [RESUME] Regenerating ALL video clips (reuse disabled)")
+        if _regen_shotlist:
+            _new_shots = _regenerate_shot_list_for_resume(state)
+            if _new_shots and _new_shots != shots:
+                shots = _new_shots
+                # Missing sentences get fresh shots -> their images/TTS are absent,
+                # so the gap-fill phases generate them. Carried-forward shots keep
+                # their existing image/tts. No forced full regen.
+                print(f"  [SHOTLIST] shot list regenerated -> {len(shots)} shots "
+                      f"(missing images/TTS will gap-fill)")
+            elif not _new_shots:
+                print("  [SHOTLIST] regeneration produced no shots - keeping existing")
         if _regen_script:
             rebuilt = _rebuild_script_for_resume(state)
             if rebuilt:
@@ -11129,9 +11240,11 @@ def _phase_llm(config: dict):
         _flatten_narration_to_sentences(
             narration, chapter_events, establishing_map, anchor_events)
 
-    # START TTS IN PARALLEL (background thread) so it runs while we build the
-    # world + images (codex/API) below.
-    tts_thread, tts_results, tts_stop = _start_tts_worker(narration, episode_num)
+    # NOTE: TTS is NOT started here. PocketTTS runs on the same GPU as LM Studio,
+    # so starting it before the shot-list/world LLM work makes the LLM time out
+    # (VRAM contention). The TTS worker starts at the END of this phase, AFTER all
+    # LLM work, so it then runs in parallel with the API/cloud image generation
+    # (_phase_images) instead of fighting the LLM. (Joe 2026-08-12)
 
     context = _build_episode_context(topic, paragraphs)
     bible = _build_directors_bible(topic, narration)
@@ -11186,7 +11299,18 @@ def _phase_llm(config: dict):
                        character_sheets, chapter_events=chapter_events,
                        anchor_events=anchor_events,
                        location_sheets=location_sheets, prop_assets=prop_assets,
-                       target_paras=target_paras)
+                       target_paras=target_paras,
+                       narration=narration, context=context, bible=bible,
+                       sentence_para_map=sentence_para_map,
+                       establishing_map=establishing_map)
+
+    # START TTS AFTER all LLM work is done (Joe 2026-08-12): PocketTTS shares the
+    # GPU with LM Studio, so it must not run while the shot-list/world LLM calls
+    # are in flight. Starting it here means it runs concurrently with the API/cloud
+    # image generation (_phase_images) with the LLM already idle.
+    tts_thread, tts_results, tts_stop = _start_tts_worker(narration, episode_num)
+    print(f"  [TTS] worker started after shot-list/world LLM work "
+          f"({len(narration)} clips)")
 
     return {
         "config": config,
