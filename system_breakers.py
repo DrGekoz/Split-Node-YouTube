@@ -2417,28 +2417,53 @@ def _norm_text(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' ]", " ", str(s or "").lower())).strip()
 
 
-def _generate_intro_hook(bible: Optional[dict] = None) -> str:
-    """Snappy ~3 second opening hook - ONE punchy sentence (shorts 'Declare'
-    format). NO locations, NO people names, NO brands, NO figures. A universal,
-    timeless tease that plays BEFORE chapter 1 introduces the world. Returns the
-    hook, or a safe default / '' on failure."""
+def _generate_intro(bible: Optional[dict] = None) -> list[str]:
+    """Full Split-Node-Shorts intro SEQUENCE (Joe 2026-08-12): the entire opening
+    follows the viral 6-phase shorts formula + a 3s hook (7 short sentences).
+    NO people names / locations / brand names - the intro sets up the hook
+    WITHOUT revealing the specific people or places (those enter in chapter 1).
+    The story's REAL key figures may be used for the DECLARE claim. Returns a
+    list of 7 snappy sentences (one per phase) or [] on failure."""
+    b = bible or {}
+    keynums = ", ".join(str(k) for k in (b.get("key_numbers") or [])[:3])
+    ctx = (
+        f"VISUAL HOOK: {b.get('visual_hook', '')}\n"
+        f"KEY FIGURES (real, from the article - use these if any): {keynums}\n"
+        f"DEEPER QUESTION: {b.get('deeper_question', '')}\n"
+        f"SURFACE PROBLEM: {b.get('surface_problem', '')}"
+    )
+    sys_prompt = (
+        "You write the opening INTRO SEQUENCE of a true-crime documentary, using "
+        "the viral 'Split Node Shorts' 6-phase formula. Output EXACTLY 7 short, "
+        "punchy sentences (6-10 words each, spoken fast), one per phase, in this "
+        "order:\n"
+        "1. HOOK - grab attention in under 2 seconds.\n"
+        "2. DECLARE - the big absurd claim / specific number (use a REAL key "
+        "figure from the story if given, else a strong impossible-sounding claim).\n"
+        "3. ASSESS - the system or scam being examined.\n"
+        "4. ISOLATE - the single trick or loophole behind it.\n"
+        "5. PROCESS - how it works, fast.\n"
+        "6. BUILD - the parts coming together toward the win.\n"
+        "7. REVEAL - the result, ending on a loop beat ('...but the story doesn't "
+        "end there').\n"
+        "STRICT RULES: NO people's names, NO city/town/place names, NO brand or "
+        "company names, NO dates. The intro sets up the hook WITHOUT revealing "
+        "the specific people or places - those enter in chapter 1. Use ONLY real "
+        "figures from the story, never invent numbers. Return ONLY the 7 sentences, "
+        "one per line, no labels, no numbering.")
     try:
-        msg = [{"role": "system", "content": (
-            "You write the 3-second opening HOOK of a true-crime documentary "
-            "video. Output ONE punchy sentence of 6-10 words, spoken fast, that "
-            "grabs attention and sets a dark, curious tone. STRICT RULES: NO "
-            "locations, NO city or town names, NO people's names, NO brand names, "
-            "NO dates, NO dollar figures, NO specific numbers. It is a universal, "
-            "timeless hook about what is about to be revealed - a short declarative "
-            "tease that raises the stakes or ends on a question. Output ONLY the "
-            "single sentence, no quotes, no labels.")},
-            {"role": "user", "content": "Write the 3-second opening hook."}]
-        text = _llm_chat(msg, max_tokens=60, temp=0.9).strip().strip('"\'')
-        if text and 0 < len(text.split()) <= 14:
-            return text
-        return "Some secrets are too big to stay hidden for long."
+        text = _llm_chat(
+            [{"role": "system", "content": sys_prompt},
+             {"role": "user", "content": f"STORY CONTEXT:\n{ctx}\n\nWrite the 7 intro sentences."}],
+            max_tokens=260, temp=0.85)
+        lines = [re.sub(r"^\s*[-*#\d\.\)]+\s*", "", ln).strip()
+                 for ln in text.split("\n")]
+        lines = [ln for ln in lines if ln and 3 <= len(ln.split()) <= 16]
+        if len(lines) >= 5:
+            return lines[:7]
+        return []
     except Exception:
-        return ""
+        return []
 
 
 def _plan_narration(narration: list[str], episode_num: int) -> dict:
@@ -10098,10 +10123,11 @@ def _rebuild_script_for_resume(state: dict) -> dict:
     # Intro hook + narration plan (key words + foley) at the PARAGRAPH level,
     # BEFORE chapters are inserted / sentences split (Joe 2026-08-12).
     plan = _plan_narration(narration, episode_num)
-    intro_hook = _generate_intro_hook(story_bible)
-    if intro_hook:
-        narration = [intro_hook] + narration
-        print(f"  [PLAN] intro hook: '{intro_hook}' (plays before chapter 1)")
+    intro = _generate_intro(story_bible)
+    if intro:
+        narration = list(intro) + narration
+        print(f"  [INTRO] {len(intro)}-phase shorts-formula intro prepended "
+              f"before chapter 1")
     narration, chapter_events = _insert_chapter_markers(narration)
     anchor_events = _extract_anchor_events(narration)
     establishing_map = {}
@@ -11004,10 +11030,11 @@ def _phase_llm(config: dict):
     # Intro hook + narration plan (key words + foley) at the PARAGRAPH level,
     # BEFORE chapters are inserted / sentences split (Joe 2026-08-12).
     plan = _plan_narration(narration, episode_num)
-    intro_hook = _generate_intro_hook(story_bible)
-    if intro_hook:
-        narration = [intro_hook] + narration
-        print(f"  [PLAN] intro hook: '{intro_hook}' (plays before chapter 1)")
+    intro = _generate_intro(story_bible)
+    if intro:
+        narration = list(intro) + narration
+        print(f"  [INTRO] {len(intro)}-phase shorts-formula intro prepended "
+              f"before chapter 1")
     narration, chapter_events = _insert_chapter_markers(narration)
     anchor_events = _extract_anchor_events(narration)
 

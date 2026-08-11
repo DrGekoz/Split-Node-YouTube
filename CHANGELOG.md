@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.41.1] - 2026-08-12
+
+### Intro now runs the full Split Node Shorts 6-phase formula
+
+- The episode INTRO is no longer a single 3s hook - the entire opening follows
+  the viral shorts sequence: HOOK -> DECLARE -> ASSESS -> ISOLATE -> PROCESS ->
+  BUILD -> REVEAL (7 short sentences, one shot each, prepended before chapter 1).
+- Strict: NO people names / locations / brand names in the intro - it sets up
+  the hook without revealing the specific people or places (those enter in
+  chapter 1). The story's REAL key figures are used for the DECLARE claim.
+
 ## [1.41.0] - 2026-08-12
 
 ### LLM sound-design layer + new narrator voice
