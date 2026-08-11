@@ -1,8 +1,11 @@
 {
   "brands": {
-    "OpenAI": "building",
-    "Anthropic": "screen",
-    "Hugging Face": "building",
-    "Coast Runners": "screen"
+    "Duke University": "screen",
+    "Heidelberg University": "building",
+    "Jersey Shore Medical Center": "building",
+    "University of London": "screen",
+    "Sanremo Casino": "building",
+    "Atlantic City": "building",
+    "Las Vegas": "building"
   }
 }

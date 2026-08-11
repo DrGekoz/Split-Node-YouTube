@@ -2,6 +2,28 @@
 
 All notable changes to Split Node.
 
+## [1.40.2] - 2026-08-12
+
+### Packaging framework (Adam Del Duca method) + ep12 render hardening
+
+- **Titles: 6 across 3 proven formulas** (curiosity / number-driven / outcome,
+  2 each), all trend-scored, best wins at upload -> AB-test material instead of
+  shipping the first guess. `_generate_titles` now returns up to 6 (was 3);
+  only `titles[0]` is consumed downstream, so expanding is safe.
+- **Thumbnails: art-first + FFmpeg text overlay.** No more rendering text IN the
+  image via GPT Image 2 (the recurring garbled-text / "FERN" bug). `_generate_thumbnail`
+  generates clean art-only art, then `_burn_thumbnail_text` burns crisp Impact
+  "SPLIT NODE" (top-left) + a short curiosity headline (lower third, fitted to
+  width) with white fill / black stroke / drop shadow. Font is staged as a bare
+  filename beside the output (drawtext rejects drive-letter colons); falls back
+  to art-only if the burn fails.
+- **Deterministic chapter events** (`_deterministic_chapter_events`): the ASS
+  burn only processes `kind==chapter` events, so location/person typewriter
+  events can no longer be misread as chapters (missing-card + doubled-slot bug).
+- **Single-pass render** + `_purge_ai_slop` / `_flatten_narration_to_sentences`
+  / `_is_machine_slop` / `_business_building_clause` hardening carried over from
+  the ep12 render reconstruction.
+
 ## [1.40.1] - 2026-08-10
 
 ### Fix: chapter card timings scrambled on burn (whisper number cross-match)

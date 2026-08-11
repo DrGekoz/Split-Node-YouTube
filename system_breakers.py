@@ -1915,11 +1915,18 @@ NARRATION_SYSTEM_PROMPT = (
     "or nerve to beat the system - hackers, lottery mathematicians, card counters, "
     "scam-baiters, people who found legal loopholes and won the game of life. "
     "Your writing style is the Black Files / FERN true-crime documentary style.\n\n"
+    "STORY-FIRST PRINCIPLE (the single most important rule): this is a STORY about "
+    "PEOPLE and what they DO, not a tour of places. The protagonist, their choices, "
+    "their struggle and their win drive every beat. Locations are scenery - mention "
+    "a place only when the action genuinely moves there and it matters to the scene. "
+    "Never let place-names or geography drive the narration. If two paragraphs don't "
+    "need a location sentence, neither gets one.\n\n"
     "STYLE RULES (follow ALL of them):\n"
-    "1. COLD OPEN: the very first paragraph must drop the viewer into a specific, "
-    "visceral scene - exact place, one dramatic image after another - escalate the "
-    "stakes, then end with a twist tease ('Except this story doesn't end there...') "
-    "and the question the whole episode answers.\n"
+    "1. COLD OPEN: the very first paragraph drops the viewer into a specific, "
+    "visceral MOMENT IN THE ACTION - a person doing something, a decision, a risk, a "
+    "discovery - one dramatic image after another. Escalate the stakes, then end with "
+    "a twist tease ('Except this story doesn't end there...') and the question the "
+    "whole episode answers. Do NOT open with a bare location or a list of places.\n"
     "2. SURFACE PROBLEM AND DEEPER PROBLEM: every episode has a surface problem (the "
     "mechanics - the hack, the scheme, the loophole) AND a deeper emotional struggle "
     "underneath (greed, desperation, revenge, the need to prove something, injustice). "
@@ -1936,7 +1943,9 @@ NARRATION_SYSTEM_PROMPT = (
     "arc.\n"
     "5. CAUSE-AND-EFFECT CHAIN: events flow as 'this happens, but this happens, "
     "therefore this happens' - never 'and then, and then'. Every paragraph is caused "
-    "by the one before it.\n"
+    "by the one before it. The whole episode must read as ONE continuous story with a "
+    "clear through-line - never a disconnected string of vignettes. Every paragraph "
+    "advances the protagonist's story; none of them is just setting.\n"
     "6. SENTENCE RHYTHM: vary sentence length aggressively - a one-word fragment "
     "('Case closed.') next to a long flowing sentence. Monotone sentence length is "
     "death. Write to be read aloud.\n"
@@ -1947,13 +1956,14 @@ NARRATION_SYSTEM_PROMPT = (
     "use the exact figures the ARTICLE states, never an invented or borrowed "
     "figure from a different story. Never write 'a lot of money' - always write "
     "the exact figure from the article.\n"
-    "9. PLACE ANCHORS: every time the scene shifts, START the new paragraph "
-    "with a standalone location sentence using a REAL place from THIS article "
-    "(a city, town, building or landmark that is actually named in the article "
-    "you were given - never a generic invented example, and NEVER a famous city "
-    "or location that is not in the article). Never import a location from another "
-    "story and never invent one. The viewer must always know where the story is. "
-    "Do NOT use dates.\n"
+    "9. PLACES ARE SECONDARY: use a REAL place from THIS article (a city, town, "
+    "building or landmark actually named in the article) ONLY when the scene really "
+    "happens there and it adds to the story. A place is stated once when first needed "
+    "and then rarely repeated. NEVER open the episode or two-or-more paragraphs in a "
+    "row with a location, NEVER start consecutive paragraphs with place-names, and "
+    "never import or invent a location. When nothing in a paragraph is location-bound, "
+    "write it with no location at all and focus on the person and the action. Do NOT "
+    "use dates.\n"
     "10. METAPHOR AND SENSORY DETAIL: concrete, original images - invent fresh "
     "metaphors for THIS story, never reuse a metaphor from a different episode.\n"
     "11. RHETORICAL QUESTIONS as pivots between beats - and 2-3 times per episode, "
@@ -1968,7 +1978,14 @@ NARRATION_SYSTEM_PROMPT = (
     "should.').\n"
     "14. NEVER invent facts that contradict the article. Expand with cinematic framing, "
     "sensory detail and dramatic tension only.\n"
-    "15. OUTPUT CONTRACT: say NOTHING except the narration itself. Never write meta "
+    "15. NO AI-SLOP TELLS (STRICT): never write empty negation-contrast logic like "
+    "'It is not X, it is Y', 'This isn't about X, it's about Y', 'Don't be fooled, "
+    "this is actually...', 'What looks like X is really Y', or any sentence that "
+    "announces what something is NOT before saying what it is. Say directly what "
+    "something IS. Also avoid generic filler openers ('But here's the thing', 'What "
+    "you might not know', 'It turns out'). Every sentence must carry real story "
+    "content.\n"
+    "16. OUTPUT CONTRACT: say NOTHING except the narration itself. Never write meta "
     "text or labels - no 'Here are exactly 5 narration paragraphs', no 'Paragraph 1:', "
     "no 'Narration:', no 'Sure, here are...', no 'I've written...', no numbering, no "
     "headers, no stage directions, no intros, no summaries, no signposting of any kind. "
@@ -1976,9 +1993,11 @@ NARRATION_SYSTEM_PROMPT = (
     "spoken on camera. Output ONLY the raw narration paragraphs.\n\n"
     "I will give you an excerpt of a news article plus story context. Your job: EXPAND "
     "it into a gripping documentary narration. Write in the present tense, cinematic, "
-    "dramatic - build suspense, then resolve triumphantly near the end. Every narration "
-    "paragraph must be 2-4 sentences and cover a DIFFERENT beat - do not repeat ideas "
-    "across paragraphs, and never repeat beats I tell you are already covered."
+    "dramatic - build suspense, then resolve triumphantly near the end. Keep the "
+    "protagonist and the action at the centre of every paragraph; use locations "
+    "sparingly. Every narration paragraph must be 2-4 sentences and cover a DIFFERENT "
+    "beat - do not repeat ideas across paragraphs, and never repeat beats I tell you "
+    "are already covered."
     "\n\n"
     "When I ask you to 'generate exactly N narration paragraphs based on this context', "
     "produce EXACTLY N paragraphs, expanding the source material with cinematic detail "
@@ -2117,6 +2136,67 @@ def _cap_sentence(s: str) -> str:
     return s[0].upper() + s[1:]
 
 
+# Regexes for the AI-slop "it is not X, it is Y" negation-contrast tell. When the
+# writer announces what something is NOT before saying what it is, we strip the
+# empty "not X," preamble and keep the positive clause so the sentence carries
+# real content. Deterministic guard that runs on every narration paragraph -
+# the LLM prompt bans it (rule 15) but this catches anything that still slips
+# through (Joe 2026-08-10).
+_AI_SLOP_CONTRAST = [
+    # "It is not X, it is Y." -> "It is Y."  /  "This isn't about X, it's about Y."
+    re.compile(
+        r"(?:it|this|that)\s*(?:'s|'re)?\s+(?:is\s+not|isn't|isnt|was\s+not|wasn't)\s+"
+        r"(?:about\s+|really\s+|just\s+|actually\s+)?[^.,;!?]*?,\s*"
+        r"(?:it|this|that|what)\s*'?s?\s+(?:about\s+|really\s+)?(?:is|was|means)\s+",
+        re.I),
+    # "It's not X, it's Y."  (apostrophe-compressed subject, no space before 's)
+    re.compile(
+        r"(?:it|this|that)'s\s+(?:not|n't)\s+"
+        r"(?:about\s+|really\s+|just\s+|actually\s+)?[^.,;!?]*?,\s*"
+        r"(?:it|this|that|what)\s*'?s?\s+(?:about\s+|really\s+)?(?:is|was|means)\s+",
+        re.I),
+    # "Not X, but Y." / "This isn't X. It's Y."
+    re.compile(
+        r"not\s+[^.,;!?]{1,80},\s*but\s+(?:it|this|that|really)\s+",
+        re.I),
+    # "Don't be fooled, this is actually..." / "What looks like X is really Y"
+    re.compile(
+        r"don'?t\s+be\s+fooled[^.]*?,\s*",
+        re.I),
+    re.compile(
+        r"what\s+(?:looks?\s+like|seems?\s+like|appears\s+to\s+be)\s+[^.]*?\s+is\s+really\s+",
+        re.I),
+    # Generic filler openers that signal padding, not story.
+    re.compile(
+        r"\b(?:but\s+here's\s+the\s+thing|here's\s+the\s+thing|what\s+you\s+might\s+not\s+know|"
+        r"it\s+turns\s+out|as\s+it\s+turns\s+out|the\s+truth\s+is|in\s+reality|"
+        r"at\s+the\s+end\s+of\s+the\s+day)\s*[,:]?\s+",
+        re.I),
+]
+
+
+def _purge_ai_slop(text: str) -> str:
+    """Deterministically strip empty negation-contrast / filler slop from one
+    narration paragraph so the spoken script never contains the AI tell.
+
+    Only removes the empty 'not X,' preamble or filler opener, keeping the
+    positive clause that follows (so content is preserved, not rewritten).
+    Returns the cleaned text; paragraphs that are mostly slop are left as-is.
+    """
+    if not text:
+        return text
+    out = text
+    for rx in _AI_SLOP_CONTRAST:
+        out = rx.sub("", out)
+    # clean up doubled spaces + leading lowercase orphan after a strip
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    # If we chopped the very first word into a lowercase clause, re-cap it
+    if out and out[0].islower():
+        out = out[0].upper() + out[1:]
+    return out
+
+
+
 def _pace_narration(paras: list[str], bible: Optional[dict] = None) -> list[str]:
     """Deterministic pacing + rhythm pass on the narration.
 
@@ -2160,6 +2240,69 @@ def _pace_narration(paras: list[str], bible: Optional[dict] = None) -> list[str]
         # 4. rebuild the paragraph (join with single spaces; keep sentence caps)
         out.append(" ".join(sents))
     return out
+
+
+def _flatten_narration_to_sentences(narration: list[str],
+                                    chapter_events: Optional[list] = None,
+                                    establishing_map: Optional[dict] = None,
+                                    anchor_events: Optional[list] = None
+                                    ) -> tuple[list[str], dict, list, dict, list]:
+    """Split every narration paragraph into its individual SENTENCES.
+
+    Returns (sentences, sentence_para_map, chapter_events, establishing_map,
+    anchor_events) where:
+      - sentences: flat list of one-string-per-spoken-sentence. Chapter marker
+        lines ("Chapter N - Title") and establishing lines ("Meet X." / "Evart,
+        Michigan.") are already single sentences, so they pass through as-is.
+      - sentence_para_map: {sentence_index: full parent paragraph text} used as
+        CONTEXT when building each sentence's image prompt (Joe 2026-08-10).
+      - the three event maps are REMAPPED from old paragraph indices to the new
+        sentence indices so downstream chapter/establishing/anchor logic stays
+        aligned.
+
+    Each returned sentence becomes its own shot / TTS clip / image, so every
+    sentence the narrator says has a matching image that stays on screen for
+    exactly that sentence's TTS duration.
+    """
+    chapter_events = list(chapter_events or [])
+    establishing_map = dict(establishing_map or {})
+    anchor_events = list(anchor_events or [])
+    sentences: list[str] = []
+    para_map: dict[int, str] = {}
+    old_to_new: dict[int, int] = {}  # old paragraph idx -> first sentence idx
+    for idx, para in enumerate(narration):
+        para = re.sub(r"\s+", " ", para).strip()
+        if not para:
+            continue
+        parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+", para) if s.strip()]
+        # Chapter markers / establishing lines are a single line -> one sentence.
+        if CHAPTER_RE.match(para) or len(parts) == 0:
+            parts = [para]
+        if not parts:
+            continue
+        first = len(sentences)
+        for s in parts:
+            s = _cap_sentence(s.rstrip().strip())
+            if not s:
+                continue
+            para_map[len(sentences)] = para
+            sentences.append(s)
+        old_to_new[idx] = first
+    if not sentences:
+        return narration, {}, chapter_events, establishing_map, anchor_events
+    # Remap event indices from old paragraph idx -> new sentence idx
+    def _remap(i):
+        return old_to_new.get(i, i)
+    for ev in chapter_events:
+        if "para_idx" in ev:
+            ev["para_idx"] = _remap(ev["para_idx"])
+    for ev in anchor_events:
+        if "para_idx" in ev:
+            ev["para_idx"] = _remap(ev["para_idx"])
+    establishing_map = {_remap(i): m for i, m in establishing_map.items()}
+    print(f"  [SENT] narration flattened: {len(narration)} paragraphs "
+          f"-> {len(sentences)} sentences (one image per sentence)")
+    return sentences, para_map, chapter_events, establishing_map, anchor_events
 
 
 def _build_narration_script(paragraphs: list[str],
@@ -2218,6 +2361,7 @@ def _build_narration_script(paragraphs: list[str],
         for p in parts:
             p_clean = re.sub(r"^\s*[-*#]+\s*", "", p).strip()
             p_clean = _strip_narration_meta(p_clean)
+            p_clean = _purge_ai_slop(p_clean)
             if len(p_clean) > 40:
                 narration_paras.append(p_clean)
                 added += 1
@@ -3317,22 +3461,29 @@ def _parse_shot_response(text: str) -> dict:
 
 def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                      context: Optional[dict] = None,
-                     establishing_map: Optional[dict] = None) -> list[dict]:
-    """Stage 2: for each narration paragraph, generate a shot entry.
+                     establishing_map: Optional[dict] = None,
+                     sentence_para_map: Optional[dict] = None) -> list[dict]:
+    """Stage 2: for each narration sentence, generate a shot entry.
+
+    Each shot = ONE spoken sentence with its OWN image (Joe 2026-08-10). The
+    narration list is the flattened sentence list (see
+    _flatten_narration_to_sentences), so every sentence becomes its own shot,
+    its own TTS clip and its own image that stays on screen for exactly that
+    sentence's TTS duration.
 
     Injects the episode context (era/places/environments/props) and the
-    director's bible (hero paragraphs) so the shot list fits ANY topic and
+    director's bible (hero sentences) so the shot list fits ANY topic and
     magnifies the right moments. Hero beats get ECU framing + a riser SFX.
-    Chapter paragraphs get a direct black-card shot (no LLM call, no image
-    generation - the render pass shows a black placeholder where the glowing
-    chapter title is burned in pass 2).
+    Chapter sentences get a direct card shot (no LLM call, no image
+    generation - the render pass shows the card image where the glowing
+    chapter title is burned). Establishing sentences render as WIDE frames.
 
-    establishing_map: {narration_idx: {kind: 'location'|'character', name}}
-    from _inject_establishing_shots(). Those indices render as WIDE establishing
-    frames (EWS for a location, WS/full for a character) so a new place/person
-    gets a proper establishing shot on first mention.
+    sentence_para_map: {sentence_idx: full parent paragraph} so each shot can
+    carry its full paragraph as CONTEXT for the image prompt while the shot
+    focuses on its own single sentence.
     """
     establishing_map = establishing_map or {}
+    sentence_para_map = sentence_para_map or {}
     print("\n[LLM] Stage 2: building shot list from narration...")
     context = context or {}
     hero_set = set(bible.get("hero_paras", []) or []) if bible else set()
@@ -3381,6 +3532,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
             # always crisp and never in the source art.
             shots.append({
                 "narration": para,
+                "paragraph_context": sentence_para_map.get(i, para),
                 "narration_idx": i,
                 "shot_type": "EWS" if is_loc else "WS",  # establishing wide/full
                 "angle": "eye-level",
@@ -3399,6 +3551,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
         if m_chap:
             shots.append({
                 "narration": para,
+                "paragraph_context": sentence_para_map.get(i, para),
                 "narration_idx": i,
                 "shot_type": "CU",
                 "angle": "eye-level",
@@ -3451,9 +3604,24 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
         if not scene:
             print(f"  [LLM] Shot {i+1}: parse failed, skipping ({text[:60]!r})")
             continue
+        # MACHINE-SLOP REWRITE (Joe 2026-08-10): if a BUSINESS shot's scene
+        # drifted to an abstract machine/engine structure, rewrite it to a real
+        # building-with-logo / screen-with-logo scene so the image matches the
+        # company, not a "big machine engine thing".
+        if _is_business_shot_meta(character, scene, paragraph_context := sentence_para_map.get(i, para)):
+            if _is_machine_slop(scene):
+                scene = (
+                    "The exterior of the company's real office building, the "
+                    "business name and logo displayed on the facade and "
+                    "signage, employees going about their day outside, realistic "
+                    "corporate architecture"
+                )
+                print(f"  [LLM] Shot {i+1}: business machine-slop scene -> "
+                      f"rewrote to building-with-logo")
 
         shots.append({
             "narration": para,
+            "paragraph_context": sentence_para_map.get(i, para),
             "narration_idx": i,
             "shot_type": shot_type,
             "angle": angle,
@@ -3478,6 +3646,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
         for i, para in enumerate(narration_paras[:12]):
             shots.append({
                 "narration": para,
+                "paragraph_context": sentence_para_map.get(i, para),
                 "narration_idx": i,
                 "shot_type": ["EWS", "WS", "MS", "CU", "ECU"][i % 5],
                 "angle": ["eye-level", "low-angle", "high-angle", "over-the-shoulder", "from-behind"][i % 5],
@@ -4271,6 +4440,65 @@ def _inject_prop_visuals(text: str) -> str:
         return ""
     return " Include these key objects from the scene: " + "; ".join(descs) + "."
 
+# Machine/engine-structure guard (Joe 2026-08-10): when a shot is about a
+# BUSINESS, the image should show the business's BUILDING with its logo, or a
+# SCREEN/wall displaying the logo - NOT an abstract complex machine/engine
+# structure (the LLM was drifting to "big machine engine type structures" for
+# business shots). These keyword sets detect the drift so the prompt can be
+# rewritten to a building-with-logo / screen-with-logo scene.
+_MACHINE_SLOP_KW = re.compile(
+    r"(?i)\b(gears?|gear\s+train|engine\s+block|pistons?|combustion|crankshaft|"
+    r"turbine|turbine\s+blades|complex\s+engine|mechanical\s+heart|machinery\s+core|"
+    r"industrial\s+gears|macro\s+shot\s+of\s+(?:the\s+)?machinery|internal\s+machinery|"
+    r"engine\s+components|big\s+machine|massive\s+machine|machine\s+engine)\b")
+
+
+def _is_machine_slop(text: str) -> bool:
+    """True if the text describes an abstract machine/engine structure (the
+    business-shot drift Joe flagged). Used to force a business-building rewrite."""
+    if not text:
+        return False
+    return bool(_MACHINE_SLOP_KW.search(text))
+
+
+def _is_business_shot_meta(character: str, scene: str, narration: str = "") -> bool:
+    """Business-shot detection that works on raw shot-list metadata (before the
+    shot dict exists). Mirrors _is_business_shot: business-location keywords in
+    the scene, OR a known brand name alongside a location cue."""
+    if not scene:
+        return False
+    sc, narr = scene.lower(), (narration or "").lower()
+    if re.search(
+            r"(?i)\b(hq|headquarters|head office|office|corporate|company|"
+            r"startup|founded|boardroom|executive suite|lobby|factory floor|"
+            r"data center|server room|warehouse|office building|signage|"
+            r"storefront|lab|the office|their office|at the company)\b", sc):
+        return True
+    blob = f"{sc} {narr}"
+    if any(kw in blob for kw in ("building", "campus", "hq", "headquarters",
+                                 "office", "facility", "plant", "factory",
+                                 "store", "storefront", "lab", "laboratory",
+                                 "studio", "showroom", "warehouse", "floor")):
+        _load_brand_manifest()
+        for _bn in list(_KNOWN_BRANDS) + list(AI_ORGS):
+            if _bn and _bn.lower() in blob:
+                return True
+    return False
+
+
+def _business_building_clause(shot: dict) -> str:
+    """For a BUSINESS shot, steer the image to a real building with the logo on
+    its facade (or a screen/wall showing the logo) instead of an abstract
+    machine/engine. Returns an instruction clause, or '' for non-business shots."""
+    if not _is_business_shot(shot):
+        return ""
+    return (" The subject is a REAL business - show its actual building exterior "
+            "with the company name/logo on the facade or signage, OR an interior "
+            "with the logo displayed on a wall/screen. This is a place people "
+            "work, NOT a machine, NOT abstract gears or engine parts, NOT a "
+            "complex industrial mechanism - a real building or office.")
+
+
 def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> str:
     """Build the prompt for ONE shot (shared by full gen and resume regen).
     Discovery logic (Joe 2026-08-06):
@@ -4286,19 +4514,29 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     if shot.get("shot_type"):
         cam_desc = f", {shot['shot_type']} framing, {angle} camera angle"
     scene = shot.get("scene", "")
-    # ---- GROUND THE IMAGE IN THE ACTUAL NARRATION (Joe 2026-08-09) ----
-    # The shot is generated alongside the exact TTS line the narrator will
-    # speak over it. Feed that narration text into the prompt so the visual
-    # matches the audio 200% - the scene, subject, business, place and action
-    # all come from what is actually said on that shot, not a vague label.
+    # ---- GROUND THE IMAGE IN THE ACTUAL NARRATION (Joe 2026-08-10) ----
+    # Each shot is ONE spoken SENTENCE with its own image. The image prompt is
+    # built from that specific sentence, but the LLM is also given the FULL
+    # parent paragraph as CONTEXT so it understands what comes before and after
+    # the selected sentence (the other sentences get their own shots generated
+    # the same way). The sentence is the subject; the paragraph is context only.
     narration = str(shot.get("narration") or "").strip()
+    paragraph = str(shot.get("paragraph_context") or "").strip()
     narr_ctx = ""
     if narration:
         narr_ctx = (
-            f" The narrator says over THIS shot: \"{narration[:900]}\". "
-            f"Render the scene, subject, business, place and action to match "
-            f"exactly what is being said - every named company, person, place "
-            f"and object in that narration belongs in the frame.")
+            f" This image is for the sentence the narrator says over THIS shot: "
+            f"\"{narration[:900]}\". Build the scene, subject, business, place "
+            f"and action to match THIS sentence exactly.")
+        if paragraph and paragraph != narration:
+            narr_ctx += (
+                f" The following is the REST OF THE PARAGRAPH for CONTEXT ONLY - "
+                f"it tells you what happens right before and after this sentence, "
+                f"so the scene is aware of the surrounding story. It will be "
+                f"rendered as its own separate images, so do NOT depict its "
+                f"specific actions, only keep the mood, characters and location "
+                f"consistent: \"{paragraph[:1200]}\"."
+            )
     # PROP VISUALS (Joe 2026-08-09): if the narration/scene names a known prop
     # (vault, library, casino, server, etc), inject its visual descriptor so it
     # appears in the frame with the right context.
@@ -4337,6 +4575,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         # the scene-only style with zero human language so no person appears.
         return (
             f"{SCENE_STYLE}. {scene}{cam_desc}.{narr_ctx}{prop_clause} "
+            f"{_business_building_clause(shot)}"
             f"16:9 widescreen cinematic documentary frame, high detail "
             f"illustration,{DOF_CLAUSE} EXACTLY ONE "
             f"continuous scene, one location, no collage, no split panels, "
@@ -4357,6 +4596,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     char_part = " ".join(blocks)
     return (
         f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx}{prop_clause} "
+        f"{_business_building_clause(shot)}"
         f"16:9 widescreen cinematic documentary frame, high detail "
         f"illustration,{DOF_CLAUSE} EXACTLY ONE continuous "
         f"scene, no collage, no duplicated figures{no_text_clause}"
@@ -7895,11 +8135,6 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                 # sits with the shutter. Only when the LLM didn't already pick
                 # an sfx for the shot so we never triple-stack.
                 if shot.get("sfx", "NONE") == "NONE":
-                    vcr = _sfx_path("glitch-white-noise-flicker")
-                    if vcr and vcr.is_file():
-                        placements.append((str(vcr), start + 0.1, None))
-                        print(f"  [AUDIO] VCR static 'glitch-white-noise-flicker' "
-                              f"@{start + 0.1:.1f}s (establishing)")
                     wkey = _pick_sfx("sweep-")
                     if wkey:
                         wm = SFX_LIBRARY[wkey]
@@ -8273,8 +8508,8 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
     # frame-to-frame motion variance vs 2x - cv 0.73 -> 0.41 on noise imagery),
     # and zoom from the exact center so the crop never drifts.
     zoom_expr = f"z='if(eq(on,1),1,min(1+0.06*(on-1)/{max(n_frames-1,1)},1.06))'"
-    # Main image pipeline. Trailing [base] label ONLY added when the VCR
-    # scanline blend needs to splice in (otherwise it'd dangle before [vout]).
+    # Main image pipeline (single-pass render no longer calls this per-clip
+    # path, but keep it as a minimal reference).
     main = (
         f"[0:v]loop=1:size=1:start=0,"
         f"scale={OV_W}:{OV_H}:flags=lanczos:force_original_aspect_ratio=increase,"
@@ -8283,22 +8518,6 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
         f"d={n_frames}:s={W_RES}x{H_RES}:fps=24,"
         f"fade=t=in:st=0:d=0.3,fade=t=out:st={max(dur-0.3,0):.2f}:d=0.3"
     )
-    # VCR / scanlines look for establishing frames (Joe 2026-08-09):
-    #  - a generated dark-line scanline overlay (2px on / 2px off, blended)
-    #  - temporal static noise + slight chroma tint for the aged-broadcast look
-    #  - pairs with the white-noise-flicker SFX added in the audio mix.
-    if vcr_effect:
-        # The scanline layer is nullsrc+geq (black on alternate lines) then
-        # blended on at low opacity so the establishing image stays readable.
-        scan = (f"[base];"
-                f"nullsrc=size={W_RES}x{H_RES}:rate=24,"
-                f"geq=r='if(lt(mod(Y,4),2),0,255)':"
-                f"g='if(lt(mod(Y,4),2),0,255)':"
-                f"b='if(lt(mod(Y,4),2),0,255)':"
-                f"a='if(lt(mod(Y,4),2),255,0)'[scan];"
-                f"[base][scan]blend=all_mode=overlay:all_opacity=0.35,"
-                f"eq=saturation=0.9,noise=alls=5:allf=t,hue=b=2")
-        main += "[base]" + scan
     if black_frames:
         # 2 frames of black at the very start = camera shutter between images
         main += ",tpad=start=2:color=black"
@@ -8366,6 +8585,58 @@ def _compute_clip_starts(shots: list[dict]) -> list[float]:
         starts.append(cursor)
         cursor += _get_audio_duration(s["tts_path"]) + s.get("gap_after", 0.3)
     return starts
+
+
+def _deterministic_chapter_events(shots: list[dict], clip_starts: list[float],
+                                  chapter_events: Optional[list] = None) -> list[dict]:
+    """Chapter-card times derived DIRECTLY from the shot timeline, not whisper.
+
+    Since every sentence is its own shot with a KNOWN TTS clip, the chapter
+    card's on-screen window is EXACTLY the chapter sentence's clip window:
+    start = clip_starts[pos], end = clip_starts[pos] + tts_dur. This is the
+    root fix for the ep12 "incorrect chapter titles at the wrong time" bug -
+    whisper mis-hearing a chapter number can no longer move a card. Falls back
+    to whisper-resolved times (passed in) only when clip_starts is unavailable.
+    """
+    valid_pos = {}
+    _vp = 0
+    for _i, s in enumerate(shots):
+        if s.get("tts_path") and os.path.isfile(s["tts_path"]):
+            valid_pos[_i] = _vp
+            _vp += 1
+    out = []
+    for ev in chapter_events or []:
+        # Only actual chapter events belong here - location/person anchors must
+        # NOT be treated as chapters (they'd get a None chapter_num and crash
+        # the ASS burn + risk a doubled lower-third title). (Joe 2026-08-10)
+        if ev.get("kind") != "chapter":
+            continue
+        pi = ev.get("para_idx")
+        # para_idx is the narration index; map to its shot position
+        shot_pos = None
+        for _j, s in enumerate(shots):
+            if int(s.get("narration_idx", -1)) == pi or (
+                    s.get("is_chapter") and int(s.get("chapter_num", 0)) == int(ev.get("chapter_num", 0))):
+                if s.get("tts_path") and os.path.isfile(s["tts_path"]):
+                    shot_pos = _j
+                break
+        if shot_pos is None or shot_pos not in valid_pos:
+            continue
+        vp = valid_pos[shot_pos]
+        if vp >= len(clip_starts):
+            continue
+        start = clip_starts[vp]
+        dur = _get_audio_duration(shots[shot_pos]["tts_path"])
+        ch_num = ev.get("chapter_num") or ev.get("chapter")
+        out.append({
+            "kind": "chapter",
+            "start": round(start, 3),
+            "end": round(start + dur, 3),
+            "chapter_num": ch_num,
+            "title": ev.get("title", ""),
+            "text": f"Chapter {ch_num} - {ev.get('title', '')}",
+        })
+    return out
 
 
 def _ensure_voice_track(shots: list[dict], episode_num: int) -> Optional[str]:
@@ -8482,174 +8753,164 @@ def _safe_replace(src: str, dst: str, tries: int = 6) -> bool:
 
 def _render_video(shots: list[dict], episode_num: int,
                   title_events: Optional[list] = None) -> str:
-    """Render all shots into one 1080p video with full audio mix.
+    """Render all shots into one video with a SINGLE ffmpeg pass (Joe 2026-08-10).
 
-    title_events = RESOLVED title events ({kind, start, end, ...}) - used to
-    (a) place typewriter/glitch/shutter SFX into the mix, and (b) burn the
-    animated glowing titles in pass 2 after the render.
+    Each sentence is its own shot with its own image + TTS clip. The image is
+    shown for EXACTLY that sentence's TTS duration (held through its pacing
+    gap), so the picture always matches the narration being spoken. All images
+    are zoompan'd, concatenated, and the ASS titles (chapter cards + typewriter
+    loc/person labels) are burned INLINE in the same ffmpeg command - there is
+    NO separate clip render, NO concat pass, NO pass-2 title burn.
+
+    Chapter-card timing is DETERMINISTIC (derived from the sentence timeline,
+    not whisper), which fixes the ep12 "incorrect chapter titles at the wrong
+    time" bug. Scanlines/VCR effect is REMOVED (it was mangling timing).
+
+    title_events = optional whisper-resolved events (used for location/person
+    typewriter SFX placement + the burn). Chapter cards are recomputed here
+    deterministically.
     """
-    print("\n[VIDEO] Rendering 1080p documentary...")
+    print("\n[VIDEO] Rendering documentary (SINGLE PASS)...")
     valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
     if not valid:
         print("  [FAIL] No TTS clips to render")
         return ""
 
-    # Build the full audio mix first (voice+music+sfx+title sfx). Output path is
-    # deterministic, so an already-finished mix is reused on resume.
+    # Build the full audio mix first (voice+music+sfx). Captures exact per-shot
+    # start times (clip_starts) so each image can be shown for its exact
+    # duration. Deterministic path -> reused on resume.
     mixed_audio = str(RENDERED_AUDIO / f"ep{episode_num:03d}_mix.wav")
+    clip_starts = []
     if os.path.isfile(mixed_audio) and os.path.getsize(mixed_audio) > 1000:
         print(f"  [AUDIO] Mix exists, reusing ({os.path.getsize(mixed_audio)//1024}KB)")
+        clip_starts = _compute_clip_starts(valid)
     else:
-        _build_audio_mix(valid, episode_num, title_events)
+        _mix = _build_audio_mix(valid, episode_num, title_events)
+        if _mix:
+            _, _, clip_starts = _mix
     if not os.path.isfile(mixed_audio) or os.path.getsize(mixed_audio) < 1000:
         print("  [WARN] Audio mix failed, falling back to voice-only concat")
         mixed_audio = ""
+    if not clip_starts:
+        clip_starts = _compute_clip_starts(valid)
 
-    shutter_paras = _camera_shutter_paras(valid, title_events)
+    # ---- DETERMINISTIC chapter-card times (from the sentence timeline) ----
+    # The chapter sentence is its own clip, so its on-screen window = that
+    # clip's exact start..end. No whisper -> a mis-heard number can never move
+    # a card (the ep12 root-cause fix).
+    chap_events = _deterministic_chapter_events(valid, clip_starts, title_events)
+    # Keep location/person typewriter events (whisper-resolved) but drop the
+    # old chapter events from the passed list so we use OUR deterministic ones.
+    if title_events:
+        others = [ev for ev in title_events if ev.get("kind") != "chapter"]
+        title_events = chap_events + others
+
+    # Per-image on-screen duration: exactly this sentence's TTS + its pacing gap
+    # (= clip_starts[i+1]-clip_starts[i]). Matches the mix timeline 1:1.
+    durs = []
+    for i, s in enumerate(valid):
+        if i < len(valid) - 1:
+            durs.append(max(clip_starts[i + 1] - clip_starts[i], 0.4))
+        else:
+            durs.append(max(_get_audio_duration(s["tts_path"]) + s.get("gap_after", 0.3), 0.4))
+    total_vid = sum(durs)
+    print(f"  [VIDEO] {len(valid)} sentence-images, {_fmt_time(total_vid)} total")
+
+    W_RES, H_RES = _get_output_resolution()
+    OV_W, OV_H = W_RES * 4, H_RES * 4
+    fallback_img = str(SHOTS_DIR / "_fallback_bg.png")
+    output_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}.mp4")
 
     temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_render_{episode_num}_"))
-    clip_files = []
     try:
-        fallback_img = str(SHOTS_DIR / "_fallback_bg.png")
-        # Persistent clip folder: finished clips survive crashes so a resume
-        # run skips re-rendering them. Deleted after the final video succeeds.
-        clip_dir = BATCH_TEMP / f"ep{episode_num:03d}"
-        clip_dir.mkdir(parents=True, exist_ok=True)
-        reused = 0
-        # REGEN_CLIPS=1 (Joe 2026-08-09): re-render EVERY clip from its image,
-        # ignoring finished clips in batch_temp (e.g. after a clip-render change
-        # like the VCR/scanlines effect). Default off = reuse finished clips.
-        regen_clips = os.environ.get("REGEN_CLIPS", "0").strip().lower() in ("1", "yes", "y", "true")
-        if regen_clips:
-            print("  [CLIPS] REGEN_CLIPS=1 - re-rendering all clips (ignoring batch_temp)")
-        for idx, shot in enumerate(shots):
-            if not (shot.get("tts_path") and os.path.isfile(shot["tts_path"])):
-                continue
-            clip_out = str(clip_dir / f"clip{idx:02d}.mp4")
-            if (not regen_clips and os.path.isfile(clip_out) and os.path.getsize(clip_out) > 1000
-                    and _get_audio_duration(clip_out) > 0.5):
-                clip_files.append(clip_out)
-                reused += 1
-                print(f"  [CLIP {idx+1}/{len(valid)}] reused from batch_temp")
-                continue
-            nidx = shot.get("narration_idx", idx)
-            black_frames = nidx in shutter_paras
-            # Establishing frames AND chapter cards get the scanlines+VCR look
-            # (Joe 2026-08-09): aged-broadcast frame, pairs with the
-            # white-noise-flicker SFX.
-            vcr = bool(shot.get("is_establishing") or shot.get("is_chapter"))
-            ok = _render_clip(shot.get("image_path", ""), shot["tts_path"], clip_out,
-                              fallback_img, black_frames=black_frames,
-                              vcr_effect=vcr)
-            if ok:
-                clip_files.append(clip_out)
-                print(f"  [CLIP {idx+1}/{len(valid)}] rendered"
-                      f"{' (shutter: 2 black frames)' if black_frames else ''}"
-                      f"{' (VCR/scanlines)' if vcr else ''}")
-            else:
-                print(f"  [CLIP {idx+1}/{len(valid)}] FAILED")
-        print(f"  [CLIPS] {reused}/{len(clip_files)} reused from batch_temp, "
-              f"{len(clip_files) - reused} freshly rendered")
+        # ---- Resolve per-shot image paths ----
+        imgs = []
+        for i, s in enumerate(valid):
+            p = s.get("image_path") or ""
+            if not os.path.isfile(p):
+                p = fallback_img
+            if not os.path.isfile(p):
+                from PIL import Image as _PIL
+                Image = _PIL
+                img = Image.new("RGB", (W_RES, H_RES), (18, 18, 22))
+                p = str(SHOTS_DIR / "_fallback_bg.png")
+                img.save(p)
+            imgs.append(p)
 
-        if not clip_files:
-            print("  [FAIL] No clips rendered")
-            return ""
+        # ---- Build the ASS title file (chapter + typewriter) ----
+        ass_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titles.ass")
+        _burn_ok = False
+        if split_node_titles is not None and title_events:
+            try:
+                split_node_titles.build_title_ass(title_events, ass_path,
+                                                  W_RES, H_RES, 24)
+                _burn_ok = True
+            except Exception as e:
+                print(f"  [TITLES] ASS build failed: {e}")
 
-        concat_list = temp_dir / "concat.txt"
-        with open(concat_list, "w") as f:
-            for c in clip_files:
-                f.write(f"file '{c}'\n")
-        output_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}.mp4")
-        # Stream-copy concat (NO re-encode): every clip is rendered with identical
-        # hevc_nvenc/aac params by _render_clip, so the demuxer merges them
-        # losslessly and ~100x faster than re-encoding. Re-encoding 100+ files
-        # through NVENC+AAC is the NaN AAC corruption failure mode (Qavg: 65461).
-        if mixed_audio and os.path.isfile(mixed_audio):
-            # Video only - the audio is replaced by the separate mix below
-            concat_cmd = [
-                "ffmpeg", "-y", "-v", "error", "-fflags", "+genpts",
-                "-f", "concat", "-safe", "0",
-                "-i", str(concat_list),
-                "-c:v", "copy", "-an",
-                "-movflags", "+faststart",
-                output_path
-            ]
+        # ---- ONE ffmpeg pass: zoompan each image -> concat -> burn ASS -> mux ----
+        # Filter graph written to a script file (avoids Windows cmdline length
+        # limits with hundreds of inputs) and passed via -filter_complex_script.
+        parts = []
+        for i, (p, dur) in enumerate(zip(imgs, durs)):
+            n_frames = max(int(dur * 24), 24)
+            zoom_expr = f"z='if(eq(on,1),1,min(1+0.06*(on-1)/{max(n_frames-1,1)},1.06))'"
+            parts.append(
+                f"[{i}:v]"
+                f"scale={OV_W}:{OV_H}:flags=lanczos:force_original_aspect_ratio=increase,"
+                f"crop={OV_W}:{OV_H},"
+                f"zoompan={zoom_expr}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                f"d={n_frames}:s={W_RES}x{H_RES}:fps=24,"
+                f"fade=t=in:st=0:d=0.2,fade=t=out:st={max(dur-0.2,0):.2f}:d=0.2,"
+                f"setsar=1,format=yuv420p[v{i}]")
+        concat_in = "".join(f"[v{i}]" for i in range(len(imgs)))
+        parts.append(f"{concat_in}concat=n={len(imgs)}:v=1:a=0[vc]")
+        if _burn_ok:
+            # Burn the ASS titles inline (relative path from RENDERED_VIDEO dir
+            # to dodge the drive-letter-colon filter parsing issue).
+            _sub = f"subtitles={Path(ass_path).name}"
+            _fd = Path(__file__).resolve().parent / "fonts"
+            if _fd.is_dir() and any(_fd.iterdir()):
+                _rel = os.path.relpath(str(_fd), start=str(RENDERED_VIDEO)).replace("\\", "/")
+                _sub += f":fontsdir={_rel}"
+            parts.append(f"[vc]{_sub}[vout]")
         else:
-            # No mix available: keep each clip's narration audio, still stream copy
-            concat_cmd = [
-                "ffmpeg", "-y", "-v", "error", "-fflags", "+genpts",
-                "-f", "concat", "-safe", "0",
-                "-i", str(concat_list),
-                "-c:v", "copy", "-c:a", "copy",
-                "-movflags", "+faststart",
-                output_path
-            ]
-        r = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=600)
-        if r.returncode != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) < 1000:
-            print(f"  [RENDER] Concat failed: {r.stderr[-200:]}")
-            return ""
+            parts.append("[vc]null[vout]")
+        graph = ";\n".join(parts)
+        graph_file = temp_dir / "graph.txt"
+        graph_file.write_text(graph, encoding="utf-8")
 
-        # Mux the full mixed audio (voice + music + sfx) over the video,
-        # with a final master gain so the loudest peak reaches 0dB
-        # (voice 0dB, music -19.5dB, SFX -15dB relative in the mix).
-        if mixed_audio and os.path.isfile(mixed_audio):
-            final_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_final.mp4")
-            master_filter = _master_gain_filter(mixed_audio)
-            mux_cmd = [
-                "ffmpeg", "-y", "-v", "error",
-                "-i", output_path, "-i", mixed_audio,
-                "-map", "0:v:0", "-map", "1:a:0",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
-            ]
-            if master_filter:
-                mux_cmd += ["-af", master_filter]
-            mux_cmd += [
-                "-avoid_negative_ts", "make_zero",
-                "-movflags", "+faststart",
-                "-shortest", final_path
-            ]
-            r2 = subprocess.run(mux_cmd, capture_output=True, text=True, timeout=300)
-            if r2.returncode == 0 and os.path.isfile(final_path) and os.path.getsize(final_path) > 1000:
-                _safe_replace(final_path, output_path)
+        cmd = ["ffmpeg", "-y"]
+        for p in imgs:
+            # Single-frame image input (NO -loop 1 / -framerate 24). zoompan's
+            # d=N + fps=24 generates EXACTLY N frames then EOF, so the concat
+            # advances past image 1. With -loop 1 the stream is infinite and
+            # concat never leaves the first image (all later shots go black).
+            cmd += ["-i", p]
+        cmd += ["-i", mixed_audio] if (mixed_audio and os.path.isfile(mixed_audio)) else []
+        audio_idx = len(imgs)
+        cmd += ["-filter_complex_script", str(graph_file)]
+        cmd += ["-map", "[vout]"]
+        if (mixed_audio and os.path.isfile(mixed_audio)):
+            cmd += ["-map", f"{audio_idx}:a"]
+        # NVENC single-pass encode; audio copied from the mix (already levelled).
+        cmd += ["-c:v", "hevc_nvenc", "-preset", "p7", "-rc", "vbr", "-cq", "28",
+                "-b:v", "0", "-pix_fmt", "yuv420p"]
+        if (mixed_audio and os.path.isfile(mixed_audio)):
+            cmd += ["-c:a", "aac", "-b:a", "192k"]
+        cmd += ["-movflags", "+faststart", "-t", f"{total_vid:.3f}", "-y", output_path]
+
+        # Run with cwd=RENDERED_VIDEO so the subtitles filter's relative .ass
+        # name (and fontsdir) resolve correctly (absolute -i paths still work).
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
+                           cwd=str(RENDERED_VIDEO))
+        if r.returncode != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) < 1000:
+            print(f"  [RENDER] single-pass failed: {r.stderr[-1500:]}")
+            return ""
 
         dur = _get_audio_duration(output_path)
         size_mb = os.path.getsize(output_path) / 1024 / 1024
-        print(f"  [OK] 1080p video: {_fmt_time(dur)}, {size_mb:.1f}MB -> {output_path}")
-
-        # -- PASS 2: burn animated glowing titles at whisper-matched times --
-        if split_node_titles is not None and title_events:
-            marker = output_path + ".titled"
-            if os.path.isfile(marker):
-                print("  [TITLES] already burned (marker present), skipping pass 2")
-            else:
-                # Joe 2026-08-09: chapter cards + establishing shots are rendered
-                # CLEAN (no baked text). FFmpeg burns everything at the end: the
-                # ASS chapter title over each chapter card, and the '/// NAME'
-                # typewriter label over each establishing shot (establishing
-                # events are pre-merged into title_events - see
-                # _merge_establishing_titles).
-                _burn_events = title_events
-                ass_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titles.ass")
-                burned = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titled.mp4")
-                try:
-                    split_node_titles.build_title_ass(_burn_events, ass_path)
-                    print(f"  [TITLES] pass 2: burning {len(_burn_events)} title events...")
-                    # Kicker + title are both inside the ASS now (Bahnschrift),
-                    # no pre-rendered chapter clips needed.
-                    if split_node_titles.burn_titles(
-                            output_path, ass_path, burned, timeout=2400):
-                        _safe_replace(burned, output_path)
-                        Path(marker).write_text("1")
-                        print("  [TITLES] burned OK (animated glowing titles)")
-                except Exception as e:
-                    print(f"  [TITLES] pass 2 failed: {e}")
-
-        # Episode complete: clean up the batch clips
-        for clip in clip_dir.glob("clip*.mp4"):
-            try: clip.unlink()
-            except: pass
-        try: clip_dir.rmdir()
-        except: pass
+        print(f"  [OK] Video: {_fmt_time(dur)}, {size_mb:.1f}MB -> {output_path}")
         return output_path
     finally:
         shutil.rmtree(str(temp_dir), ignore_errors=True)
@@ -8680,6 +8941,83 @@ def _thumbnail_headline(topic: str) -> str:
         return "THEY BEAT THE SYSTEM"
     return " ".join(words[:3]).upper()
 
+_THUMBNAIL_FONT = r"C:/Windows/Fonts/impact.ttf"      # classic bold YouTube thumbnail font
+_THUMBNAIL_FONT_FALLBACK = "fonts/MyriadPro-Bold.otf"  # project font if Impact missing
+
+def _thumb_font() -> str:
+    if os.path.isfile(_THUMBNAIL_FONT):
+        return _THUMBNAIL_FONT
+    cand = os.path.join(str(PROJECT_DIR), _THUMBNAIL_FONT_FALLBACK) if PROJECT_DIR else _THUMBNAIL_FONT_FALLBACK
+    return cand if os.path.isfile(cand) else _THUMBNAIL_FONT
+
+def _burn_thumbnail_text(scene_path: str, headline: str, out_path: str) -> bool:
+    """Overlay crisp 'SPLIT NODE' (top-left) + a short curiosity headline (lower
+    third) onto the thumbnail via FFmpeg drawtext (Impact, white fill, black
+    stroke, drop shadow). Rendering text IN the image via the image model garbles
+    it; burning vector text guarantees legible, correctly positioned packaging.
+    Aligns with Adam Del Duca's thumbnail rule: ~<=4 words, a curiosity gap the
+    title doesn't answer. The font is staged next to the output as a bare
+    filename so ffmpeg's filter parser never sees a drive-letter colon. Falls
+    back gracefully if FFmpeg/font fails."""
+    try:
+        pr = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x",
+             scene_path], capture_output=True, text=True)
+        if pr.returncode == 0 and "x" in pr.stdout:
+            try:
+                w, h = (int(x) for x in pr.stdout.strip().split("x")[:2])
+            except Exception:
+                w, h = 1280, 720
+        else:
+            w, h = 1280, 720
+        workdir = os.path.dirname(os.path.abspath(out_path)) or "."
+        # Stage the font + text files beside the output (bare names, no colons)
+        font_src = _thumb_font()
+        font_name = os.path.basename(font_src)
+        local_font = os.path.join(workdir, font_name)
+        if os.path.abspath(font_src) != os.path.abspath(local_font):
+            shutil.copyfile(font_src, local_font)
+        wm_tf = os.path.join(workdir, "_thumb_wordmark.txt")
+        hd_tf = os.path.join(workdir, "_thumb_headline.txt")
+        with open(wm_tf, "w", encoding="utf-8") as fh:
+            fh.write("SPLIT NODE")
+        with open(hd_tf, "w", encoding="utf-8") as fh:
+            fh.write(headline)
+        wm_size = max(24, int(h * 0.060))
+        wm_border = max(2, int(h * 0.005))
+        hd_size = max(32, int(h * 0.100))
+        # Fit the headline to the width (Impact cap-width estimate ~0.52*size)
+        est = sum(0.52 * hd_size for ch in headline if not ch.isspace()) \
+            + 0.2 * hd_size * max(0, len(headline.split()) - 1)
+        if est > 0.88 * w:
+            hd_size = max(24, int(hd_size * (0.88 * w) / est))
+        hd_border = max(3, int(h * 0.007))
+        vf = (
+            f"drawtext=fontfile={font_name}:fontsize={wm_size}:fontcolor=white:"
+            f"borderw={wm_border}:bordercolor=black:shadowx=3:shadowy=3:"
+            f"shadowcolor=black@0.6:textfile={os.path.basename(wm_tf)}:"
+            f"x={max(16, int(w * 0.02))}:y={max(16, int(h * 0.02))},"
+            f"drawtext=fontfile={font_name}:fontsize={hd_size}:fontcolor=white:"
+            f"borderw={hd_border}:bordercolor=black:shadowx=4:shadowy=4:"
+            f"shadowcolor=black@0.7:textfile={os.path.basename(hd_tf)}:"
+            f"x=(w-text_w)/2:y={int(h * 0.80)}"
+        )
+        cmd = ["ffmpeg", "-y", "-v", "error", "-i", scene_path,
+               "-vf", vf, "-frames:v", "1", out_path]
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir)
+        for tmp in (local_font, wm_tf, hd_tf):
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except Exception:
+                    pass
+        return r.returncode == 0 and os.path.isfile(out_path) \
+            and os.path.getsize(out_path) > 1000
+    except Exception as e:
+        print(f"  [THUMB] text burn error: {e}")
+        return False
+
 def _generate_thumbnail(topic: str, output_path: str) -> bool:
     print(f"  [THUMB] Generating thumbnail for: {topic[:60]}...")
     headline = _thumbnail_headline(topic)
@@ -8692,20 +9030,25 @@ def _generate_thumbnail(topic: str, output_path: str) -> bool:
         f"dramatic cinematic scene related to: {topic[:120]}. Moody lighting, "
         "dark color grade, high contrast, bold and clickable composition, "
         "16:9 landscape. "
-        "Large bold uppercase text 'SPLIT NODE' in the top-left corner. "
-        f"Large bold uppercase clickbait headline text '{headline}' centered in the "
-        "lower third. Crisp legible text, high-impact YouTube thumbnail. "
-        "CRITICAL: do NOT render the word FERN anywhere in the image, and do not "
-        "render any other channel names, logos, brand names, watermarks or "
-        "unrelated words. Only the exact text 'SPLIT NODE' (top-left) and the "
-        "headline (lower third) may appear as text. No other on-image text."
+        "CRITICAL: this image must contain NO text at all - no words, no "
+        "letters, no numbers, no logos, no watermarks, no captions, no speech "
+        "bubbles. Pure clean artwork only; text is added later by the video "
+        "editor."
     )
+    scene = os.path.join(os.path.dirname(output_path) or ".",
+                         "_ep_scene.png")
     try:
         import providers
-        ok = providers.generate_thumbnail(prompt, output_path, seed=70001)
-        if ok and os.path.isfile(output_path) and os.path.getsize(output_path) > 1000:
-            print(f"  [OK] Thumbnail: {os.path.getsize(output_path)//1024}KB -> {output_path}")
-            return True
+        ok = providers.generate_thumbnail(prompt, scene, seed=70001)
+        if ok and os.path.isfile(scene) and os.path.getsize(scene) > 1000:
+            if _burn_thumbnail_text(scene, headline, output_path):
+                print(f"  [OK] Thumbnail: {os.path.getsize(output_path)//1024}KB "
+                      f"-> {output_path} (headline '{headline}')")
+                return True
+            # Text burn failed - ship the art-only image rather than nothing.
+            print("  [WARN] thumbnail text burn failed - using art-only image")
+            shutil.copyfile(scene, output_path)
+            return os.path.isfile(output_path) and os.path.getsize(output_path) > 1000
         print("  [FAIL] Thumbnail provider returned no usable image")
     except Exception as e:
         print(f"  [FAIL] Thumbnail error: {e}")
@@ -8718,20 +9061,24 @@ def _generate_titles(topic: str, episode_num: int,
     msg = [
         {"role": "system", "content": (
             "You are a viral YouTube title generator for 'Split Node' - a channel about "
-            "ordinary people who beat the system. Write 3 clickbaity titles. "
+            "ordinary people who beat the system. Write 6 clickbaity titles. "
             "Each starts with '#XXX - ' where XXX is the episode number. "
             "Use the FERN formula: each title must IMPLICITLY promise the story's "
             "VISUAL HOOK (the striking thing the viewer will see) and tease the "
             "DEEPER QUESTION (the 'how did this happen / why' the episode answers) "
-            "without giving it away. Under 70 chars, reference the story directly. "
-            "Return ONLY 3 lines, one title per line, no numbering."
+            "without giving it away. Split the 6 across three proven title formulas, "
+            "2 each: (a) curiosity-driven - a mystery or tease the episode answers, "
+            "(b) number-driven - lead with an exact figure/amount from the story, "
+            "(c) outcome-driven - the transformation, the win, or the price paid. "
+            "Keep each under 70 characters INCLUDING the episode prefix. Reference "
+            "the story directly. Return ONLY 6 lines, one title per line, no numbering."
         )},
         {"role": "user", "content": (
             f"Episode #{episode_num:03d}\nTopic: {topic}\n"
             + (f"VISUAL HOOK: {bible.get('visual_hook','')}\n"
                f"DEEPER QUESTION: {bible.get('deeper_question','')}\n"
                if bible and (bible.get('visual_hook') or bible.get('deeper_question')) else "")
-            + "\nWrite 3 titles."
+            + "\nWrite 6 titles."
         )}
     ]
     text = _llm_chat(msg, max_tokens=250, temp=0.85)
@@ -8744,9 +9091,9 @@ def _generate_titles(topic: str, episode_num: int,
         elif prefix not in t:
             t = f"{prefix} {t.lstrip('#0123456789').lstrip('- ')}"
         result.append(t)
-    while len(result) < 3:
+    while len(result) < 6:
         result.append(f"{prefix} The {topic[:40]} story that broke the system")
-    result = result[:3]
+    result = result[:6]
 
     # Score the 3 titles against REAL Google Trends demand + YouTube competition
     # (trend-research-toolkit: SerpAPI trends + YouTube Data API via Split Node OAuth).
@@ -9511,6 +9858,10 @@ def _rebuild_script_for_resume(state: dict) -> dict:
     if story_bible:
         narration, establishing_map = _inject_establishing_shots(
             narration, bible=story_bible, anchor_events=anchor_events)
+    # SENTENCE-LEVEL SHOTS (Joe 2026-08-10): flatten to one shot per sentence.
+    narration, sentence_para_map, chapter_events, establishing_map, anchor_events = \
+        _flatten_narration_to_sentences(
+            narration, chapter_events, establishing_map, anchor_events)
     context = _build_episode_context(topic, paragraphs)
     bible = _build_directors_bible(topic, narration)
     _build_scene_board(narration, topic, episode_num)
@@ -9520,7 +9871,8 @@ def _rebuild_script_for_resume(state: dict) -> dict:
     if story_bible and story_bible.get("characters"):
         _shot_bible["characters"] = story_bible["characters"]
     shots = _build_shot_list(narration, bible=_shot_bible, context=context,
-                             establishing_map=establishing_map)
+                             establishing_map=establishing_map,
+                             sentence_para_map=sentence_para_map)
 
     character_sheets = _build_character_sheets(shots, narration, bible=story_bible)
     brands = _extract_brands(topic, paragraphs, narration)
@@ -10009,14 +10361,21 @@ def _resume_episode(state: dict) -> None:
         # so every establishing frame gets exactly one burned label (Joe 2026-08-09).
         title_events = _merge_establishing_titles(
             title_events, _build_establishing_events(shots, clip_starts))
+        # DETERMINISTIC chapter times (Joe 2026-08-10): use the exact chapter
+        # sentence window so video burn + description markers both use reliable
+        # times (whisper can mis-hear a chapter number).
+        _det_chaps = _deterministic_chapter_events(shots, clip_starts, chapter_events)
+        if _det_chaps:
+            title_events = _det_chaps + [ev for ev in title_events
+                                         if ev.get("kind") != "chapter"]
         for ev in title_events:
             print(f"    [{ev['kind']}] @{ev['start']:.2f}s '{ev.get('text', ev.get('title', ''))}'")
 
-    # 4. Video render - reuses finished clips in batch_temp + finished mix
+    # 4. Video render - single pass (finished mix reused, then one encode)
     if video_path and os.path.isfile(video_path) and os.path.getsize(video_path) > 1000:
         print(f"  [RESUME] Video exists, skipping: {video_path}")
     else:
-        print(f"\n[VIDEO] Rendering 1080p (finished clips reused from batch_temp)...")
+        print("\n[VIDEO] Rendering (single pass)...")
         video_path = _render_video(shots, episode_num, title_events)
         if not video_path:
             print("  [HALT] Video render failed - state kept for another resume.")
@@ -10399,6 +10758,15 @@ def _phase_llm(config: dict):
         narration, establishing_map = _inject_establishing_shots(
             narration, bible=story_bible, anchor_events=anchor_events)
 
+    # SENTENCE-LEVEL SHOTS (Joe 2026-08-10): split every narration paragraph
+    # into its individual sentences. Each sentence becomes its own shot / TTS
+    # clip / image, so every spoken sentence has a matching image that stays on
+    # screen for exactly that sentence's TTS duration. Chapter/establishing/
+    # anchor indices are remapped to the flattened sentence list.
+    narration, sentence_para_map, chapter_events, establishing_map, anchor_events = \
+        _flatten_narration_to_sentences(
+            narration, chapter_events, establishing_map, anchor_events)
+
     # START TTS IN PARALLEL (background thread) so it runs while we build the
     # world + images (codex/API) below.
     tts_thread, tts_results, tts_stop = _start_tts_worker(narration, episode_num)
@@ -10425,7 +10793,8 @@ def _phase_llm(config: dict):
     if story_bible and story_bible.get("characters"):
         _shot_bible["characters"] = story_bible["characters"]
     shots = _build_shot_list(narration, bible=_shot_bible, context=context,
-                             establishing_map=establishing_map)
+                             establishing_map=establishing_map,
+                             sentence_para_map=sentence_para_map)
 
     easter_egg = _ask_easter_egg()
     if easter_egg:
@@ -10525,6 +10894,14 @@ def _phase_finish(ep_ctx: dict) -> None:
             chapter_events, anchor_events + person_events, words, clip_starts)
         title_events = _merge_establishing_titles(
             title_events, _build_establishing_events(shots, clip_starts))
+        # DETERMINISTIC chapter times (Joe 2026-08-10): the chapter card's
+        # window = the chapter sentence's exact clip window, so the video burn
+        # AND the description chapter markers use the same reliable times
+        # (whisper can mis-hear a chapter number - this fixes that at the root).
+        _det_chaps = _deterministic_chapter_events(shots, clip_starts, chapter_events)
+        if _det_chaps:
+            title_events = _det_chaps + [ev for ev in title_events
+                                         if ev.get("kind") != "chapter"]
         for ev in title_events:
             print(f"    [{ev['kind']}] @{ev['start']:.2f}s '{ev.get('text', ev.get('title', ''))}'")
         _save_resume_state("titles", episode_num, article_url, topic, shots,
@@ -10581,15 +10958,22 @@ def _phase_finish(ep_ctx: dict) -> None:
         title = titles[0] if titles else f"#{episode_num:03d} - {topic[:60]}"
         print(f"  Title: {title}")
         _ensure_youtube_secret()
-        video_id = _upload_video_with_progress(video_path, title, description, tags_str)
+        _privacy = os.environ.get("YOUTUBE_PRIVACY", "public").strip().lower()
+        if _privacy not in ("public", "private", "unlisted"):
+            _privacy = "public"
+        video_id = _upload_video_with_progress(video_path, title, description, tags_str,
+                                               privacy=_privacy)
         if video_id and thumb_ok:
             _upload_thumbnail(video_id, thumb_path)
         if video_id:
             _add_video_to_playlist(video_id)
             EPISODE_COUNTER_FILE.write_text(str(episode_num))
             print(f"  [OK] Episode #{episode_num:03d} uploaded! https://youtu.be/{video_id}")
-            _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60,
-                                       description=description)
+            if _privacy == "public":
+                _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60,
+                                           description=description)
+            else:
+                print(f"  [SKIP] ({_privacy}) - no Discord announcement for non-public upload")
         else:
             print(f"  [WARN] Upload failed - video saved locally")
             EPISODE_COUNTER_FILE.write_text(str(episode_num))
