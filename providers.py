@@ -430,6 +430,22 @@ class Codex:
         except Exception as e:
             print(f"  [CODEX] failed to copy output: {e}")
             return False
+        # Clean up the source from ~/.codex/generated_images/ (Joe 2026-08-12):
+        # codex leaves a copy of every generated PNG in its temp dir which never
+        # gets deleted - hundreds of files / ~1GB+ accumulate per run. Once the
+        # image is copied into the episode folder, the temp source is no longer
+        # needed. It's a unique per-generation path (already claimed + copied),
+        # so removing it here is race-free. Any failure to delete is non-fatal.
+        try:
+            os.remove(src)
+            # Drop the now-empty parent uuid dir too (codex makes one per call).
+            _parent = os.path.dirname(src)
+            try:
+                os.rmdir(_parent)
+            except Exception:
+                pass
+        except Exception as _cleanup_err:
+            print(f"  [CODEX] could not remove temp source {os.path.basename(src)}: {_cleanup_err}")
         print(f"  [CODEX] {os.path.basename(out_path)} ({os.path.getsize(out_path)//1024}KB)")
         return os.path.getsize(out_path) > 500
 
