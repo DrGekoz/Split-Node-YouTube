@@ -2365,7 +2365,14 @@ def _build_narration_script(paragraphs: list[str],
         sys_prompt = _narration_prompt_with_bible(NARRATION_SYSTEM_PROMPT, bible)
 
     narration_paras = []
-    covered = []  # rolling summary of already-written beats (dedupe guard)
+    # Rolling dedupe context (Joe 2026-08-12): we store the ACTUAL text of the
+    # most recent narration paragraphs (not a label) and feed them back so the
+    # model can see exactly what it already wrote and must NOT repeat it. This
+    # is the key to clean 1-article-paragraph -> 2-3-narration-paragraph
+    # expansion: each new sub-paragraph is generated SEQUENTIALLY with the
+    # sibling paragraphs from the SAME article paragraph as explicit context,
+    # so it advances to a fresh beat instead of re-stating the same one.
+    covered = []  # last few narration paragraphs already written (cross-article)
     for i, _para in enumerate(paragraphs):
         lo, hi = max(i - 1, 0), min(i + 2, len(paragraphs))
         ctx = "\n\n".join(paragraphs[lo:hi])
@@ -2392,35 +2399,52 @@ def _build_narration_script(paragraphs: list[str],
                        "action and the cause-and-effect chain. Vary every paragraph's "
                        "ending; never end consecutive paragraphs with a question or a "
                        "tease (rule 17).")
-        user = (
-            f"{section}\n\n"
-            f"STORY CONTEXT (article excerpt {lo+1}-{hi} of {len(paragraphs)}):\n{ctx}\n\n"
-            f"Generate exactly {per_para} narration paragraphs based on this context. "
-            f"Focus on the facts and events in this excerpt - expand them with "
-            f"cinematic detail, sensory description and dramatic tension."
-        )
-        if covered:
-            user += (
-                "\n\nALREADY COVERED in earlier narration - do NOT repeat these beats:\n"
-                + "\n".join(f"- {c}" for c in covered[-2:])
+        # Generate the per_para narration paragraphs ONE AT A TIME so each gets the
+        # paragraphs written before it for THIS article paragraph as context.
+        written_this_section = []  # sub-paragraphs produced for the current article para
+        for k in range(per_para):
+            # Dedupe block = the sibling sub-paragraphs already written for THIS
+            # article paragraph (highest priority) + the rolling cross-article tail.
+            same = [f"- {p[:160]}" for p in written_this_section[-2:]]
+            cross = [f"- {p[:160]}" for p in covered[-2:]]
+            dedup = "\n".join(same + cross) if (same or cross) else "None yet."
+            user = (
+                f"{section}\n\n"
+                f"STORY CONTEXT (article excerpt {lo+1}-{hi} of {len(paragraphs)}):\n{ctx}\n\n"
+                f"You are writing narration paragraph {k+1} of {per_para} that this "
+                f"article excerpt expands into.\n"
+                f"ALREADY WRITTEN for this section (do NOT repeat these beats - "
+                f"advance to a NEW one):\n{dedup}\n\n"
+                f"Generate exactly ONE narration paragraph. It MUST cover a DIFFERENT "
+                f"beat, fact, angle or cause-and-effect step than everything listed "
+                f"above - expand a fresh part of the excerpt with cinematic detail, "
+                f"sensory description and dramatic tension. Do NOT restate, rephrase "
+                f"or echo anything already written above."
             )
-        text = _llm_chat([
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user}
-        ], max_tokens=min(1600, 250 + per_para * 120), temp=0.85)
-        parts = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-        if len(parts) < 2 and "\n" in text:
-            parts = [p.strip() for p in text.split("\n") if len(p.strip()) > 40]
-        added = 0
-        for p in parts:
-            p_clean = re.sub(r"^\s*[-*#]+\s*", "", p).strip()
-            p_clean = _strip_narration_meta(p_clean)
-            p_clean = _purge_ai_slop(p_clean)
-            if len(p_clean) > 40:
+            text = _llm_chat([
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user}
+            ], max_tokens=min(700, 250 + 120), temp=0.85)
+            parts = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+            if not parts and "\n" in text:
+                parts = [p.strip() for p in text.split("\n") if len(p.strip()) > 40]
+            p_clean = ""
+            for p in parts:
+                cand = re.sub(r"^\s*[-*#]+\s*", "", p).strip()
+                cand = _strip_narration_meta(cand)
+                cand = _purge_ai_slop(cand)
+                if len(cand) > 40:
+                    p_clean = cand
+                    break
+            if p_clean:
                 narration_paras.append(p_clean)
-                added += 1
-        if added:
-            covered.append(f"({i+1}/{n_art}) {narration_paras[-1][:110]}")
+                written_this_section.append(p_clean)
+                print(f"  [LLM] ({i+1}/{n_art}.{k+1}/{per_para}) {p_clean[:60]}...")
+            else:
+                print(f"  [LLM] ({i+1}/{n_art}.{k+1}/{per_para}) empty - skipped")
+        # Roll the actual text into the cross-article dedupe tail.
+        covered.extend(written_this_section)
+        covered = covered[-4:]
         time.sleep(0.3)
 
     if not narration_paras:
