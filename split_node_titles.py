@@ -159,12 +159,14 @@ def _chapter_events(ev, W, H, fps) -> list[str]:
     title = ev["title"]
 
     # ---- FULL-FRAME BLACK BACKGROUND (layer 0, under everything) ----
-    # Guarantees the chapter card never bleeds over the next scene - the card
-    # always sits on a solid black backdrop for exactly its on-screen duration.
-    bg = (f"{{\\an7\\pos(0,0)\\p1\\bord(0)\\shad(0)\\1c&H000000&\\alpha&H00&}}"
-          f"m 0 0 l {W} 0 l {W} {H} l 0 {H} l 0 0"
-          f"{{\\p0}}")
-    lines.append(_dialog(ev["start"], ev["end"], "ChapBg", bg, layer=0))
+    # Only drawn when the card has NO real artwork (a black placeholder). When the
+    # card image IS real artwork (has_artwork), the title is burned ON TOP of the
+    # artwork instead (Joe 2026-08-12) - no black-out.
+    if not ev.get("has_artwork"):
+        bg = (f"{{\\an7\\pos(0,0)\\p1\\bord(0)\\shad(0)\\1c&H000000&\\alpha&H00&}}"
+              f"m 0 0 l {W} 0 l {W} {H} l 0 {H} l 0 0"
+              f"{{\\p0}}")
+        lines.append(_dialog(ev["start"], ev["end"], "ChapBg", bg, layer=0))
 
     # ---- KICKER "CHAPTER N" at 0.30H (big, Bahnschrift, glow-pop) ----
     kcx, kcy = W // 2, int(H * 0.30)

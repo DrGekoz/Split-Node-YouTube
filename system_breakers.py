@@ -1934,9 +1934,10 @@ NARRATION_SYSTEM_PROMPT = (
     "STYLE RULES (follow ALL of them):\n"
     "1. COLD OPEN: the very first paragraph drops the viewer into a specific, "
     "visceral MOMENT IN THE ACTION - a person doing something, a decision, a risk, a "
-    "discovery - one dramatic image after another. Escalate the stakes, then end with "
-    "a twist tease ('Except this story doesn't end there...') and the question the "
-    "whole episode answers. Do NOT open with a bare location or a list of places.\n"
+    "discovery - one dramatic image after another. Escalate the stakes. Do NOT open "
+    "with a bare location or a list of places. (The '...but the story doesn't end "
+    "there' twist-tease belongs to the intro sequence only, per rule 17 - it is "
+    "never repeated in body paragraphs.)\n"
     "2. SURFACE PROBLEM AND DEEPER PROBLEM: every episode has a surface problem (the "
     "mechanics - the hack, the scheme, the loophole) AND a deeper emotional struggle "
     "underneath (greed, desperation, revenge, the need to prove something, injustice). "
@@ -1982,10 +1983,10 @@ NARRATION_SYSTEM_PROMPT = (
     "person or place must be doing something, not being stated.\n"
     "10. METAPHOR AND SENSORY DETAIL: concrete, original images - invent fresh "
     "metaphors for THIS story, never reuse a metaphor from a different episode.\n"
-    "11. RHETORICAL QUESTIONS as pivots between beats - and 2-3 times per episode, "
-    "ask the viewer to figure something out themselves instead of telling them "
-    "('How did he keep getting away with it?') then pay it off a few paragraphs "
-    "later.\n"
+    "11. RHETORICAL QUESTIONS as pivots between beats - use them at most 2-3 "
+    "times TOTAL across the whole episode, never to end consecutive paragraphs, "
+    "and never more than once per chapter. Ask the viewer to figure something "
+    "out instead of telling them, then pay it off a few paragraphs later.\n"
     "12. IRONY AND REVERSAL: set up the obvious reading, then flip it - the system "
     "that was supposed to stop the protagonist turned out to be the reason they "
     "won.\n"
@@ -2006,7 +2007,13 @@ NARRATION_SYSTEM_PROMPT = (
     "no 'Narration:', no 'Sure, here are...', no 'I've written...', no numbering, no "
     "headers, no stage directions, no intros, no summaries, no signposting of any kind. "
     "Every line you output is read ALOUD by the narrator, so a single meta word is "
-    "spoken on camera. Output ONLY the raw narration paragraphs.\n\n"
+    "spoken on camera. Output ONLY the raw narration paragraphs.\n"
+    "17. NO REPETITIVE ENDINGS (STRICT): never end a body paragraph with a "
+    "twist-tease, a reveal, or a rhetorical question. The '...but the story "
+    "doesn't end there' beat is used AT MOST ONCE in the whole episode - reserved "
+    "for the intro sequence only, never in body paragraphs. Do not end "
+    "consecutive paragraphs the same way; vary every paragraph's final line. A "
+    "body paragraph ends on the fact or the moment, not on a tease.\n\n"
     "I will give you an excerpt of a news article plus story context. Your job: EXPAND "
     "it into a gripping documentary narration. Write in the present tense, cinematic, "
     "dramatic - build suspense, then resolve triumphantly near the end. Keep the "
@@ -8864,6 +8871,26 @@ def _compute_clip_starts(shots: list[dict]) -> list[float]:
     return starts
 
 
+def _is_black_image(path: str) -> bool:
+    """True if the image is essentially a solid black placeholder (a failed /
+    default chapter card) vs real generated artwork. Samples a downscaled copy."""
+    if not path or not os.path.isfile(path):
+        return True
+    try:
+        from PIL import Image
+        im = Image.open(path).convert("L")
+        im.thumbnail((64, 64))
+        px = list(im.getdata())
+        if not px:
+            return True
+        mean = sum(px) / len(px)
+        if mean < 8:
+            return True
+        return max(px) < 24
+    except Exception:
+        return True
+
+
 def _deterministic_chapter_events(shots: list[dict], clip_starts: list[float],
                                   chapter_events: Optional[list] = None) -> list[dict]:
     """Chapter-card times derived DIRECTLY from the shot timeline, not whisper.
@@ -8905,6 +8932,8 @@ def _deterministic_chapter_events(shots: list[dict], clip_starts: list[float],
         start = clip_starts[vp]
         dur = _get_audio_duration(shots[shot_pos]["tts_path"])
         ch_num = ev.get("chapter_num") or ev.get("chapter")
+        # has_artwork: the card has real generated artwork (show it, burn the
+        # title ON TOP) vs a black placeholder (draw the ASS black backdrop).
         out.append({
             "kind": "chapter",
             "start": round(start, 3),
@@ -8912,6 +8941,7 @@ def _deterministic_chapter_events(shots: list[dict], clip_starts: list[float],
             "chapter_num": ch_num,
             "title": ev.get("title", ""),
             "text": f"Chapter {ch_num} - {ev.get('title', '')}",
+            "has_artwork": not _is_black_image(shots[shot_pos].get("image_path", "")),
         })
     return out
 

@@ -2,6 +2,23 @@
 
 All notable changes to Split Node.
 
+## [1.41.3] - 2026-08-12
+
+### Chapter cards show artwork (no black-out) + no repetitive paragraph endings
+
+- **Chapter cards now show the generated ARTWORK with the title burned on top.**
+  The old `_chapter_events` painted a full-frame black backdrop unconditionally,
+  hiding the card image. Now `_deterministic_chapter_events` flags `has_artwork`
+  per card via `_is_black_image(shot['image_path'])` and the ASS black backdrop is
+  drawn ONLY for real black placeholders. Real artwork cards show the scene with
+  the "CHAPTER N" kicker + title overlaid.
+- **Narration: no more "except the story doesn't end there" + question on every
+  paragraph.** Rule 11 caps rhetorical questions at 2-3 TOTAL per episode (never
+  consecutive-paragraph endings); new rule 17 reserves the "...but the story
+  doesn't end there" twist-tease for the intro sequence ONLY (at most once), never
+  in body paragraphs; rule 1 cold-open updated to match. Fixes the ep12 repetitive
+  feel.
+
 ## [1.41.2] - 2026-08-12
 
 ### Intro written at end of script-writing from summarized article context
