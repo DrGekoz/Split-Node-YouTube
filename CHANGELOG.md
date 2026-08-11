@@ -2,6 +2,36 @@
 
 All notable changes to Split Node.
 
+## [1.41.0] - 2026-08-12
+
+### LLM sound-design layer + new narrator voice
+
+- **New voice clone** - `voice_refs/split_node.wav` is now the guy from
+  7AfSuJfFkMY (clean 20s solo-voice cut, 24k mono, loudnorm'd). Old clone backed
+  up to `split_node.wav.bak_prev`.
+- **Intro hook**: LLM generates a snappy ~3s opening hook (shorts 'Declare'
+  format) with NO locations/people/brands/figures, prepended before chapter 1.
+- **Narration plan** (`_plan_narration`, batched LLM): per paragraph picks the
+  ONE key sentence + 2-3 key words (exact substrings) AND a full foley ledger
+  (every human/vehicle/object sound + the trigger clause). Persisted to
+  `narration_plan.json`; mirrored onto sentence-level shots; fully resumable.
+- **Whisper-word timing for ALL SFX**: the audio mix now runs faster-whisper on
+  the voice track and aligns key-word whooshes, foley, chapter whoosh and camera
+  to the EXACT spoken time - robust to chapter/camera pacing offsets.
+- **Key-word whoosh + on-screen highlight**: `soundreality-whoosh-pointer` plays
+  its hit exactly on the key word's spoken time (-8dB), and the 2-3 key words are
+  burned on screen (pop-in @0.62H) via new keyword ASS events.
+- **Foley** (`-5dB`): LLM ledger sounds play at their trigger's whisper time;
+  scene-keyword fallback stays. `_fuzzy_foley_match` maps descriptions to the
+  sound library.
+- **Chapter cards**: `Sub Bass - Whoosh` replaces the boom, hit lands on the card
+  transition (-4dB), SFX leads then the card TTS follows (spacious).
+- **Camera shutter** only on the FIRST establishing shot of a person and the
+  FIRST of a location (-4dB), not every establishing/new-char/new-loc.
+- **Pacing**: 1 second breathing gap after every sentence (no cut-offs).
+- **Narration rule 9b**: weave people/places into the action - never standalone
+  "Meet X" / "The scene is Y" openers.
+
 ## [1.40.2] - 2026-08-12
 
 ### Packaging framework (Adam Del Duca method) + ep12 render hardening

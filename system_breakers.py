@@ -897,6 +897,9 @@ SFX_LIBRARY = {
     "typewriter-clicks.wav": {"dur": 1.6, "build": 0.0, "hit": 0.1, "decay": 1.5, "desc": "typewriter keystrokes (1.6s, for 1.5s typewriter animation)", "max_dur": 1.5},
     "glitch-off.wav": {"dur": 0.7, "build": 0.0, "hit": 0.15, "decay": 0.6, "desc": "short digital glitch (for 0.5s title glitch-off)", "max_dur": 0.5},
     "camera-shutter-short.wav": {"dur": 1.0, "build": 0.15, "hit": 0.2, "decay": 0.4, "desc": "camera shutter click (new character/location switch)"},
+    # -- Key-word + chapter whoosh (Joe 2026-08-12) - hit points analyzed 2026-08-12 --
+    "soundreality-whoosh-pointer-243108.mp3": {"dur": 8.04, "build": 0.6, "hit": 0.7, "decay": 2.0, "desc": "key-word whoosh pointer (word highlight)", "max_dur": 2.0},
+    "Whooshs/Sub Bass - Whoosh - (Nikko Hunt's S.D.Essentials).wav": {"dur": 6.37, "build": 1.6, "hit": 2.15, "decay": 2.0, "desc": "sub bass whoosh (chapter card transition)", "max_dur": 4.0},
 }
 
 # -- Load the analysed Nikko Hunt's S.D.Essentials library (aliases -> files) --
@@ -1106,12 +1109,19 @@ MUSIC_LIBRARY = {
     ],
 }
 
-# Mix levels (dB)
+# Mix levels (dB) - Joe 2026-08-12: foley -5dB, camera/chapter -4dB, music -19dB,
+# key-word whoosh subtle (-8dB) so it sits over narration without masking it.
 VOICE_DB = 0.0
-MUSIC_DB = -19.5
+MUSIC_DB = -19.0
 SFX_DB = -15.0
-# Camera shutter is a punchy transient - it needs to CUT through (user: -5dB)
-SHUTTER_DB = -5.0
+# Camera shutter + chapter-card whoosh are punchy transients that need to CUT
+# through (Joe: -4dB for camera AND chapter sounds).
+SHUTTER_DB = -4.0
+CHAPTER_DB = -4.0
+# Foley bed - sits under narration, audible but not dominant (Joe: -5dB).
+FOLEY_DB = -5.0
+# Key-word whoosh highlight - a quick pointer, kept subtle (not specified by Joe).
+KEYWORD_DB = -8.0
 
 # Discord announcement bot
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
@@ -1964,6 +1974,12 @@ NARRATION_SYSTEM_PROMPT = (
     "never import or invent a location. When nothing in a paragraph is location-bound, "
     "write it with no location at all and focus on the person and the action. Do NOT "
     "use dates.\n"
+    "9b. WEAVE PEOPLE AND PLACES INTO THE ACTION (STRICT): never introduce a person "
+    "or a place with a standalone label or list sentence - no 'Meet John, a hacker "
+    "from New York', no 'The scene is New York.' People and places must enter the "
+    "story MID-ACTION, as part of what is happening ('John cracked the vault door "
+    "open', 'Rain beat against the Manhattan skyline'). Every first mention of a "
+    "person or place must be doing something, not being stated.\n"
     "10. METAPHOR AND SENSORY DETAIL: concrete, original images - invent fresh "
     "metaphors for THIS story, never reuse a metaphor from a different episode.\n"
     "11. RHETORICAL QUESTIONS as pivots between beats - and 2-3 times per episode, "
@@ -2381,6 +2397,224 @@ def _build_narration_script(paragraphs: list[str],
     for i, p in enumerate(narration_paras):
         print(f"    {i+1}. {p[:70]}...")
     return narration_paras
+
+
+# ---------------------------------------------------------------------------
+# Narration plan: intro hook + key words + foley (Joe 2026-08-12)
+# Runs at the PARAGRAPH level BEFORE sentences are split so the ONE key sentence
+# and its 2-3 key words per paragraph are picked from the full paragraph, and so
+# the foley pass can see the whole paragraph's actions. The plan is persisted to
+# narration_plan.json (the ledger) and mirrored onto the sentence-level shots, so
+# every downstream phase (TTS, images, audio mix, burn) is fully resumable.
+# Key-word whooshes + foley hit points are aligned to faster-whisper sentence /
+# word timecodes inside _build_audio_mix.
+# ---------------------------------------------------------------------------
+PLAN_CHUNK = 8
+
+
+def _norm_text(s: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace - for substring timing."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' ]", " ", str(s or "").lower())).strip()
+
+
+def _generate_intro_hook(bible: Optional[dict] = None) -> str:
+    """Snappy ~3 second opening hook - ONE punchy sentence (shorts 'Declare'
+    format). NO locations, NO people names, NO brands, NO figures. A universal,
+    timeless tease that plays BEFORE chapter 1 introduces the world. Returns the
+    hook, or a safe default / '' on failure."""
+    try:
+        msg = [{"role": "system", "content": (
+            "You write the 3-second opening HOOK of a true-crime documentary "
+            "video. Output ONE punchy sentence of 6-10 words, spoken fast, that "
+            "grabs attention and sets a dark, curious tone. STRICT RULES: NO "
+            "locations, NO city or town names, NO people's names, NO brand names, "
+            "NO dates, NO dollar figures, NO specific numbers. It is a universal, "
+            "timeless hook about what is about to be revealed - a short declarative "
+            "tease that raises the stakes or ends on a question. Output ONLY the "
+            "single sentence, no quotes, no labels.")},
+            {"role": "user", "content": "Write the 3-second opening hook."}]
+        text = _llm_chat(msg, max_tokens=60, temp=0.9).strip().strip('"\'')
+        if text and 0 < len(text.split()) <= 14:
+            return text
+        return "Some secrets are too big to stay hidden for long."
+    except Exception:
+        return ""
+
+
+def _plan_narration(narration: list[str], episode_num: int) -> dict:
+    """LLM narration plan per paragraph (BEFORE sentence split): the ONE key
+    sentence + its 2-3 key words, plus ALL foley (human/vehicle/object) with the
+    exact trigger clause where each sound happens. Written to narration_plan.json
+    (the ledger) for resumability. Returns {para_idx: {...}}."""
+    plan: dict[int, dict] = {}
+    sys_prompt = (
+        "You are a documentary sound designer. You are given narration paragraphs. "
+        "For EACH paragraph return one JSON object (in the same order) with:\n"
+        "- \"key_sentence\": the ONE sentence (copied verbatim as an exact contiguous "
+        "substring of the paragraph) that best captures the paragraph's punch.\n"
+        "- \"key_words\": 2-3 words or short phrases that are EXACT contiguous "
+        "substrings of that key_sentence - the words a viewer's eye should land on. "
+        "Use the words exactly as written, no stemming or rephrasing.\n"
+        "- \"foley\": an array of EVERY concrete human / vehicle / object sound the "
+        "action implies (footsteps, typing, car engine, rain, door slamming, gunshot, "
+        "crowd, coins, glass, phone, etc). Each item is {\"sound\": \"plain one-line "
+        "description\", \"trigger\": \"the exact contiguous substring of the paragraph "
+        "where that sound happens\"}. Empty array if the paragraph has no foley.\n"
+        "Return ONLY a JSON object: {\"items\": [<one object per paragraph, in "
+        "order>]}. No prose outside the JSON.")
+    for start in range(0, len(narration), PLAN_CHUNK):
+        chunk = narration[start:start + PLAN_CHUNK]
+        block = "\n\n".join(f"P{j+1}: {p}" for j, p in enumerate(chunk))
+        data = _llm_json(
+            [{"role": "system", "content": sys_prompt},
+             {"role": "user", "content":
+              f"PARAGRAPHS:\n{block}\n\nReturn the plan JSON for all {len(chunk)} "
+              f"paragraphs ({start+1}-{start+len(chunk)}) in order."}],
+            max_tokens=4500, temp=0.3)
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            items = []
+        for j, para in enumerate(chunk):
+            i = start + j
+            entry = items[j] if j < len(items) and isinstance(items[j], dict) else {}
+            foley = entry.get("foley")
+            plan[i] = {
+                "key_sentence": str(entry.get("key_sentence") or "").strip(),
+                "key_words": [str(w) for w in (entry.get("key_words") or []) if w][:3],
+                "foley": [f for f in (foley if isinstance(foley, list) else [])
+                          if isinstance(f, dict)],
+            }
+        time.sleep(0.2)
+    # Persist the ledger for resumability + inspection.
+    try:
+        PROJECT_DIR.joinpath("narration_plan.json").write_text(
+            json.dumps({"episode_num": episode_num, "plan": plan}, indent=2),
+            encoding="utf-8")
+    except Exception:
+        pass
+    nkey = sum(1 for e in plan.values() if e.get("key_sentence"))
+    nfoley = sum(len(e.get("foley") or []) for e in plan.values())
+    print(f"  [PLAN] narration plan: {nkey} key sentences, {nfoley} foley sounds "
+          f"across {len(narration)} paragraphs -> narration_plan.json")
+    return plan
+
+
+def _fuzzy_foley_match(phrase: str) -> Optional[str]:
+    """Map an LLM foley description to a concrete SFX_LIBRARY key whose file exists.
+    First tries FOLEY_MAP keyword rules (footsteps/engine/typing/rain...), then a
+    token-overlap scorer over library names + descriptions. Returns None if no
+    confident match."""
+    if not phrase:
+        return None
+    p = phrase.lower()
+    # 1) FOLEY_MAP keyword hit -> first existing candidate
+    for keywords, candidates in FOLEY_MAP:
+        if any(k in p for k in keywords):
+            for c in candidates:
+                if c in SFX_LIBRARY and _sfx_path(c):
+                    return c
+    # 2) token overlap against library names + descriptions
+    pw = set(re.findall(r"[a-z']+", p))
+    if not pw:
+        return None
+    best, bestscore = None, 0
+    for name, meta in SFX_LIBRARY.items():
+        if not _sfx_path(name):
+            continue
+        hay = ((meta.get("desc") or "") + " " + name.replace("_", " ")).lower()
+        hw = set(re.findall(r"[a-z']+", hay))
+        score = len(pw & hw)
+        if score > bestscore:
+            bestscore, best = score, name
+    return best if bestscore >= 1 else None
+
+
+def _apply_plan_to_shots(shots: list[dict], sentence_para_map: dict,
+                         plan: dict) -> None:
+    """Mirror the narration plan (key words + foley) onto the sentence-level shots.
+    Matches by TEXT, so it is robust to chapter/establishing/flatten index
+    remapping. Sets shot['is_key'], shot['key_words'], shot['foley']."""
+    for shot in shots:
+        ns = _norm_text(shot.get("narration") or "")
+        shot["is_key"] = False
+        shot["key_words"] = []
+        shot["foley"] = []
+        if not ns:
+            continue
+        for _pi, entry in plan.items():
+            ks = _norm_text(entry.get("key_sentence") or "")
+            if ks and (ks == ns or (ks in ns or ns in ks)):
+                shot["is_key"] = True
+                shot["key_words"] = [w for w in (entry.get("key_words") or []) if w][:3]
+            for f in (entry.get("foley") or []):
+                trig = _norm_text(str(f.get("trigger") or ""))
+                if trig and trig in ns:
+                    sfx = _fuzzy_foley_match(str(f.get("sound") or ""))
+                    if sfx:
+                        shot["foley"].append({"sfx": sfx, "trigger": str(f.get("trigger"))})
+        seen, uniq = set(), []
+        for f in shot["foley"]:
+            if f["sfx"] not in seen:
+                seen.add(f["sfx"])
+                uniq.append(f)
+        shot["foley"] = uniq
+
+
+def _resolve_substring_time(narration: str, substring: str, words: list,
+                            clip_start: float, clip_end: float) -> float:
+    """Absolute time (s) when `substring` is spoken within a shot's clip window,
+    resolved from faster-whisper word timings. Falls back to clip_start+0.2."""
+    if not substring or not words:
+        return clip_start + 0.2
+    target = _norm_text(substring)
+    if not target:
+        return clip_start + 0.2
+    win = [w for w in words
+           if (w.get("start") or 0) >= clip_start - 0.3
+           and (w.get("start") or 0) <= clip_end + 0.3]
+    if not win:
+        return clip_start + 0.2
+    joined, starts = "", []
+    for w in win:
+        tok = _norm_text(w.get("word", ""))
+        if not tok:
+            continue
+        if joined:
+            joined += " "
+        starts.append((len(joined), float(w.get("start") or clip_start)))
+        joined += tok
+    idx = joined.find(target)
+    if idx < 0:
+        # Word-boundary fallback: any whisper word in the window near the start
+        return clip_start + 0.2
+    hit = None
+    for pos, st in starts:
+        if pos <= idx:
+            hit = st
+    return hit if hit is not None else clip_start + 0.2
+
+
+def _build_keyword_events(shots: list[dict], words: list, clip_starts: list) -> list[dict]:
+    """Build on-screen KEY-WORD highlight events (kind='keyword') for every key
+    sentence. The 2-3 key words are burned at their whisper-resolved spoken time,
+    held ~1.2s. Only the 1 key sentence per paragraph gets a highlight (Joe
+    2026-08-12)."""
+    events = []
+    for i, shot in enumerate(shots):
+        if not shot.get("is_key") or not shot.get("key_words"):
+            continue
+        cs = clip_starts[i] if i < len(clip_starts) else 0.0
+        ce = (clip_starts[i + 1] if i + 1 < len(clip_starts)
+              else cs + _get_audio_duration(shot["tts_path"]))
+        anchor = shot["key_words"][0]
+        t = _resolve_substring_time(shot.get("narration", ""), anchor, words, cs, ce)
+        if t <= cs + 0.3 and len(shot["key_words"]) > 1:
+            t = _resolve_substring_time(shot.get("narration", ""),
+                                        " ".join(shot["key_words"]), words, cs, ce)
+        events.append({"kind": "keyword", "start": round(t, 3),
+                       "end": round(t + 1.2, 3),
+                       "text": " ".join(shot["key_words"])})
+    return events
 
 
 CHAPTER_TARGET = 10
@@ -7852,13 +8086,15 @@ def _pace_gaps_after(shots: list[dict]) -> None:
       - chapter card       -> long pause (card needs time to land)   1.6s
       - rhetorical ?       -> beat for the question to hang          1.2s
       - reveal/drop openers-> breath before the turn                 1.0s
-      - hero/ECU beat      -> hold on the magnified moment           0.9s
-      - place anchor       -> pause so the scene shift registers     0.7s
-      - default            -> natural beat                           0.4s
+      - hero/ECU beat      -> hold on the magnified moment           1.0s
+      - place anchor       -> pause so the scene shift registers     1.0s
+      - default            -> regular breathing beat                 1.0s
+    Every clip gets a 1 second breathing gap so sentences never cut straight
+    into the next clip (Joe 2026-08-12: 'breathing gap 1 second').
     Each shot dict gets shot['gap_after'] (seconds). Deterministic, no LLM.
     """
     for s in shots:
-        gap = 0.4  # default natural beat
+        gap = 1.0  # regular breathing beat (Joe: 1 second)
         if s.get("is_chapter"):
             gap = 1.6
         else:
@@ -7869,9 +8105,9 @@ def _pace_gaps_after(shots: list[dict]) -> None:
             elif low.startswith(_REVEAL_OPENERS) or low.startswith(_DROP_OPENERS):
                 gap = 1.0
             elif s.get("hero"):
-                gap = 0.9
+                gap = 1.0
             elif _is_place_anchor(narration):
-                gap = 0.7
+                gap = 1.0
         s["gap_after"] = gap
     total = sum(s.get("gap_after", 0.4) for s in shots)
     print(f"  [PACING] per-shot gaps applied (total {total:.1f}s of pause across "
@@ -8066,15 +8302,22 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                     music_path = str(music_raw)
 
         # -- SFX placements: (src, target_time, max_dur) -- hit lands at target --
-        placements = []
+        # Whisper word timings of the voice track - used to pin key-word whooshes
+        # and foley hit points to the EXACT spoken time (Joe 2026-08-12).
+        words = _transcribe_voice(episode_num, voice_out)
+
+        placements = []  # (src, target_time, max_dur, db)
         # 1) Intro glitchy suspense hit at the very start of every video
         intro = SFX_DIR / TITLE_SFX["intro"]
         if intro.is_file():
-            placements.append((str(intro), 0.0, 6.5))
+            placements.append((str(intro), 0.0, 6.5, SFX_DB))
             print("  [AUDIO] SFX intro glitch hit @0.0s")
-        # 2) Per-shot LLM SFX (hit at shot start + 0.2s). Long ambience
-        #    (soundscapes/nature run 20-60s) is capped at 10s so it beds under
-        #    the shot without bleeding across the whole video.
+        rng = random.Random(episode_num * 7)
+        def _pick_sfx(prefix: str) -> Optional[str]:
+            ks = [k for k in SFX_LIBRARY
+                  if k.startswith(prefix) and _sfx_path(k)]
+            return rng.choice(ks) if ks else None
+        # 2) Per-shot LLM SFX (hit at shot start + 0.2s). Long ambience capped.
         for shot, start in zip(valid, clip_starts):
             name = shot.get("sfx", "NONE")
             if name == "NONE" or name not in SFX_LIBRARY:
@@ -8082,97 +8325,92 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             src = _sfx_path(name)
             if src:
                 cap = min(SFX_LIBRARY.get(name, {}).get("dur", 8.0), 10.0)
-                placements.append((str(src), start + 0.2, cap))
-        # 2b) FOLEY PIPELINE - detect the ACTION in each shot's scene text and
-        #     bed the matching sound for the whole clip (typing -> typewriter,
-        #     driving -> engine/traffic, walking -> footsteps, etc). Only runs
-        #     when the LLM didn't already pick an sfx for that shot, so we
-        #     don't stack a foley bed on top of a chosen dramatic hit.
+                placements.append((str(src), start + 0.2, cap, SFX_DB))
+        # 2b) KEY-WORD whoosh (Joe 2026-08-12): on the 1 key sentence per
+        #     paragraph, play the whoosh with its hit EXACTLY on the key word's
+        #     spoken time (whisper-resolved). The words are ALSO shown on screen
+        #     via the keyword ASS events built in _render_video.
+        kw_whoosh = "soundreality-whoosh-pointer-243108.mp3"
+        kw_meta = SFX_LIBRARY.get(kw_whoosh, {})
+        if _sfx_path(kw_whoosh):
+            for pos, (shot, start) in enumerate(zip(valid, clip_starts)):
+                if not shot.get("is_key") or not shot.get("key_words"):
+                    continue
+                cs = start
+                ce = (clip_starts[pos + 1] if pos + 1 < len(clip_starts)
+                      else cs + _get_audio_duration(shot["tts_path"]))
+                anchor = shot["key_words"][0]
+                t = _resolve_substring_time(shot.get("narration", ""), anchor,
+                                            words, cs, ce)
+                if t <= cs + 0.3 and len(shot["key_words"]) > 1:
+                    t = _resolve_substring_time(shot.get("narration", ""),
+                                                " ".join(shot["key_words"]),
+                                                words, cs, ce)
+                placements.append((str(_sfx_path(kw_whoosh)), t,
+                                   kw_meta.get("max_dur", 2.0), KEYWORD_DB))
+                print(f"  [AUDIO] KEYWORD whoosh '{' '.join(shot['key_words'])}' "
+                      f"@{t:.2f}s (-{abs(KEYWORD_DB):.0f}dB)")
+        # 2c) FOLEY (Joe 2026-08-12): the LLM foley ledger (shot['foley']) plays
+        #     at the trigger's whisper time; scene-keyword fallback otherwise.
+        #     ALL foley plays at FOLEY_DB (-5dB).
         for pos, (shot, start) in enumerate(zip(valid, clip_starts)):
             if shot.get("is_chapter"):
                 continue
-            if shot.get("sfx", "NONE") != "NONE":
-                continue  # LLM already scored this shot with an sfx
-            foley = _foley_for_scene(shot.get("scene", ""))
-            if not foley:
+            cs = start
+            ce = (clip_starts[pos + 1] if pos + 1 < len(clip_starts)
+                  else cs + _get_audio_duration(shot["tts_path"]))
+            planned = shot.get("foley") or []
+            if planned:
+                for f in planned:
+                    fsrc = _sfx_path(f.get("sfx", ""))
+                    if not fsrc:
+                        continue
+                    ft = _resolve_substring_time(shot.get("narration", ""),
+                                                 f.get("trigger", ""), words,
+                                                 cs, ce)
+                    bed = max(1.5, min(ce - ft - 0.2, 8.0))
+                    placements.append((str(fsrc), ft, bed, FOLEY_DB))
+                    print(f"  [AUDIO] FOLEY '{f.get('sfx')}' @{ft:.2f}s "
+                          f"(-{abs(FOLEY_DB):.0f}dB) {shot.get('narration','')[:36]}")
+            elif shot.get("sfx", "NONE") == "NONE":
+                foley = _foley_for_scene(shot.get("scene", ""))
+                if foley:
+                    fsrc = _sfx_path(foley)
+                    if fsrc:
+                        bed = max(1.5, min(ce - cs - 0.2, 8.0))
+                        placements.append((str(fsrc), cs + 0.2, bed, FOLEY_DB))
+                        print(f"  [AUDIO] FOLEY '{foley}' @{cs + 0.2:.1f}s "
+                              f"(-{abs(FOLEY_DB):.0f}dB, scene fallback)")
+        # 3) Camera shutter ONLY on the FIRST establishing shot of a person OR
+        #    of a location (Joe 2026-08-12), at -4dB - NOT every establishing
+        #    frame and NOT every new-char/location switch.
+        shutter = SFX_DIR / TITLE_SFX["shutter"]
+        shutter_kinds_seen = set()
+        for shot, start in zip(valid, clip_starts):
+            if not shot.get("is_establishing"):
                 continue
-            fsrc = _sfx_path(foley)
-            if not fsrc:
+            kind = shot.get("establishing_kind") or "person"
+            if kind in shutter_kinds_seen:
                 continue
-            # Bed the foley for the length of this clip (bounded to the sound's
-            # own duration, so a long ambience doesn't bleed into the next shot).
-            end = (clip_starts[pos + 1] if pos + 1 < len(clip_starts)
-                   else start + 6.0)
-            bed = max(1.5, min(end - start - 0.2, 8.0))
-            placements.append((str(fsrc), start + 0.2, bed))
-            print(f"  [AUDIO] FOLEY '{foley}' @{start + 0.2:.1f}s "
-                  f"(bed {bed:.1f}s) for action in shot {pos + 1}")
-        # 3) Camera shutter + whoosh: new character introduced OR new location
-        #    (whoosh only when the LLM didn't already pick an sfx for the shot,
-        #    so we never triple-stack sounds on one beat).
-        rng = random.Random(episode_num * 7)
-        def _pick_sfx(prefix: str) -> Optional[str]:
-            ks = [k for k in SFX_LIBRARY
-                  if k.startswith(prefix) and _sfx_path(k)]
-            return rng.choice(ks) if ks else None
-        loc_paras = {ev["para_idx"] for ev in (title_events or [])
-                     if ev.get("kind") == "location"}
-        prev_char = None
-        for pos, (shot, start) in enumerate(zip(valid, clip_starts)):
-            if shot.get("is_chapter") or start < 2.0:
-                continue
-            # Establishing shot (new place/person introduced) always gets a
-            # camera shutter so the video cuts to the establishing frame.
-            if shot.get("is_establishing"):
-                shutter = SFX_DIR / TITLE_SFX["shutter"]
-                if shutter.is_file():
-                    placements.append((str(shutter), start + 0.1, None))
-                    print(f"  [AUDIO] Camera shutter @{start + 0.1:.1f}s "
-                          f"(establishing {shot.get('establishing_kind')})")
-                # VCR/static sweep on establishing frames (Joe 2026-08-09):
-                # a white-noise flicker plays as the frame cuts in, matching
-                # the scanlines+VCR look added in _render_clip. Short transient,
-                # sits with the shutter. Only when the LLM didn't already pick
-                # an sfx for the shot so we never triple-stack.
-                if shot.get("sfx", "NONE") == "NONE":
-                    wkey = _pick_sfx("sweep-")
-                    if wkey:
-                        wm = SFX_LIBRARY[wkey]
-                        placements.append((str(_sfx_path(wkey)),
-                                           start + 0.15,
-                                           wm.get("hit", 0.5) + 1.0))
-                        print(f"  [AUDIO] Sweep '{wkey}' @{start + 0.15:.1f}s")
-                continue
-            ch = shot.get("character", "NONE")
-            nidx = shot.get("narration_idx", pos)
-            is_new_char = False
-            if ch != "NONE":
-                if prev_char is not None and ch != prev_char:
-                    is_new_char = True
-                prev_char = ch
-            is_new_loc = nidx in loc_paras
-            if is_new_char or is_new_loc:
-                shutter = SFX_DIR / TITLE_SFX["shutter"]
-                if shutter.is_file():
-                    placements.append((str(shutter), start + 0.1, None))
-                    print(f"  [AUDIO] Camera shutter @{start + 0.1:.1f}s "
-                          f"({'new char ' + ch if is_new_char else ''}"
-                          f"{'new location' if is_new_loc else ''})")
-                if shot.get("sfx", "NONE") == "NONE":
-                    wkey = (_pick_sfx("whoosh-") if is_new_char
-                            else _pick_sfx("sweep-"))
-                    if wkey:
-                        wm = SFX_LIBRARY[wkey]
-                        placements.append((str(_sfx_path(wkey)),
-                                           start + 0.15,
-                                           wm.get("hit", 0.5) + 1.0))
-                        print(f"  [AUDIO] {('Whoosh' if is_new_char else 'Sweep')} "
-                              f"'{wkey}' @{start + 0.15:.1f}s")
-        # 3b) Deterministic SFX: every chapter card gets a riser that builds
-        #     INTO the card pop + a BOOM (Kick-Hit) landing exactly on it.
-        #     Boom is Joe's pick (Aug 2026) - it punches through the mix.
-        BOOM_NAME = "hit-kick"
-        boom_path = _sfx_path(BOOM_NAME) if BOOM_NAME in SFX_LIBRARY else None
+            if shutter.is_file():
+                placements.append((str(shutter), start + 0.1, None, SHUTTER_DB))
+                shutter_kinds_seen.add(kind)
+                print(f"  [AUDIO] Camera shutter @{start + 0.1:.1f}s "
+                      f"(FIRST establishing {kind}, -{abs(SHUTTER_DB):.0f}dB)")
+            # VCR/static sweep on establishing frames (Joe 2026-08-09, kept)
+            if shot.get("sfx", "NONE") == "NONE":
+                wkey = _pick_sfx("sweep-")
+                if wkey:
+                    wm = SFX_LIBRARY[wkey]
+                    placements.append((str(_sfx_path(wkey)), start + 0.15,
+                                       wm.get("hit", 0.5) + 1.0, SFX_DB))
+                    print(f"  [AUDIO] Sweep '{wkey}' @{start + 0.15:.1f}s")
+        # 3b) Chapter-card whoosh (Joe 2026-08-12): the Sub Bass whoosh REPLACES
+        #     the old boom. Its hit lands exactly on the card transition
+        #     (chapter TTS start); the whoosh BUILD plays in the gap BEFORE the
+        #     card so SFX leads then the card TTS follows (spacious). -4dB.
+        ch_whoosh = "Whooshs/Sub Bass - Whoosh - (Nikko Hunt's S.D.Essentials).wav"
+        ch_meta = SFX_LIBRARY.get(ch_whoosh, {})
         for ev in title_events or []:
             if ev.get("kind") != "chapter":
                 continue
@@ -8182,21 +8420,14 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             riser = _pick_sfx("riser-")
             if riser:
                 rm = SFX_LIBRARY[riser]
-                placements.append((str(_sfx_path(riser)), ct - 0.15,
-                                   rm.get("hit", 2.0) + 0.6))
+                placements.append((str(_sfx_path(riser)), ct - 0.5,
+                                   rm.get("hit", 2.0) + 0.6, SFX_DB))
                 print(f"  [AUDIO] Chapter riser '{riser}' -> {ct:.1f}s")
-            if boom_path:
-                placements.append((str(boom_path), ct, 2.5))
-                print(f"  [AUDIO] Chapter BOOM (Kick-Hit) @{ct:.1f}s")
-            else:
-                hit = _pick_sfx("hit-")
-                if hit == "hit-shell-shock-high-ring-not-nice-for-ears":
-                    hit = None  # ear-bleeding ring never goes on a chapter card
-                if hit:
-                    hm = SFX_LIBRARY[hit]
-                    placements.append((str(_sfx_path(hit)), ct,
-                                       hm.get("hit", 0.1) + 1.2))
-                    print(f"  [AUDIO] Chapter hit '{hit}' @{ct:.1f}s")
+            if _sfx_path(ch_whoosh):
+                placements.append((str(_sfx_path(ch_whoosh)), ct - 0.1,
+                                   ch_meta.get("max_dur", 4.0), CHAPTER_DB))
+                print(f"  [AUDIO] Chapter WHOOSH (sub bass) @{ct - 0.1:.1f}s "
+                      f"(-{abs(CHAPTER_DB):.0f}dB)")
         # 4) Typewriter clicks + glitch-off for every location/person title
         for ev in title_events or []:
             if ev.get("kind") not in ("location", "person"):
@@ -8205,24 +8436,25 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             tw = SFX_DIR / TITLE_SFX["typewriter"]
             gl = SFX_DIR / TITLE_SFX["glitch"]
             if tw.is_file():
-                placements.append((str(tw), st, TYPEWRITER_SEC))
+                placements.append((str(tw), st, TYPEWRITER_SEC, SFX_DB))
             if gl.is_file():
-                placements.append((str(gl), st + TYPEWRITER_SEC + TITLE_HOLD_SEC, GLITCH_OFF_SEC))
+                placements.append((str(gl), st + TYPEWRITER_SEC + TITLE_HOLD_SEC,
+                                   GLITCH_OFF_SEC, SFX_DB))
         # Dedupe: two titles on the same paragraph fire at the same moment -
-        # keep only ONE typewriter/glitch sound so the clicks don't double up.
+        # keep only ONE sound so clicks don't double up (preserve db).
         deduped = []
-        for src, target, max_dur in placements:
+        for src, target, max_dur, db in placements:
             dup = False
-            for d_src, d_tgt, _d_max in deduped:
+            for d_src, d_tgt, _d_max, _d_db in deduped:
                 if d_src == src and abs(d_tgt - target) < 0.05:
                     dup = True
                     break
             if not dup:
-                deduped.append((src, target, max_dur))
+                deduped.append((src, target, max_dur, db))
         placements = deduped
-        # 5) Resolve placements -> delays/trims
+        # 5) Resolve placements -> delays/trims (per-sound db carried through)
         sfx_inputs, sfx_delays, sfx_trims, sfx_durs, sfx_dbs = [], [], [], [], []
-        for src, target, max_dur in placements:
+        for src, target, max_dur, db in placements:
             name = os.path.basename(src)
             meta = SFX_LIBRARY.get(name)
             if meta is None:
@@ -8239,8 +8471,9 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             sfx_delays.append(delay_ms)
             sfx_trims.append(skip_s)
             sfx_durs.append(max_dur or 0.0)
-            sfx_dbs.append(SHUTTER_DB if name == TITLE_SFX["shutter"] else SFX_DB)
-            print(f"  [AUDIO] SFX {name}: hit@{target:.1f}s (file hit={hit}s) -> "
+            sfx_dbs.append(db)
+            print(f"  [AUDIO] SFX {name}: hit@{target:.1f}s (file hit={hit}s) "
+                  f"{db}dB -> "
                   f"{'crop ' + f'{skip_s:.2f}s' if skip_s else f'delay {delay_ms}ms'}"
                   f"{f' (max {max_dur}s)' if max_dur else ''}")
 
@@ -8266,7 +8499,7 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
 
         if not inputs:
             print("  [AUDIO] No audio inputs")
-            return None, None, clip_starts
+            return None, None, [], []
 
         n_sfx = len(sfx_inputs)
 
@@ -8315,7 +8548,7 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             r = subprocess.run(bcmd, capture_output=True, text=True, timeout=300)
             if r.returncode != 0 or not bfile.is_file() or bfile.stat().st_size < 1000:
                 print(f"  [AUDIO] SFX batch {b // BATCH:02d} failed: {r.stderr[-300:]}")
-                return None, None, clip_starts
+                return None, None, [], []
             batch_files.append(str(bfile))
             print(f"  [AUDIO] SFX batch {b // BATCH:02d}: {len(chunk)} sounds -> {bfile.name}")
 
@@ -8351,10 +8584,10 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if r.returncode != 0 or not os.path.isfile(final_wav) or os.path.getsize(final_wav) < 1000:
             print(f"  [AUDIO] Mix failed: {r.stderr[-300:]}")
-            return None, None, clip_starts
+            return None, None, [], []
         dur = _get_audio_duration(final_wav)
         print(f"  [OK] Mixed audio: {_fmt_time(dur)}, {os.path.getsize(final_wav)//1024}KB -> {final_wav}")
-        return final_wav, voice_out, clip_starts
+        return final_wav, voice_out, clip_starts, words
     finally:
         shutil.rmtree(str(temp_dir), ignore_errors=True)
         try:
@@ -8781,18 +9014,21 @@ def _render_video(shots: list[dict], episode_num: int,
     # duration. Deterministic path -> reused on resume.
     mixed_audio = str(RENDERED_AUDIO / f"ep{episode_num:03d}_mix.wav")
     clip_starts = []
+    words = []
     if os.path.isfile(mixed_audio) and os.path.getsize(mixed_audio) > 1000:
         print(f"  [AUDIO] Mix exists, reusing ({os.path.getsize(mixed_audio)//1024}KB)")
         clip_starts = _compute_clip_starts(valid)
     else:
         _mix = _build_audio_mix(valid, episode_num, title_events)
         if _mix:
-            _, _, clip_starts = _mix
+            _, _, clip_starts, words = _mix
     if not os.path.isfile(mixed_audio) or os.path.getsize(mixed_audio) < 1000:
         print("  [WARN] Audio mix failed, falling back to voice-only concat")
         mixed_audio = ""
     if not clip_starts:
         clip_starts = _compute_clip_starts(valid)
+    if not words:
+        words = _transcribe_voice(episode_num)
 
     # ---- DETERMINISTIC chapter-card times (from the sentence timeline) ----
     # The chapter sentence is its own clip, so its on-screen window = that
@@ -8804,6 +9040,13 @@ def _render_video(shots: list[dict], episode_num: int,
     if title_events:
         others = [ev for ev in title_events if ev.get("kind") != "chapter"]
         title_events = chap_events + others
+
+    # Key-word on-screen highlights (Joe 2026-08-12): burn the 2-3 key words of
+    # each key sentence at its whisper-resolved spoken time.
+    kw_events = _build_keyword_events(valid, words, clip_starts)
+    if kw_events:
+        title_events = (title_events or []) + kw_events
+        print(f"  [KEYWORD] {len(kw_events)} key-word highlight(s) queued for burn")
 
     # Per-image on-screen duration: exactly this sentence's TTS + its pacing gap
     # (= clip_starts[i+1]-clip_starts[i]). Matches the mix timeline 1:1.
@@ -9852,6 +10095,13 @@ def _rebuild_script_for_resume(state: dict) -> dict:
     # Drop back-to-back same-location repeats BEFORE chapter/anchors/establishing
     # so every derived index map stays aligned with the deduped narration.
     narration = _dedupe_consecutive_locations(narration)
+    # Intro hook + narration plan (key words + foley) at the PARAGRAPH level,
+    # BEFORE chapters are inserted / sentences split (Joe 2026-08-12).
+    plan = _plan_narration(narration, episode_num)
+    intro_hook = _generate_intro_hook(story_bible)
+    if intro_hook:
+        narration = [intro_hook] + narration
+        print(f"  [PLAN] intro hook: '{intro_hook}' (plays before chapter 1)")
     narration, chapter_events = _insert_chapter_markers(narration)
     anchor_events = _extract_anchor_events(narration)
     establishing_map = {}
@@ -9873,6 +10123,7 @@ def _rebuild_script_for_resume(state: dict) -> dict:
     shots = _build_shot_list(narration, bible=_shot_bible, context=context,
                              establishing_map=establishing_map,
                              sentence_para_map=sentence_para_map)
+    _apply_plan_to_shots(shots, sentence_para_map, plan)  # key words + foley onto shots
 
     character_sheets = _build_character_sheets(shots, narration, bible=story_bible)
     brands = _extract_brands(topic, paragraphs, narration)
@@ -10750,6 +11001,13 @@ def _phase_llm(config: dict):
             print("  [FILTER] All narration segments off-topic, rebuilding from filtered article...")
             narration = _build_narration_script(paragraphs, target_paras, bible=story_bible)
     narration = _dedupe_consecutive_locations(narration)
+    # Intro hook + narration plan (key words + foley) at the PARAGRAPH level,
+    # BEFORE chapters are inserted / sentences split (Joe 2026-08-12).
+    plan = _plan_narration(narration, episode_num)
+    intro_hook = _generate_intro_hook(story_bible)
+    if intro_hook:
+        narration = [intro_hook] + narration
+        print(f"  [PLAN] intro hook: '{intro_hook}' (plays before chapter 1)")
     narration, chapter_events = _insert_chapter_markers(narration)
     anchor_events = _extract_anchor_events(narration)
 
@@ -10795,6 +11053,7 @@ def _phase_llm(config: dict):
     shots = _build_shot_list(narration, bible=_shot_bible, context=context,
                              establishing_map=establishing_map,
                              sentence_para_map=sentence_para_map)
+    _apply_plan_to_shots(shots, sentence_para_map, plan)  # key words + foley onto shots
 
     easter_egg = _ask_easter_egg()
     if easter_egg:

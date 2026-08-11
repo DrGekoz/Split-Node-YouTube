@@ -65,6 +65,8 @@ Style: TypeLoc,Myriad Pro Bold,{type_size},&H000000FF,&H000000FF,&H00000000,&H00
 Style: TypePerson,Myriad Pro Bold,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
 Style: TypeGhost,Myriad Pro Bold,{type_size},&H0000FF00,&H0000FF00,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
 Style: TypePersonGhost,Myriad Pro Bold,{type_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,0,0,7,40,40,40,1
+Style: KwGlow,Bahnschrift,{kw_size},&H0000D7FF,&H0000D7FF,&H00000000,&H00000000,1,0,0,0,100,100,2,0,1,0,0,5,60,60,60,1
+Style: KwCore,Bahnschrift,{kw_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,1,0,0,0,100,100,2,0,1,0,0,5,60,60,60,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -274,6 +276,33 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Key-word highlights (Joe 2026-08-12)
+# ---------------------------------------------------------------------------
+
+def _keyword_events(ev, W, H, fps) -> list[str]:
+    """ev: {kind:'keyword', text (the 2-3 key words), start, end}
+
+    The key words pop in at the instant they are spoken, hold ~1.2s, then fade.
+    Centered at 0.62H, Bahnschrift, white core + cyan glow so they read as the
+    words the viewer should remember without clashing with the chapter cards
+    (centre, larger) or typewriter row (bottom-left)."""
+    dur = max(ev.get("end", ev["start"] + 1.2) - ev["start"], 1.0)
+    text = ev["text"]
+    text = text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
+    cx, cy = W // 2, int(H * 0.62)
+    pop = min(0.28, dur * 0.4)
+    glow = (f"{{\\an5\\pos({cx},{cy})\\blur(12)\\bord(2)\\1c&H0000D7FF&\\alpha&H70&"
+            f"\\fscx(70)\\fscy(70)\\t(0,{int(pop*1000)},\\fscx(100)\\fscy(100)\\alpha&H55&)"
+            f"\\t({int(pop*1000)},{int(dur*1000)},\\alpha&H80&)}}{text}")
+    core = (f"{{\\an5\\pos({cx},{cy})\\1c&HFFFFFF&\\bord(3)\\3c&H000000&\\shad(0)"
+            f"\\fscx(60)\\fscy(60)\\alpha&HFF&"
+            f"\\t(0,{int(pop*1000)},\\fscx(110)\\fscy(110)\\alpha&H00&)"
+            f"\\t({int(pop*1000)},{int(pop*1000)+250},\\fscx(100)\\fscy(100))}}{text}")
+    return [_dialog(ev["start"], ev["end"], "KwGlow", glow, layer=5),
+            _dialog(ev["start"], ev["end"], "KwCore", core, layer=7)]
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -290,9 +319,11 @@ def build_title_ass(events: list[dict], out_path: str,
     chap_size = int(video_h * 0.075)      # ~81px @1080
     kicker_size = int(video_h * 0.037)    # ~40px
     type_size = int(video_h * 0.052)      # ~56px
+    kw_size = int(video_h * 0.05)         # key-word highlight ~54px @1080
 
     body = HEADER.format(W=video_w, H=video_h, chap_size=chap_size,
-                         kicker_size=kicker_size, type_size=type_size)
+                         kicker_size=kicker_size, type_size=type_size,
+                         kw_size=kw_size)
     # Compute row stacking for person titles: how many OTHER typewriter events
     # (location/person) fire within 2s - the person card moves up a
     # row per collision so cards never overlap on the bottom-left.
@@ -328,6 +359,8 @@ def build_title_ass(events: list[dict], out_path: str,
         try:
             if kind == "chapter":
                 parts.extend(_chapter_events(ev, video_w, video_h, fps))
+            elif kind == "keyword":
+                parts.extend(_keyword_events(ev, video_w, video_h, fps))
             elif kind in ("location", "person"):
                 parts.extend(_typewriter_events(ev, video_w, video_h, fps))
         except Exception as e:

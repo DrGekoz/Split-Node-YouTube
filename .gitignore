@@ -21,6 +21,7 @@ thumbnails/
 .rejected_articles.json
 .resume_state.json
 .resume_state.json.bak
+narration_plan.json
 
 # Test / debug artifacts
 zoom_frames_*/
