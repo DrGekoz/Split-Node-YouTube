@@ -162,7 +162,14 @@ YOUTUBE_BASE_TAGS = [
 # marktechpost 403, Reddit /r/* 429 rate-limited). Only feeds that actually
 # return parseable items are kept.
 RSS_FEEDS = [
-    # ---- MONEY HACKS / LOTTERY LOOPHOLES (main topic - polled first) ----
+    # ---- LOTTERY / GAMBLING / ADVANTAGE PLAY (main topic - polled first) ----
+    # Sources for the flagship money-hack stories: lottery loopholes, gambling
+    # advantage plays (card counting, betting models), casino exploits. Verified
+    # live 2026-08-12 (each returns parseable items + strong niche matches).
+    "https://www.thelotter.com/blog/feed/",          # lottery formula / how-to
+    "https://www.casino.org/blog/feed/",             # gambling advantage plays
+    "https://www.gamblingnews.com/feed/",            # gambling news / exploits
+    # ---- MONEY HACKS / LOOPHOLES ----
     "https://www.moneycrashers.com/feed/",            # money hacks / saving / side income
     "https://www.wisebread.com/feed/",                # frugal living / money hacks
     "https://lifehacker.com/rss",                     # life + money hacks
@@ -173,7 +180,10 @@ RSS_FEEDS = [
     "https://finance.yahoo.com/news/rssindex",        # money / markets news
     "https://feeds.content.dowjones.io/public/rss/mw_marketpulse",  # MarketWatch
     "https://fortune.com/feed/",                      # money / business
-    # ---- security / hacker ----
+    "https://www.cnbc.com/id/10000664/device/rss/rss.html",  # CNBC money
+    # ---- CYBERCRIME (hackers making millions) ----
+    "https://www.infosecurity-magazine.com/rss/news/", # big security pool
+    "https://thecyberexpress.com/feed/",               # cybercrime / exploits
     "https://www.wired.com/feed/tag/cybersecurity/latest/rss",
     "https://krebsonsecurity.com/feed/",
     "https://feeds.feedburner.com/TheHackersNews",
@@ -228,6 +238,15 @@ HN_SEARCH_QUERIES = [
     "hustler made money",
     "made millions online",
     "bank loophole money",
+    # ---- bank / ATM / money glitches (from Joe's story list) ----
+    "bank glitch",
+    "atm glitch",
+    "bank error overdraft",
+    "accidental transfer millions",
+    "crypto transfer mistake",
+    "bank accidentally paid",
+    "infinite money glitch",
+    "check deposit glitch",
     # ---- hackers making money / exploits ----
     "hacker made millions",
     "exploit bank millions",
@@ -250,6 +269,11 @@ MONEY_PRIORITY_KEYWORDS = [
     "millions", "payout", "payday", "mathematician", "beat the odds",
     "beat the house", "beat the system", "bookie", "betting exploit",
     "bank exploit", "atm exploit", "bonus exploit", "voucher hack", "coupon hack",
+    # bank / ATM / money glitches (Joe's flagship story type)
+    "bank glitch", "atm glitch", "money glitch", "bank error", "overdraft",
+    "accidental transfer", "mistakenly transferred", "accidentally sent",
+    "infinite money", "check deposit glitch", "crypto glitch", "banking glitch",
+    "got away with", "windfall money", "spent the money",
 ]
 
 # Scoring tiers - strong phrases are worth far more than weak ones
