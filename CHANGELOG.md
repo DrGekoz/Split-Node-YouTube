@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.41.2] - 2026-08-12
+
+### Intro written at end of script-writing from summarized article context
+
+- The intro is now written at the END of the script-writing phase (still before
+  any TTS), using a ONE-LINE summary of each article paragraph as context
+  (`_summarize_paragraphs`) to save the context window.
+- Still prepended to the START of the video, one image per sentence.
+- Up to 2 intro sentences are marked KEY (with 2-3 key words) and merged into the
+  narration plan, so the intro gets key-word whooshes + on-screen highlights too.
+
 ## [1.41.1] - 2026-08-12
 
 ### Intro now runs the full Split Node Shorts 6-phase formula
