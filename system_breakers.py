@@ -64,11 +64,11 @@ if _ENV_FILE.is_file():
         _k, _v = _line.split("=", 1)
         os.environ.setdefault(_k.strip(), _v.strip())
 
-TTS_TEMP = PROJECT_DIR / "tts_temp"
-SHOTS_DIR = PROJECT_DIR / "shots"
-RENDERED_AUDIO = PROJECT_DIR / "rendered_audio"
-RENDERED_VIDEO = PROJECT_DIR / "rendered_video"
-THUMBNAILS_DIR = PROJECT_DIR / "thumbnails"
+# All per-episode outputs (temp TTS clips, images, rendered audio, video,
+# thumbnails, scene boards, style tests) live inside a single top-level
+# `episodes/` folder, one subfolder per episode: episodes/ep{N:03d}/. Nothing
+# else is spread around the project root. (Joe 2026-08-12)
+EPISODES_DIR = PROJECT_DIR / "episodes"
 SFX_DIR = PROJECT_DIR / "cinematic_sounds"
 USED_ARTICLES_FILE = PROJECT_DIR / ".used_articles.json"
 EPISODE_COUNTER_FILE = PROJECT_DIR / ".episode_counter"
@@ -85,13 +85,45 @@ if _RESUME_EP_INT > 0:
     RESUME_FILE = PROJECT_DIR / f".resume_state.ep{_RESUME_EP_INT:03d}.json"
 else:
     RESUME_FILE = PROJECT_DIR / ".resume_state.json"
-BATCH_TEMP = PROJECT_DIR / "batch_temp"
 
 YOUTUBE_CREDENTIALS = Path.home() / ".youtube-upload-credentials.json"
 CLIENT_SECRETS = PROJECT_DIR / "client_secret_874421706318-sl7gg802bovuib9h2q95hq9lvlb661oi.apps.googleusercontent.com.json"
 
-for d in [TTS_TEMP, SHOTS_DIR, RENDERED_AUDIO, RENDERED_VIDEO, THUMBNAILS_DIR, BATCH_TEMP]:
-    d.mkdir(exist_ok=True)
+
+def _episode_dir(episode_num) -> Path:
+    """Root folder for ALL of one episode's outputs: episodes/ep{N:03d}/"""
+    d = EPISODES_DIR / f"ep{int(episode_num):03d}"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _ep_tts_dir(episode_num) -> Path:
+    d = _episode_dir(episode_num) / "tts"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _ep_audio_dir(episode_num) -> Path:
+    d = _episode_dir(episode_num) / "audio"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _ep_video_dir(episode_num) -> Path:
+    d = _episode_dir(episode_num) / "video"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _ep_thumb_dir(episode_num) -> Path:
+    d = _episode_dir(episode_num) / "thumbnails"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Shared fallback background (not per-episode - reused across every episode).
+FALLBACK_BG = EPISODES_DIR / "_fallback_bg.png"
+EPISODES_DIR.mkdir(parents=True, exist_ok=True)
 
 LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 POCKET_TTS_URL = "http://127.0.0.1:8769"
@@ -122,8 +154,23 @@ YOUTUBE_BASE_TAGS = [
 # RSS feeds for the niche (fallback pool - primary source is HN Algolia search).
 # Expanded Aug 2026 with AI / tech / security feeds to serve the trend-scan
 # categories (hacker, beat-the-system, lottery, AI, tech).
+# Expanded Aug 2026 (money-hack focus): the flagship topic is MONEY HACKS /
+# lottery loopholes - ordinary people finding legal ways to make money / beat
+# the odds. Money-hack and lottery feeds are listed FIRST and polled first so
+# they surface before the other topics.
 RSS_FEEDS = [
-    # security / hacker
+    # ---- MONEY HACKS / LOTTERY LOOPHOLES (main topic - polled first) ----
+    "https://www.thepennyhoarder.com/feed/",            # money-saving hacks
+    "https://money.com/feed/",                          # personal finance hacks
+    "https://www.nerdwallet.com/blog/feed/",            # credit-card / bank hacks
+    "https://www.forbes.com/money/feed/",               # money / wealth
+    "https://www.businessinsider.com/feeds/rss/money/", # money / side hustles
+    "https://feeds.feedburner.com/Zerohedge",           # markets / loopholes
+    "https://www.smartmoney.com/feed",                  # investing / cash
+    "https://www.creditcards.com/feed/",                # rewards / cashback hacks
+    "https://www.reddit.com/r/personalfinance/.rss",    # everyday money tricks
+    "https://www.reddit.com/r/Frugal/.rss",             # money-saving hacks
+    # ---- security / hacker ----
     "https://www.wired.com/feed/tag/cybersecurity/latest/rss",
     "https://krebsonsecurity.com/feed/",
     "https://feeds.feedburner.com/TheHackersNews",
@@ -154,26 +201,50 @@ RSS_FEEDS = [
 ]
 
 # HN Algolia search queries - tuned to the niche: math beating the lottery,
-# hackers making money, loopholes exploited. Each returns scored, dated stories.
+# hackers making money, loopholes exploited. MONEY-HACK / lottery queries are
+# listed FIRST and polled first so they surface ahead of the other topics.
 HN_SEARCH_QUERIES = [
-    "lottery math",
+    # ---- MONEY HACKS / LOTTERY LOOPHOLES (main topic - polled first) ----
     "lottery loophole",
+    "lottery math",
     "lottery jackpot mathematics",
     "won the lottery system",
+    "money hack",
+    "money hacks",
+    "side hustle millions",
+    "cashback loophole",
+    "credit card hack",
+    "reward points exploit",
+    "refund exploit",
+    "arbitrage money",
+    "gambling system beat",
     "card counting blackjack",
     "casino exploit",
-    "gambling system beat",
+    "math professor lottery",
+    "lottery algorithm",
+    "poker math win",
+    # ---- hackers making money / exploits ----
     "hacker made millions",
     "exploit bank millions",
     "stole millions system",
     "beat the system loophole",
-    "math professor lottery",
-    "lottery algorithm",
     "counterfeit scheme",
-    "poker math win",
     "security flaw millions",
     "social engineering scam millions",
     "fraud loophole millions",
+]
+
+# MONEY-HACK priority keywords. Stories matching these are the FLAGSHIP topic
+# and are boosted ahead of everything else in the candidate sort, so money-hack
+# / lottery-loophole stories always surface FIRST in the RSS poll.
+MONEY_PRIORITY_KEYWORDS = [
+    "lottery", "jackpot", "loophole", "money hack", "money hacks", "side hustle",
+    "cashback", "cash back", "reward points", "credit card hack", "credit hack",
+    "refund", "arbitrage", "gambling system", "card counting", "casino exploit",
+    "passive income", "make money", "making money", "wealth", "windfall",
+    "millions", "payout", "payday", "mathematician", "beat the odds",
+    "beat the house", "beat the system", "bookie", "betting exploit",
+    "bank exploit", "atm exploit", "bonus exploit", "voucher hack", "coupon hack",
 ]
 
 # Scoring tiers - strong phrases are worth far more than weak ones
@@ -181,11 +252,14 @@ STRONG_KEYWORDS = [
     "lottery", "jackpot", "card counting", "blackjack", "casino", "loophole",
     "exploit", "hacked", "hacker", "million", "millions", "scam", "fraud",
     "counterfeit", "stole", "heist", "won", "wins", "poker", "gambling",
-    "betting", "math", "mathematician", "algorithm",
+    "betting", "math", "mathematician", "algorithm", "money hack", "money hacks",
+    "side hustle", "cashback", "cash back", "passive income", "arbitrage",
+    "reward points", "credit card hack", "windfall", "payout",
 ]
 WEAK_KEYWORDS = [
     "system", "security", "vulnerability", "breach", "hack", "cheat",
-    "bet", "win", "prize", "money", "bank", "scheme",
+    "bet", "win", "prize", "money", "bank", "scheme", "refund", "saving",
+    "deal", "voucher", "coupon",
 ]
 # Words that indicate the story is NOT the niche (news-adjacent noise)
 EXCLUDE_WORDS = [
@@ -702,11 +776,6 @@ def _style_inject(allow_logo: bool = False) -> str:
     )
 
 
-# B-roll image cache (DEPRECATED 2026-08-04 - no longer used by the pipeline;
-# kept so the standalone generate_broll_cache.py helper still imports).
-IMAGE_ASSETS_DIR = PROJECT_DIR / "image-assets"
-_ASSETS_INDEX = IMAGE_ASSETS_DIR / "assets.json"
-
 # Channel-wide style plate: reference image(s) defining the uniform Split
 # Node look (Arcane-style sheets from style_sheets/). Fed as the SCENE ref
 # in identity mode (image 1) alongside character faces / location / props
@@ -730,23 +799,6 @@ if not PROP_STYLE_REF.is_file():
     PROP_STYLE_REF = STYLE_REF_IMG
 
 
-def _load_asset_index() -> dict:
-    if _ASSETS_INDEX.is_file():
-        try:
-            return json.loads(_ASSETS_INDEX.read_text(encoding="utf-8"))
-        except Exception:
-            pass
-    return {}
-
-
-def _save_asset_index(idx: dict) -> None:
-    try:
-        IMAGE_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-        _ASSETS_INDEX.write_text(json.dumps(idx, indent=1), encoding="utf-8")
-    except Exception:
-        pass
-
-
 _ASSET_STOP = {
     "the", "a", "an", "of", "in", "on", "at", "with", "and", "or", "but", "his",
     "her", "their", "its", "is", "are", "was", "were", "be", "been", "to", "from",
@@ -762,65 +814,6 @@ def _scene_keywords(scene: str) -> list[str]:
     toks = re.findall(r"[a-z0-9']+", (scene or "").lower())
     return [t for t in toks if t not in _ASSET_STOP and len(t) > 2]
 
-
-def _lookup_broll_asset(scene: str) -> Optional[str]:
-    """Find a cached no-character image matching the scene. None if no match."""
-    if not IMAGE_ASSETS_DIR.is_dir():
-        return None
-    kw = _scene_keywords(scene)
-    if not kw:
-        return None
-    # JSON index first: exact keyword-set matches across any past episode
-    idx = _load_asset_index()
-    for key, path in idx.items():
-        if not path or not os.path.isfile(path):
-            continue
-        key_set = set(key.split("_"))
-        if kw and all(t in key_set for t in kw[:2]):
-            return str(path)
-    best, best_score = None, 0
-    for f in IMAGE_ASSETS_DIR.glob("*.png"):
-        name_kw = set(f.stem.lower().split("_"))
-        score = sum(1 for t in kw if t in name_kw)
-        if score > best_score:
-            best, best_score = f, score
-    return str(best) if best_score >= 1 else None
-
-
-def _cache_broll_asset(image_path: str, scene: str) -> str:
-    """Copy a freshly generated no-character image into image-assets/ (keyword
-    filename + assets.json entry) so future episodes reuse it instead of
-    regenerating. Pipeline rule: every cached image is upscaled to 1920x1080."""
-    try:
-        if not image_path or not os.path.isfile(image_path):
-            return image_path
-        IMAGE_ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-        kw = _scene_keywords(scene)[:6]
-        if not kw:
-            return image_path
-        dst = IMAGE_ASSETS_DIR / (f"{'_'.join(kw)}.png")
-        if dst.exists():
-            return str(dst)
-        import shutil as _sh
-        _sh.copy2(image_path, dst)
-        try:
-            from PIL import Image as _PILImg
-            w, h = _PILImg.open(dst).size
-        except Exception:
-            w = h = 0
-        if (w, h) != (1920, 1080):
-            # only re-upscale sources that aren't already 1080p (Krea shots
-            # come out of the in-graph FaceUpDAT upscale at 1920x1080)
-            try:
-                _upscale_to_1080p(str(dst))
-            except Exception:
-                pass
-        idx = _load_asset_index()
-        idx["_".join(kw)] = str(dst)
-        _save_asset_index(idx)
-        return str(dst)
-    except Exception:
-        return image_path
 
 def _upscale_to_1080p(image_path: str) -> None:
     """Upscale an image to exactly 1920x1080 in place using 4x-FaceUpDAT.
@@ -1093,8 +1086,6 @@ TITLE_SFX = {
 TYPEWRITER_SEC = 0.7
 TITLE_HOLD_SEC = 4.0
 GLITCH_OFF_SEC = 0.5
-# whisper / STT artifacts are deleted on episode completion
-WHISPER_JSON = "ep{ep:03d}_whisper.json"
 
 # Music library - tone-tagged
 MUSIC_LIBRARY = {
@@ -1333,6 +1324,14 @@ def _trend_relevance(text: str, topics: dict) -> tuple[int, str]:
     return best
 
 
+def _money_priority(text: str) -> bool:
+    """True if a story is a FLAGSHIP money-hack / lottery-loophole topic.
+    These are boosted ahead of every other topic in the RSS poll (Joe
+    2026-08-12: money hacks / lottery loopholes = the main topic)."""
+    low = text.lower()
+    return any(kw in low for kw in MONEY_PRIORITY_KEYWORDS)
+
+
 def _collect_candidate_stories(used: set, skip: set,
                                trend_topics: Optional[dict] = None) -> list[dict]:
     """Find niche stories. Primary: HN Algolia search (scored, curated queries).
@@ -1363,6 +1362,8 @@ def _collect_candidate_stories(used: set, skip: set,
                 f"{it['title']} {it.get('description', '')}", trend_topics)
             it["trend_rel"] = trend_rel
             it["trend_term"] = matched_term
+            it["money_priority"] = 1 if _money_priority(
+                f"{it['title']} {it.get('description', '')}") else 0
             it["final_score"] = round(
                 0.5 * min(it["score"] * 10, 100)
                 + 0.3 * trend_rel
@@ -1372,9 +1373,11 @@ def _collect_candidate_stories(used: set, skip: set,
             break
         time.sleep(0.4)
 
-    # Sort by MOST RECENT first (recency-first, matching the filters), with
-    # final_score as the tiebreak so a fresher niche hit wins over an older one.
-    matches.sort(key=lambda x: (_parse_item_date(x), x.get("final_score", 0),
+    # MONEY-HACK / lottery-loophole stories first (flagship topic), then MOST
+    # RECENT, then final_score as the tiebreak. Money stories always surface
+    # before hacker/tech/AI regardless of recency (Joe 2026-08-12).
+    matches.sort(key=lambda x: (x.get("money_priority", 0),
+                                _parse_item_date(x), x.get("final_score", 0),
                                 x.get("hn_points", 0)), reverse=True)
 
     # -- Fallback: RSS feeds if Algolia gave nothing usable --
@@ -1399,6 +1402,8 @@ def _collect_candidate_stories(used: set, skip: set,
                         f"{it['title']} {it['description']}", trend_topics)
                     it["trend_rel"] = trend_rel
                     it["trend_term"] = matched_term
+                    it["money_priority"] = 1 if _money_priority(
+                        f"{it['title']} {it['description']}") else 0
                     it["final_score"] = round(
                         0.5 * min(score * 10, 100) + 0.3 * trend_rel, 1)
                     seen_titles.add(tkey)
@@ -1406,7 +1411,8 @@ def _collect_candidate_stories(used: set, skip: set,
             if len(matches) >= 8:
                 break
             time.sleep(0.3)
-        matches.sort(key=lambda x: (_parse_item_date(x),
+        matches.sort(key=lambda x: (x.get("money_priority", 0),
+                                    _parse_item_date(x),
                                     x.get("final_score", 0)), reverse=True)
     return matches
 
@@ -1502,7 +1508,8 @@ def _pick_story() -> tuple[str, str]:
         tr = chosen.get("trend_rel", 0)
         tt = chosen.get("trend_term", "")
         hp = chosen.get("hn_points", 0)
-        print(f"    [final={fs if fs is not None else '?'} | niche={chosen.get('score', 0)*10}"
+        tag = "[MONEY-HACK]" if chosen.get("money_priority") else "          "
+        print(f"    {tag} final={fs if fs is not None else '?'} | niche={chosen.get('score', 0)*10}"
               f"/100 | rising_topic='{tt}' ({tr}/100) | hn={hp}]")
         print(f"  {'='*60}")
         resp = input("  Use this topic? (Y/n/q): ").strip().lower()
@@ -3582,14 +3589,14 @@ def _build_scene_board(narration_paras: list[str], topic: str,
             except Exception:
                 continue
     if cards:
-        ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+        ep_dir = _episode_dir(episode_num)
         ep_dir.mkdir(parents=True, exist_ok=True)
         try:
             (ep_dir / "scene_board.json").write_text(
                 json.dumps(cards, indent=1), encoding="utf-8")
         except Exception:
             pass
-    print(f"  [BOARD] {len(cards)} scene cards -> shots/ep{episode_num:03d}/scene_board.json")
+    print(f"  [BOARD] {len(cards)} scene cards -> episodes/ep{episode_num:03d}/scene_board.json")
     return cards
 
 
@@ -4660,7 +4667,7 @@ def _character_prompt_block(sheet: dict, angle: str) -> str:
 
 def _runpod_generate(prompt: str, seed: int, size: str = "1280*720",
                      timeout: int = 240, out_dir: Optional[Path] = None) -> Optional[str]:
-    out_dir = out_dir or SHOTS_DIR
+    out_dir = out_dir or EPISODES_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "input": {
@@ -5125,7 +5132,7 @@ def _ask_image_backend() -> tuple[str, str]:
 def _black_placeholder(episode_num: int) -> str:
     """WxH pure-black PNG used for chapter title placeholder clips."""
     W_RES, H_RES = _get_output_resolution()
-    ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+    ep_dir = _episode_dir(episode_num)
     ep_dir.mkdir(parents=True, exist_ok=True)
     out = str(ep_dir / "_black.png")
     if os.path.isfile(out) and os.path.getsize(out) > 1000:
@@ -5262,7 +5269,7 @@ def _generate_chapter_card(shot: dict, episode_num: int,
     n = int(shot.get("chapter_num", 1))
     title = str(shot.get("chapter_title", "")).strip() or "The Story"
     W_RES, H_RES = _get_output_resolution()
-    ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+    ep_dir = _episode_dir(episode_num)
     ep_dir.mkdir(parents=True, exist_ok=True)
     out = str(ep_dir / _chapter_filename(n, title))
     # REGEN_CHAPTERS controls chapter-card regeneration independently of shots
@@ -7706,7 +7713,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
       are retried once with a fresh seed.
     """
     character_sheets = character_sheets or {}
-    ep_dir = SHOTS_DIR / f"ep{episode_num:03d}" if episode_num else None
+    ep_dir = _episode_dir(episode_num) if episode_num else None
     black = _black_placeholder(episode_num) if episode_num else None
     face_lock = os.environ.get("FACE_LOCK", "1") != "0"
     # Brand assets (hacker screens / logo-on-building) may be empty on resume
@@ -7721,10 +7728,10 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
     # shots are composed ONLY from the already-styled asset refs.
     if location_sheets is None and context:
         location_sheets = _build_location_sheets(context, 42000 + episode_num * 7,
-                                                 ep_dir or SHOTS_DIR)
+                                                 ep_dir or EPISODES_DIR)
     if prop_assets is None and context:
         prop_assets = _build_prop_assets(context, 43000 + episode_num * 7,
-                                         ep_dir or SHOTS_DIR)
+                                         ep_dir or EPISODES_DIR)
     location_sheets = location_sheets or {}
     prop_assets = prop_assets or {}
     backend = _active_image_backend()
@@ -7889,7 +7896,7 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
         # shot loop); _select_shot_refs just picks the PERFECT panel(s) here.
         refs, notes = _select_shot_refs(shot, sheets, brand_assets,
                                         llm_refs=shot.get("_llm_refs"))
-        out_path = str((ep_dir or SHOTS_DIR)
+        out_path = str((ep_dir or EPISODES_DIR)
                        / _shot_filename(shot, int(shot.get("seq", 0) or (shot.get("narration_idx", idx) + 1))))
         n = len(refs)
         if refs:
@@ -8090,7 +8097,7 @@ def _tts_worker(narration_paras: list[str], episode_num: int,
     named by NARRATION index (narration_{i:02d}.wav) so they map 1:1 to shots
     via shot['narration_idx'] even when shot parsing skips a paragraph.
     """
-    ep_dir = TTS_TEMP / f"ep_{episode_num}"
+    ep_dir = _ep_tts_dir(episode_num)
     ep_dir.mkdir(parents=True, exist_ok=True)
     for i, text in enumerate(narration_paras):
         if stop.is_set():
@@ -8135,7 +8142,7 @@ def _start_tts_worker(narration_paras: list[str], episode_num: int):
 
 def _finalize_tts(shots: list[dict], results: dict, episode_num: int) -> None:
     """Map finished TTS clips onto shots by narration index."""
-    ep_dir = TTS_TEMP / f"ep_{episode_num}"
+    ep_dir = _ep_tts_dir(episode_num)
     for pos, shot in enumerate(shots):
         nidx = shot.get("narration_idx", pos)
         if shot.get("is_chapter"):
@@ -8168,7 +8175,7 @@ def _finalize_tts(shots: list[dict], results: dict, episode_num: int) -> None:
 def _generate_all_tts(shots: list[dict], episode_num: int) -> None:
     """Sequential TTS (used by resume flows where parallelism isn't needed)."""
     print(f"\n[TTS] Generating {len(shots)} narration clips (built-in male voice: {TTS_VOICE})...")
-    ep_dir = TTS_TEMP / f"ep_{episode_num}"
+    ep_dir = _ep_tts_dir(episode_num)
     ep_dir.mkdir(parents=True, exist_ok=True)
     for idx, shot in enumerate(shots):
         nidx = shot.get("narration_idx", idx)
@@ -8303,8 +8310,7 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
              "-af", f"volume={VOICE_DB}dB", "-c:a", "pcm_s16le", str(voice_path)],
             capture_output=True, text=True, timeout=60)
         # Deterministic copy of the voice-only track for the whisper title pass
-        RENDERED_AUDIO.mkdir(parents=True, exist_ok=True)
-        voice_out = str(RENDERED_AUDIO / f"ep{episode_num:03d}_voice.wav")
+        voice_out = str(_ep_audio_dir(episode_num) / "voice.wav")
         if os.path.isfile(voice_out) and os.path.getsize(voice_out) > 1000:
             pass
         else:
@@ -8617,8 +8623,8 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
         # (hundreds of title SFX). Mix SFX in batches of BATCH into short
         # intermediate WAVs (filter graph written to a script file, never
         # the cmdline), then run one tiny final mix.
-        final_wav = str(RENDERED_AUDIO / f"ep{episode_num:03d}_mix.wav")
-        work = RENDERED_AUDIO / f"ep{episode_num:03d}_mixwork"
+        final_wav = str(_ep_audio_dir(episode_num) / "mix.wav")
+        work = _ep_audio_dir(episode_num) / "mixwork"
         work.mkdir(parents=True, exist_ok=True)
         batch_files = []
         BATCH = 40
@@ -8709,12 +8715,11 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
 def _transcribe_voice(episode_num: int, voice_path: Optional[str] = None) -> list[dict]:
     """Word-level timings of the voice track via faster-whisper (base, CPU).
 
-    Cached to rendered_audio/ep{N:03d}_whisper.json (reused on resume; deleted
+    Cached to episodes/ep{N:03d}/audio/whisper.json (reused on resume; deleted
     when the episode completes). vad_filter=False is critical - TTS voices have
     no natural speech pauses and VAD returns EMPTY segments.
     """
-    RENDERED_AUDIO.mkdir(parents=True, exist_ok=True)
-    cache = str(RENDERED_AUDIO / WHISPER_JSON.format(ep=episode_num))
+    cache = str(_ep_audio_dir(episode_num) / "whisper.json")
     if os.path.isfile(cache) and os.path.getsize(cache) > 100:
         try:
             words = json.loads(Path(cache).read_text())
@@ -8723,7 +8728,7 @@ def _transcribe_voice(episode_num: int, voice_path: Optional[str] = None) -> lis
         except Exception:
             pass
     if not voice_path or not os.path.isfile(voice_path):
-        voice_path = str(RENDERED_AUDIO / f"ep{episode_num:03d}_voice.wav")
+        voice_path = str(_ep_audio_dir(episode_num) / "voice.wav")
     if not os.path.isfile(voice_path):
         print("  [STT] no voice track for whisper")
         return []
@@ -8841,7 +8846,7 @@ def _render_clip(image_path: str, audio_path: str, output_path: str,
     if not image_path or not os.path.isfile(image_path):
         from PIL import Image
         img = Image.new("RGB", (W_RES, H_RES), (18, 18, 22))
-        image_path = str(SHOTS_DIR / "_fallback_bg.png")
+        image_path = str(FALLBACK_BG)
         img.save(image_path)
     dur = max(_get_audio_duration(audio_path), 0.5) + 0.6
     n_frames = max(int(dur * 24), 24)
@@ -9007,8 +9012,7 @@ def _deterministic_chapter_events(shots: list[dict], clip_starts: list[float],
 def _ensure_voice_track(shots: list[dict], episode_num: int) -> Optional[str]:
     """Build rendered_audio/ep{N:03d}_voice.wav if missing (same concat as the
     mix: clips + per-shot pacing gaps). Used by the whisper title pass on resume."""
-    RENDERED_AUDIO.mkdir(parents=True, exist_ok=True)
-    out = str(RENDERED_AUDIO / f"ep{episode_num:03d}_voice.wav")
+    out = str(_ep_audio_dir(episode_num) / "voice.wav")
     if os.path.isfile(out) and os.path.getsize(out) > 1000:
         return out
     valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
@@ -9044,12 +9048,12 @@ def _ensure_voice_track(shots: list[dict], episode_num: int) -> Optional[str]:
 def _cleanup_stt_artifacts(episode_num: int) -> None:
     """Delete whisper/STT caches + title markers when the episode completes."""
     try:
-        for p in RENDERED_AUDIO.glob(f"ep{episode_num:03d}_whisper.json"):
+        for p in _ep_audio_dir(episode_num).glob("whisper.json"):
             p.unlink()
             print(f"  [CLEAN] removed {p.name}")
-        for p in RENDERED_VIDEO.glob(f"split_node_ep{episode_num:03d}*.titled"):
+        for p in _ep_video_dir(episode_num).glob("*.titled"):
             p.unlink()
-        for p in RENDERED_VIDEO.glob(f"split_node_ep{episode_num:03d}_titles.ass"):
+        for p in _ep_video_dir(episode_num).glob("titles.ass"):
             p.unlink()
     except Exception as e:
         print(f"  [CLEAN] stt cleanup error: {e}")
@@ -9144,7 +9148,7 @@ def _render_video(shots: list[dict], episode_num: int,
     # Build the full audio mix first (voice+music+sfx). Captures exact per-shot
     # start times (clip_starts) so each image can be shown for its exact
     # duration. Deterministic path -> reused on resume.
-    mixed_audio = str(RENDERED_AUDIO / f"ep{episode_num:03d}_mix.wav")
+    mixed_audio = str(_ep_audio_dir(episode_num) / "mix.wav")
     clip_starts = []
     words = []
     if os.path.isfile(mixed_audio) and os.path.getsize(mixed_audio) > 1000:
@@ -9193,8 +9197,8 @@ def _render_video(shots: list[dict], episode_num: int,
 
     W_RES, H_RES = _get_output_resolution()
     OV_W, OV_H = W_RES * 4, H_RES * 4
-    fallback_img = str(SHOTS_DIR / "_fallback_bg.png")
-    output_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}.mp4")
+    fallback_img = str(FALLBACK_BG)
+    output_path = str(_ep_video_dir(episode_num) / f"ep{episode_num:03d}.mp4")
 
     temp_dir = Path(tempfile.mkdtemp(prefix=f"sb_render_{episode_num}_"))
     try:
@@ -9208,12 +9212,12 @@ def _render_video(shots: list[dict], episode_num: int,
                 from PIL import Image as _PIL
                 Image = _PIL
                 img = Image.new("RGB", (W_RES, H_RES), (18, 18, 22))
-                p = str(SHOTS_DIR / "_fallback_bg.png")
+                p = str(FALLBACK_BG)
                 img.save(p)
             imgs.append(p)
 
         # ---- Build the ASS title file (chapter + typewriter) ----
-        ass_path = str(RENDERED_VIDEO / f"split_node_ep{episode_num:03d}_titles.ass")
+        ass_path = str(_ep_video_dir(episode_num) / "titles.ass")
         _burn_ok = False
         if split_node_titles is not None and title_events:
             try:
@@ -9241,12 +9245,12 @@ def _render_video(shots: list[dict], episode_num: int,
         concat_in = "".join(f"[v{i}]" for i in range(len(imgs)))
         parts.append(f"{concat_in}concat=n={len(imgs)}:v=1:a=0[vc]")
         if _burn_ok:
-            # Burn the ASS titles inline (relative path from RENDERED_VIDEO dir
+            # Burn the ASS titles inline (relative path from the episode video dir
             # to dodge the drive-letter-colon filter parsing issue).
             _sub = f"subtitles={Path(ass_path).name}"
             _fd = Path(__file__).resolve().parent / "fonts"
             if _fd.is_dir() and any(_fd.iterdir()):
-                _rel = os.path.relpath(str(_fd), start=str(RENDERED_VIDEO)).replace("\\", "/")
+                _rel = os.path.relpath(str(_fd), start=str(_ep_video_dir(episode_num))).replace("\\", "/")
                 _sub += f":fontsdir={_rel}"
             parts.append(f"[vc]{_sub}[vout]")
         else:
@@ -9275,10 +9279,10 @@ def _render_video(shots: list[dict], episode_num: int,
             cmd += ["-c:a", "aac", "-b:a", "192k"]
         cmd += ["-movflags", "+faststart", "-t", f"{total_vid:.3f}", "-y", output_path]
 
-        # Run with cwd=RENDERED_VIDEO so the subtitles filter's relative .ass
+        # Run with cwd=the episode video dir so the subtitles filter's relative .ass
         # name (and fontsdir) resolve correctly (absolute -i paths still work).
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
-                           cwd=str(RENDERED_VIDEO))
+                           cwd=str(_ep_video_dir(episode_num)))
         if r.returncode != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) < 1000:
             print(f"  [RENDER] single-pass failed: {r.stderr[-1500:]}")
             return ""
@@ -10280,7 +10284,7 @@ def _rebuild_script_for_resume(state: dict) -> dict:
         for _b, _ctx in brands.items():
             _generate_brand_asset(_b, _ctx, random.randint(0, 99999))
     brand_assets = _scan_brand_assets()
-    ep_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+    ep_dir = _episode_dir(episode_num)
     location_sheets = _build_location_sheets(
         context, 42000 + episode_num * 7, ep_dir, brands=brands)
     prop_assets = _build_prop_assets(
@@ -10304,7 +10308,7 @@ def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
     so images aren't generated against missing audio. Matches both the narrator
     file (narration_XX.wav) and per-character clone file (narration_XX_char.wav
     via voice_map.json). Also strips leaked stage directions before speaking."""
-    ep_dir = TTS_TEMP / f"ep_{episode_num}"
+    ep_dir = _ep_tts_dir(episode_num)
     ep_dir.mkdir(parents=True, exist_ok=True)
     # Integrity guard (Joe 2026-08-10): if this episode folder already holds
     # clips but has NO narration_map sidecar, we cannot prove any clip matches
@@ -10526,7 +10530,7 @@ def _resume_episode(state: dict) -> None:
         # cards exist on disk, this episode was generated on codex/fal and must
         # resume on that backend (skip panels, use real-person refs) - NOT
         # default to local/ComfyUI and stall on a missing server.
-        ep_shot_dir0 = SHOTS_DIR / f"ep{int(episode_num):03d}"
+        ep_shot_dir0 = _episode_dir(int(episode_num))
         _real_cards = list(ep_shot_dir0.glob("chapter_*.png")) \
             if ep_shot_dir0.is_dir() else []
         _real_cards = [c for c in _real_cards
@@ -10581,7 +10585,7 @@ def _resume_episode(state: dict) -> None:
     # 1. Images: regenerate only the missing ones (same seeds -> same look),
     #    or ALL of them when REGEN_IMAGES=1 (a style change forces this so the
     #    new look applies to every shot).
-    ep_shot_dir = SHOTS_DIR / f"ep{episode_num:03d}"
+    ep_shot_dir = _episode_dir(episode_num)
     _force_regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
     if _force_regen:
         missing_img = [s for s in shots if not s.get("is_chapter")]
@@ -10865,7 +10869,7 @@ def _resume_episode(state: dict) -> None:
 
     # 5. Thumbnail
     if not thumb_path:
-        thumb_path = str(THUMBNAILS_DIR / f"ep{episode_num:03d}_thumb.png")
+        thumb_path = str(_ep_thumb_dir(episode_num) / "thumbnail.png")
     thumb_ok = os.path.isfile(thumb_path) and os.path.getsize(thumb_path) > 1000
     if not thumb_ok:
         thumb_ok = _generate_thumbnail(topic, thumb_path)
@@ -11252,7 +11256,7 @@ def _phase_llm(config: dict):
     _plan_durations(narration)
 
     # Style test frame (no human gate - Joe 2026-08-09)
-    style_test = str(SHOTS_DIR / f"ep{episode_num:03d}" / "style_test.png")
+    style_test = str(_episode_dir(episode_num) / "style_test.png")
     st_env = ", ".join(context.get("environments", [])) or "the primary setting"
     print(f"\n[STYLE] generating style test frame ({_active_image_backend()})...")
     _krea_generate(
@@ -11291,9 +11295,9 @@ def _phase_llm(config: dict):
     brand_assets = _scan_brand_assets()
 
     location_sheets = _build_location_sheets(
-        context, 42000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}", brands=brands)
+        context, 42000 + episode_num * 7, _episode_dir(episode_num), brands=brands)
     prop_assets = _build_prop_assets(
-        context, 43000 + episode_num * 7, SHOTS_DIR / f"ep{episode_num:03d}", brands=brands)
+        context, 43000 + episode_num * 7, _episode_dir(episode_num), brands=brands)
 
     _save_resume_state("story", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
@@ -11428,7 +11432,7 @@ def _phase_finish(ep_ctx: dict) -> None:
                        target_paras=target_paras)
 
     # 9. Thumbnail
-    thumb_path = str(THUMBNAILS_DIR / f"ep{episode_num:03d}_thumb.png")
+    thumb_path = str(_ep_thumb_dir(episode_num) / "thumbnail.png")
     thumb_ok = _generate_thumbnail(topic, thumb_path)
     _save_resume_state("thumbnail", episode_num, article_url, topic, shots,
                        character_sheets, titles=titles, description=description,

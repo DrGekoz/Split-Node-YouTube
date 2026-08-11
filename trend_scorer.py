@@ -46,6 +46,7 @@ def _serpapi_key() -> str:
 # Category -> candidate topic terms (one SerpAPI TIMESERIES call per category,
 # so a full scan is 5 calls; cached for TREND_SCAN_CACHE_HOURS, default 24h)
 TREND_CATEGORIES = {
+    "money-hack": ["money hack", "side hustle", "passive income", "cashback", "credit card rewards", "lottery loophole"],
     "hacker": ["hacker", "cybercrime", "data breach", "ethical hacking", "ransomware"],
     "beat-the-system": ["beat the system", "loophole", "scam", "fraud", "heist"],
     "lottery": ["lottery loophole", "lottery winner", "lottery math", "jackpot", "casino"],

@@ -8,12 +8,9 @@ __pycache__/
 client_secret_*.json
 *.credentials.json
 
-# Generated output (episodes)
-shots/
-tts_temp/
-rendered_audio/
-rendered_video/
-thumbnails/
+# Generated output (episodes) - all per-episode artifacts live here:
+# episodes/epN/tts|audio|video|thumbnails + shot images/scene boards.
+episodes/
 
 # State tracking
 .episode_counter
@@ -28,7 +25,6 @@ zoom_frames_*/
 marker_frames_*/
 m2_*/
 cd_frames_*/
-batch_temp/
 test_output/
 # Standalone test scripts (keep them local, don't commit)
 test_*.py
