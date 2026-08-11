@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.41.4] - 2026-08-12
+
+### Position-aware narration (opening / body / outro)
+
+- `_build_narration_script` now tells the LLM which part of the episode it is
+  writing (OPENING, BODY, or OUTRO) on every call, so it applies the right rules
+  per section instead of assuming a fresh start. The intro already has its own
+  dedicated sequence (context-aware); the body gets "vary every paragraph's
+  ending"; the outro resolves triumphantly and ends cleanly; the opening never
+  uses the twist-tease (rule 17).
+
 ## [1.41.3] - 2026-08-12
 
 ### Chapter cards show artwork (no black-out) + no repetitive paragraph endings

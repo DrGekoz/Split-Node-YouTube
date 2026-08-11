@@ -2362,7 +2362,31 @@ def _build_narration_script(paragraphs: list[str],
     for i, _para in enumerate(paragraphs):
         lo, hi = max(i - 1, 0), min(i + 2, len(paragraphs))
         ctx = "\n\n".join(paragraphs[lo:hi])
+        # POSITION-AWARE SECTION LABEL (Joe 2026-08-12): the LLM must know whether
+        # it is writing the episode OPENING, BODY, or OUTRO so it follows the right
+        # rules for each instead of assuming a fresh start. Classified by article
+        # paragraph position (first -> opening, last -> outro), which maps 1:1 to
+        # episode position because narration is expanded in article order.
+        n_art = len(paragraphs)
+        if i == 0:
+            section = ("SECTION: EPISODE OPENING - you open the story proper, right "
+                       "after the intro sequence. Cold-open into the action, plant "
+                       "the deeper problem early. Do NOT use the '...but the story "
+                       "doesn't end there' twist-tease - that belongs to the intro "
+                       "sequence only (rule 17), never here.")
+        elif i >= n_art - 1:
+            section = ("SECTION: EPISODE OUTRO / FINAL PARAGRAPHS - the ending. "
+                       "Resolve triumphantly, pay off the transformation and the "
+                       "deeper problem, echo the opening, and END the episode cleanly "
+                       "on the final fact or win. No twist-tease, no dangling "
+                       "rhetorical question at the end.")
+        else:
+            section = ("SECTION: EPISODE BODY - the middle of the story. Develop the "
+                       "action and the cause-and-effect chain. Vary every paragraph's "
+                       "ending; never end consecutive paragraphs with a question or a "
+                       "tease (rule 17).")
         user = (
+            f"{section}\n\n"
             f"STORY CONTEXT (article excerpt {lo+1}-{hi} of {len(paragraphs)}):\n{ctx}\n\n"
             f"Generate exactly {per_para} narration paragraphs based on this context. "
             f"Focus on the facts and events in this excerpt - expand them with "
