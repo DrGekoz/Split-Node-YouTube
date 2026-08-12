@@ -2044,6 +2044,14 @@ SECONDS_PER_NARRATION_PARA = 14.3
 DEFAULT_VIDEO_MINUTES = 25
 # Clamp the derived paragraph count so a bad/typo'd length can't blow up.
 MIN_PARAS, MAX_PARAS = 10, 400
+# Hard cap on how many SENTENCES become shots (one shot per sentence). Kept in
+# sync with the shot-list builder so the narration list, the TTS worker and the
+# shot list are trimmed to the SAME window - before this, the TTS worker queued
+# a clip for EVERY flattened sentence while _build_shot_list stopped at 120,
+# so the episode's ending was silently dropped AND dozens of TTS clips were
+# generated for sentences that never appeared (Joe 2026-08-12). Raise to make
+# episodes longer; lower to shorten.
+MAX_SHOTS = 120
 
 NARRATION_SYSTEM_PROMPT = (
     "You are a documentary scriptwriter for a YouTube channel called SPLIT NODE. "
@@ -2345,6 +2353,134 @@ def _purge_ai_slop(text: str) -> str:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Narration truncation guard (Joe 2026-08-12)
+# The 4B scriptwriter occasionally hits the token cap mid-sentence, leaving a
+# narration paragraph cut off mid-word (e.g. "...legal conte" or ending on a
+# dangling em-dash). Those clipped paragraphs were spoken verbatim, which is
+# exactly the "sentences cut off early" bug Joe heard on ep13 - even the
+# individual TTS files (one per paragraph) were clipped. The keyword/plan
+# feature is NOT the cause; it only extracts words AFTER the script is written.
+# These helpers detect a clipped paragraph and force a clean re-write (or a
+# targeted completion) so every spoken sentence plays out in its entirety.
+# ---------------------------------------------------------------------------
+_TRUNC_TERMINAL_RE = re.compile("[.!?\\\"'\u201d\u2019]\\s*$")
+_TRUNC_DANGLE_RE = re.compile("[-\u2014\u2013]\\s*$")
+
+
+def _paragraph_is_truncated(p: str) -> bool:
+    """True when a narration paragraph looks cut off mid-sentence: it ends on a
+    bare letter/digit (no terminal punctuation) or on a dangling em/en dash."""
+    s = (p or "").strip()
+    if not s:
+        return False
+    if _TRUNC_DANGLE_RE.search(s):
+        return True
+    if re.search(r"[A-Za-z0-9]\s*$", s) and not _TRUNC_TERMINAL_RE.search(s):
+        return True
+    return False
+
+
+def _extract_first_clean_para(text: str, min_len: int = 40) -> str:
+    """Pull the first usable narration paragraph out of an LLM response (the
+    model occasionally wraps output in list bullets / double-blank lines)."""
+    parts = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
+    if not parts and "\n" in (text or ""):
+        parts = [p.strip() for p in (text or "").split("\n")
+                 if len(p.strip()) > min_len]
+    for p in parts:
+        cand = re.sub(r"^\s*[-*#]+\s*", "", p).strip()
+        cand = _strip_narration_meta(cand)
+        cand = _purge_ai_slop(cand)
+        if len(cand) > min_len:
+            return cand
+    return ""
+
+
+def _complete_truncated_paragraph(para: str, sys_prompt: str,
+                                  section: str, ctx: str) -> str:
+    """Finish a paragraph the model cut off. Sends ONLY the clipped tail for a
+    natural completion and splices it back. Returns the completed paragraph, or
+    the original if completion is not reliable (better to retry the whole thing
+    than to paste model-echo garbage)."""
+    tail_user = (
+        f"{section}\n\n"
+        f"A documentary narration paragraph was cut off mid-sentence. Complete "
+        f"the FINAL sentence naturally and return ONLY the finishing words - "
+        f"the continuation that flows on from where it stopped. Do NOT repeat "
+        f"any text already given, do NOT add a new beat, do NOT add labels, "
+        f"numbering or meta. End with terminal punctuation.\n\n"
+        f"TRUNCATED PARAGRAPH:\n{para}\n\n"
+        f"STORY CONTEXT:\n{ctx}\n\n"
+        f"Return ONLY the finishing words, for example: '...and that single "
+        f"keystroke changed everything.'"
+    )
+    try:
+        tail = _strip_narration_meta(
+            _llm_chat([{"role": "system", "content": sys_prompt},
+                       {"role": "user", "content": tail_user}],
+                      max_tokens=180, temp=0.6)).strip()
+    except Exception:
+        return para
+    tail = re.sub(r"^[-*#.\s]+", "", tail)
+    if not tail:
+        return para
+    # Reject model-echo (it re-printed the whole paragraph instead of the tail).
+    if _norm_text(tail)[:24] and _norm_text(tail) in _norm_text(para):
+        return para
+    joined = re.sub(r"\s+", " ", (para.rstrip() + " " + tail).strip())
+    if _paragraph_is_truncated(joined):
+        return para
+    if not joined.endswith(".") and not joined.endswith(("!", "?")):
+        joined = joined.rstrip() + "."
+    return joined
+
+
+def _write_narration_paragraph(sys_prompt: str, section: str, ctx: str,
+                               dedup: str, k: int, per_para: int,
+                               max_attempts: int = 3) -> str:
+    """Generate ONE narration paragraph with a truncation guard: if the model
+    clips it mid-sentence we retry the full write (a fresh call lands a clean
+    paragraph almost always); only after exhausting attempts do we attempt a
+    targeted completion of the last clipped sentence. Returns a paragraph that
+    plays out in full, or '' if nothing usable was produced."""
+    user = (
+        f"{section}\n\n"
+        f"STORY CONTEXT (article excerpt):\n{ctx}\n\n"
+        f"You are writing narration paragraph {k + 1} of {per_para} that this "
+        f"article excerpt expands into.\n"
+        f"ALREADY WRITTEN for this section (do NOT repeat these beats - "
+        f"advance to a NEW one):\n{dedup}\n\n"
+        f"Generate exactly ONE narration paragraph. It MUST cover a DIFFERENT "
+        f"beat, fact, angle or cause-and-effect step than everything listed "
+        f"above - expand a fresh part of the excerpt with cinematic detail, "
+        f"sensory description and dramatic tension. Do NOT restate, rephrase "
+        f"or echo anything already written above. Output ONLY the raw "
+        f"narration paragraph - nothing else.\n"
+        f"IMPORTANT: end the paragraph with a complete sentence and terminal "
+        f"punctuation. Do NOT leave a sentence cut off or dangling."
+    )
+    para = ""
+    for attempt in range(max_attempts):
+        raw = _llm_chat([{"role": "system", "content": sys_prompt},
+                         {"role": "user", "content": user}],
+                        max_tokens=600, temp=0.85)
+        cand = _extract_first_clean_para(raw)
+        if cand and not _paragraph_is_truncated(cand):
+            return cand
+        para = cand or para
+        if attempt < max_attempts - 1:
+            print("  [LLM] narration paragraph truncated - regenerating "
+                  f"(attempt {attempt + 2}/{max_attempts})")
+            time.sleep(0.4)
+    # All full re-writes clipped. Try to complete the last sentence in place.
+    if para:
+        done = _complete_truncated_paragraph(para, sys_prompt, section, ctx)
+        if done and not _paragraph_is_truncated(done):
+            print("  [LLM] completed truncated narration tail")
+            return done
+    return para
+
 
 def _pace_narration(paras: list[str], bible: Optional[dict] = None) -> list[str]:
     """Deterministic pacing + rhythm pass on the narration.
@@ -2454,6 +2590,35 @@ def _flatten_narration_to_sentences(narration: list[str],
     return sentences, para_map, chapter_events, establishing_map, anchor_events
 
 
+def _cap_flattened_narration(narration, sentence_para_map, chapter_events,
+                             establishing_map, anchor_events,
+                             max_shots: int = MAX_SHOTS):
+    """Trim the flattened sentence list to MAX_SHOTS so the narration list, the
+    TTS worker and the shot list all use the SAME window (Joe 2026-08-12).
+
+    Before this, _build_shot_list stopped at MAX_SHOTS while the TTS worker
+    queued a clip for EVERY flattened sentence - the episode's ending was
+    silently dropped AND dozens of TTS clips were generated for sentences that
+    never got a shot. Dropping events whose sentence index falls outside the
+    window keeps chapter/establishing/anchor timing aligned."""
+    if len(narration) <= max_shots:
+        return (narration, sentence_para_map, chapter_events,
+                establishing_map, anchor_events)
+    n = max_shots
+    dropped = len(narration) - n
+    narration = narration[:n]
+    sentence_para_map = {k: v for k, v in sentence_para_map.items() if k < n}
+    establishing_map = {k: v for k, v in establishing_map.items() if k < n}
+    chapter_events = [ev for ev in (chapter_events or [])
+                      if ev.get("para_idx", -1) < n]
+    anchor_events = [ev for ev in (anchor_events or [])
+                     if ev.get("para_idx", -1) < n]
+    print(f"  [SENT] capped narration to {n} sentences "
+          f"(dropped {dropped} beyond shot cap - not spoken, no wasted TTS)")
+    return (narration, sentence_para_map, chapter_events,
+            establishing_map, anchor_events)
+
+
 def _build_narration_script(paragraphs: list[str],
                             target_paras: int = 0,
                             bible: Optional[dict] = None) -> list[str]:
@@ -2527,34 +2692,13 @@ def _build_narration_script(paragraphs: list[str],
             same = [f"- {p[:160]}" for p in written_this_section[-2:]]
             cross = [f"- {p[:160]}" for p in covered[-2:]]
             dedup = "\n".join(same + cross) if (same or cross) else "None yet."
-            user = (
-                f"{section}\n\n"
-                f"STORY CONTEXT (article excerpt {lo+1}-{hi} of {len(paragraphs)}):\n{ctx}\n\n"
-                f"You are writing narration paragraph {k+1} of {per_para} that this "
-                f"article excerpt expands into.\n"
-                f"ALREADY WRITTEN for this section (do NOT repeat these beats - "
-                f"advance to a NEW one):\n{dedup}\n\n"
-                f"Generate exactly ONE narration paragraph. It MUST cover a DIFFERENT "
-                f"beat, fact, angle or cause-and-effect step than everything listed "
-                f"above - expand a fresh part of the excerpt with cinematic detail, "
-                f"sensory description and dramatic tension. Do NOT restate, rephrase "
-                f"or echo anything already written above."
-            )
-            text = _llm_chat([
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": user}
-            ], max_tokens=min(700, 250 + 120), temp=0.85)
-            parts = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-            if not parts and "\n" in text:
-                parts = [p.strip() for p in text.split("\n") if len(p.strip()) > 40]
-            p_clean = ""
-            for p in parts:
-                cand = re.sub(r"^\s*[-*#]+\s*", "", p).strip()
-                cand = _strip_narration_meta(cand)
-                cand = _purge_ai_slop(cand)
-                if len(cand) > 40:
-                    p_clean = cand
-                    break
+            # Truncation-guarded write (Joe 2026-08-12): the 4B model clips the
+            # occasional paragraph mid-word, which was spoken verbatim as the
+            # "sentences cut off early" bug. _write_narration_paragraph retries
+            # clipped writes (and completes the tail as a last resort) so every
+            # spoken sentence plays out in its entirety.
+            p_clean = _write_narration_paragraph(
+                sys_prompt, section, ctx, dedup, k, per_para)
             if p_clean:
                 narration_paras.append(p_clean)
                 written_this_section.append(p_clean)
@@ -2947,16 +3091,25 @@ def _llm_chapter_titles(narration_paras: list[str], breaks: list[int]) -> list[s
 def _inject_establishing_shots(narration_paras: list[str],
                                bible: Optional[dict] = None,
                                anchor_events: Optional[list] = None) -> tuple[list[str], dict]:
-    """Insert a short ESTABLISHING narration line immediately BEFORE the first
-    paragraph that mentions each unique LOCATION and each unique CHARACTER.
+    """Mark the ESTABLISHING moment for each unique LOCATION and CHARACTER.
 
-    The establishing line becomes its own shot (a wide/full establishing frame
-    rendered by the shot-list builder), so when a new place or person is first
-    introduced the camera shutter fires and the video INSTANTLY cuts to a proper
-    establishing shot of them - then into the scene. Returns (new_narration,
-    establishing_map) where establishing_map = {narration_index: {"kind":
-    "location"|"character", "name": ...}}.
-    """
+    Joe 2026-08-12 (ep13): we used to INSERT a synthetic bare narration line
+    ("Crypto." / "Meet Thevamanogari Manivel.") right before the first mention.
+    Those lines were then spoken VERBATIM by the narrator, which is exactly the
+    "it's just saying the story-context words (crypto / meet character) instead
+    of them coming up naturally" complaint. Rule 9b in the script prompt bans
+    standalone label/list sentences, but the code was re-inserting them anyway.
+
+    New behaviour: we do NOT insert any spoken line. Instead we mark the FIRST
+    real narration paragraph that naturally mentions each location/character as
+    the establishing point. The shot-list builder renders that sentence's shot
+    as a wide/full establishing frame with a burned "/// NAME" typewriter label
+    (camera shutter + VCR cut), while the narrator SPEAKS the real story prose -
+    so the place/person enters mid-action, the way the prompt intends.
+
+    Returns (narration_paras UNCHANGED, establishing_map) where establishing_map
+    = {narration_index: {"kind": "location"|"character", "name": ...}}. Indexes
+    are paragraph indexes BEFORE sentence flattening (flatten remaps them)."""
     if not narration_paras:
         return narration_paras, {}
 
@@ -2979,11 +3132,15 @@ def _inject_establishing_shots(narration_paras: list[str],
                 if nm and nm.upper() != "NONE" and nm not in characters:
                     characters.append(nm)
 
-    # Map each target to the first paragraph index that mentions it (substring).
+    # Map each target to the first REAL paragraph index that mentions it.
     def _first_mention(sub: str, paras: list[str]) -> int:
         low = re.sub(r"\s+", " ", sub.lower())
         toks = [t for t in low.split() if len(t) > 3]
         for i, p in enumerate(paras):
+            # Skip chapter-marker lines: an establishing label on a chapter
+            # title card is meaningless (the card is its own shot).
+            if CHAPTER_RE.match(p):
+                continue
             pl = re.sub(r"\s+", " ", p.lower())
             if toks and any(t in pl for t in toks):
                 return i
@@ -3006,48 +3163,30 @@ def _inject_establishing_shots(narration_paras: list[str],
             print(f"  [ESTABLISH] capped locations {len(locations)} (kept "
                   f"earliest mentions); skipped: {', '.join(dropped)}")
 
-    inserts: list[tuple[int, str, dict]] = []  # (position, line, meta)
+    # Mark first-mention paragraphs; no synthetic lines are inserted.
+    final_map: dict[int, dict] = {}
     for loc in locations:
         idx = _first_mention(loc, narration_paras)
-        if idx < 0:
+        if idx < 0 or idx in final_map:
             continue
-        line = f"{loc}."
-        inserts.append((idx, line, {"kind": "location", "name": loc}))
+        final_map[idx] = {"kind": "location", "name": loc}
     for ch in characters:
         idx = _first_mention(ch, narration_paras)
         if idx < 0:
-            # fall back to first shot that names a single-word token
+            # fall back to first paragraph naming a single-word token
             tok = re.search(r"[A-Za-z]{4,}", ch)
             if tok:
                 idx = _first_mention(tok.group(0), narration_paras)
-        if idx < 0:
+        if idx < 0 or idx in final_map:
             continue
-        line = f"Meet {ch}."
-        inserts.append((idx, line, {"kind": "character", "name": ch}))
+        final_map[idx] = {"kind": "character", "name": ch}
 
-    if not inserts:
-        return narration_paras, {}
-
-    # Insert from highest index to lowest so earlier positions stay valid.
-    inserts.sort(key=lambda x: x[0], reverse=True)
-    out = list(narration_paras)
-    establishing_map: dict[int, dict] = {}
-    for pos, line, meta in inserts:
-        out.insert(pos, line)
-        # the inserted line now sits at pos; record the (possibly shifted) index
-        establishing_map[pos] = meta
-    # Fix indices that shifted when a later insert landed before them.
-    # Simplest: re-derive by matching the inserted lines.
-    final_map: dict[int, dict] = {}
-    inserted_lines = {line for _, line, _ in inserts}
-    for i, p in enumerate(out):
-        if p in inserted_lines:
-            meta = next(m for _, l, m in inserts if l == p)
-            final_map[i] = meta
-    print(f"  [ESTABLISH] injected {len(final_map)} establishing shots "
-          f"({sum(1 for m in final_map.values() if m['kind']=='location')} loc, "
-          f"{sum(1 for m in final_map.values() if m['kind']=='character')} char) at first mention")
-    return out, final_map
+    if final_map:
+        print(f"  [ESTABLISH] marked {len(final_map)} establishing shots "
+              f"({sum(1 for m in final_map.values() if m['kind']=='location')} loc, "
+              f"{sum(1 for m in final_map.values() if m['kind']=='character')} char) "
+              "at first natural mention (no synthetic spoken labels)")
+    return narration_paras, final_map
 
 
 def _insert_chapter_markers(narration_paras: list[str]) -> tuple[list[str], list[dict]]:
@@ -3970,7 +4109,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
             "or import names):\n" + "\n".join(f"  - {r}" for r in roster) + "\n")
     shots = []
     for i, para in enumerate(narration_paras):
-        if len(shots) >= 120:
+        if len(shots) >= MAX_SHOTS:
             break
         # ESTABLISHING SHOT: injected line -> wide/full establishing frame.
         if i in establishing_map:
@@ -8328,7 +8467,23 @@ def _finalize_tts(shots: list[dict], results: dict, episode_num: int) -> None:
     for pos, shot in enumerate(shots):
         nidx = shot.get("narration_idx", pos)
         if shot.get("is_chapter"):
+            # CHAPTER CARDS (Joe 2026-08-12): the 'Chapter N - Title' line is
+            # built programmatically (see _insert_chapter_markers) and must be
+            # read as ONE single TTS call so the card is never silent. The
+            # worker queues every narration index (incl. chapters); if its clip
+            # is missing/failed we generate it here on the spot so the chapter
+            # ALWAYS reads. Same title feeds the card art, the ffmpeg title
+            # burn and the description - read exactly once, no LLM duplication.
             shot["tts_path"] = str(ep_dir / f"narration_{nidx:02d}.wav")
+            if _tts_clip_matches(ep_dir, nidx, shot["narration"], char=False,
+                                 path=shot["tts_path"]):
+                continue
+            speak = _strip_narration_meta(shot.get("narration") or "")
+            if speak and _pocket_tts_generate(speak, shot["tts_path"]):
+                _normalize_voice_0db(shot["tts_path"])
+                _tts_map_record(ep_dir, nidx, speak, char=False)
+                print(f"  [TTS] chapter {shot.get('chapter_num')} read: "
+                      f"{speak[:50]}")
             continue
         # Per-character clone voices (voice_map.json) override the narrator
         voice = _lookup_voice(shot.get("character", "NONE"))
@@ -8737,16 +8892,22 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                                    ch_meta.get("max_dur", 4.0), CHAPTER_DB))
                 print(f"  [AUDIO] Chapter WHOOSH (sub bass) @{ct - 0.1:.1f}s "
                       f"(-{abs(CHAPTER_DB):.0f}dB)")
-        # 4) Typewriter clicks + glitch-off for every location/person title
+        # 4) Typewriter clicks + glitch-off for every location/person title,
+        #    and typewriter clicks for the chapter title burn (Joe 2026-08-12).
         for ev in title_events or []:
-            if ev.get("kind") not in ("location", "person"):
+            if ev.get("kind") not in ("location", "person", "chapter"):
                 continue
             st = ev.get("start", 0.0)
             tw = SFX_DIR / TITLE_SFX["typewriter"]
             gl = SFX_DIR / TITLE_SFX["glitch"]
+            # Chapter title types 0.15s after the card starts (kicker pops
+            # first); location/person type immediately. Only the clicks for a
+            # chapter card - no glitch-off (chapters don't glitch like the
+            # bottom-left cards).
+            tw_start = st + (0.15 if ev.get("kind") == "chapter" else 0.0)
             if tw.is_file():
-                placements.append((str(tw), st, TYPEWRITER_SEC, SFX_DB))
-            if gl.is_file():
+                placements.append((str(tw), tw_start, TYPEWRITER_SEC, SFX_DB))
+            if gl.is_file() and ev.get("kind") in ("location", "person"):
                 placements.append((str(gl), st + TYPEWRITER_SEC + TITLE_HOLD_SEC,
                                    GLITCH_OFF_SEC, SFX_DB))
         # Dedupe: two titles on the same paragraph fire at the same moment -
@@ -9431,6 +9592,40 @@ def _render_video(shots: list[dict], episode_num: int,
                 img.save(p)
             imgs.append(p)
 
+        # ---- Merge clips that share one on-screen image (Joe 2026-08-12) ----
+        # A genuinely-missing shot image must NEVER render as a fresh black clip
+        # (or restart the zoom on a reused image). Instead:
+        #   (1) a missing shot image is folded into the PREVIOUS clip, extending
+        #       it to cover this sentence's duration too - the prior zoompan
+        #       simply keeps going, no restart, no black frame; and
+        #   (2) consecutive clips whose resolved image path is identical are
+        #       merged into ONE continuous zoompan so a carried-forward/reused
+        #       image doesn't re-start its zoom per sentence.
+        # The AUDIO timeline is untouched (the mix still has every sentence's
+        # narration at its real absolute time), so the merge only affects the
+        # picture stream - and because merged durations are a sum of the same
+        # contiguous durations, absolute time alignment is preserved.
+        m_imgs: list[str] = []
+        m_durs: list[float] = []
+        for _i, (_p, _dur) in enumerate(zip(imgs, durs)):
+            _shot = valid[_i]
+            _missing = (not os.path.isfile(_shot.get("image_path") or "")) \
+                and not _shot.get("is_chapter")
+            if _missing and m_imgs:
+                # fold this sentence into the previous clip (continue its zoom)
+                m_durs[-1] += _dur
+                continue
+            if m_imgs and os.path.abspath(m_imgs[-1]) == os.path.abspath(_p):
+                # same image consecutive -> one continuous zoom, don't restart
+                m_durs[-1] += _dur
+                continue
+            m_imgs.append(_p)
+            m_durs.append(_dur)
+        if len(m_imgs) != len(imgs):
+            print(f"  [VIDEO] merged {len(imgs)} shots into {len(m_imgs)} visual "
+                  f"clips ({len(imgs)-len(m_imgs)} missing-image/same-image "
+                  f"folds, zoom not restarted)")
+
         # ---- Build the ASS title file (chapter + typewriter) ----
         ass_path = str(_ep_video_dir(episode_num) / "titles.ass")
         _burn_ok = False
@@ -9446,7 +9641,7 @@ def _render_video(shots: list[dict], episode_num: int,
         # Filter graph written to a script file (avoids Windows cmdline length
         # limits with hundreds of inputs) and passed via -filter_complex_script.
         parts = []
-        for i, (p, dur) in enumerate(zip(imgs, durs)):
+        for i, (p, dur) in enumerate(zip(m_imgs, m_durs)):
             n_frames = max(int(dur * 24), 24)
             zoom_expr = f"z='if(eq(on,1),1,min(1+0.06*(on-1)/{max(n_frames-1,1)},1.06))'"
             parts.append(
@@ -10511,6 +10706,10 @@ def _rebuild_script_for_resume(state: dict) -> dict:
     narration, sentence_para_map, chapter_events, establishing_map, anchor_events = \
         _flatten_narration_to_sentences(
             narration, chapter_events, establishing_map, anchor_events)
+    narration, sentence_para_map, chapter_events, establishing_map, anchor_events = \
+        _cap_flattened_narration(
+            narration, sentence_para_map, chapter_events,
+            establishing_map, anchor_events)
     context = _build_episode_context(topic, paragraphs)
     bible = _build_directors_bible(topic, narration)
     _build_scene_board(narration, topic, episode_num)
@@ -10563,8 +10762,10 @@ def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
     # reused this episode number). Force a re-speak rather than risk it.
     _ensure_tts_sidecar(ep_dir)
     if regen_tts:
+        # Re-speak ALL narration clips INCLUDING chapter cards (Joe 2026-08-12:
+        # chapters are read programmatically and must never be left silent).
         missing_tts = [s for s in shots
-                       if not s.get("is_chapter") and (s.get("narration") or "").strip()]
+                       if (s.get("narration") or "").strip()]
         print(f"\n[TTS] REGEN - re-speaking ALL {len(missing_tts)} narration clips")
     else:
         # GAP-FILL (Joe 2026-08-09): reuse any clip already on disk, matching
@@ -10668,6 +10869,55 @@ def _regenerate_shot_list_for_resume(state: dict) -> list:
     return new_shots
 
 
+def _reclaim_orphaned_codex_images(shots: list[dict], ep_shot_dir) -> int:
+    """Reclaim codex images that were generated but never claimed (orphans left
+    in ~/.codex/generated_images/ when the 'Saved at:' path wasn't parsed in a
+    prior run). Joe 2026-08-12: before rendering we must NOT waste them or
+    re-spend on regeneration - rescue them into the episode folder first.
+
+    Orphans have no per-shot name, so a blind assignment risks putting the
+    WRONG image on a sentence (Joe hates that). To stay correct we only map
+    orphans onto missing shots when the count matches EXACTLY - a best-effort
+    order match (orphans by mtime, missing by seq). When counts differ we leave
+    them alone and let the regeneration path fill the gap instead. Returns the
+    number of orphaned images reclaimed."""
+    missing = [s for s in shots
+               if not s.get("is_chapter")
+               and not (s.get("image_path") and os.path.isfile(s["image_path"]))]
+    if not missing:
+        return 0
+    import glob as _glob
+    generated = Path.home() / ".codex" / "generated_images"
+    orphans: list[str] = []
+    if generated.is_dir():
+        for p in (_glob.glob(str(generated / "**" / "call_*.png"), recursive=True)
+                  + _glob.glob(str(generated / "**" / "ig_*.png"), recursive=True)):
+            if os.path.isfile(p) and os.path.getsize(p) > 20000:
+                orphans.append(p)
+    if not orphans:
+        return 0
+    if len(orphans) != len(missing):
+        print(f"  [PRE-RENDER] {len(orphans)} orphaned codex image(s) but "
+              f"{len(missing)} missing shot(s) - count mismatch, cannot safely "
+              f"match by order; regenerating the missing shots instead")
+        return 0
+    orphans.sort(key=lambda p: os.path.getmtime(p))
+    missing_sorted = sorted(missing, key=lambda s: int(s.get("seq", 0) or 0))
+    reclaimed = 0
+    for s, op in zip(missing_sorted, orphans):
+        seq = int(s.get("seq", 0) or 0)
+        fname = _shot_filename(s, seq)
+        dest = str(ep_shot_dir / fname)
+        try:
+            shutil.copy2(op, dest)
+            s["image_path"] = dest
+            reclaimed += 1
+            print(f"  [PRE-RENDER] reclaimed orphaned codex image -> {fname}")
+        except Exception as e:
+            print(f"  [PRE-RENDER] reclaim failed {os.path.basename(op)}: {e}")
+    return reclaimed
+
+
 def _regen_missing_images_before_render(episode_num: int, shots: list[dict],
                                         character_sheets: dict, topic: str,
                                         brand_assets: Optional[dict] = None) -> tuple:
@@ -10683,7 +10933,9 @@ def _regen_missing_images_before_render(episode_num: int, shots: list[dict],
     Also persists the updated shot list back into the episode's resume state so
     a crash after this pass doesn't lose the regenerations.
 
-    Returns (regenerated, still_missing).
+    Returns (regenerated, still_missing). When still_missing > 0 the caller
+    MUST NOT render (Joe 2026-08-12): only proceed to ffmpeg if every shot
+    image is intact.
     """
     brand_assets = brand_assets or _scan_brand_assets()
     ep_shot_dir = _episode_dir(episode_num)
@@ -10708,6 +10960,15 @@ def _regen_missing_images_before_render(episode_num: int, shots: list[dict],
         else:
             missing += 1
             print(f"  [PRE-RENDER] card FAILED - black placeholder")
+
+    # Reclaim generated-but-unclaimed codex images before regenerating anything,
+    # so valid orphaned PNGs are rescued instead of re-spent (Joe 2026-08-12).
+    try:
+        _reclaimed = _reclaim_orphaned_codex_images(shots, ep_shot_dir)
+        if _reclaimed:
+            print(f"  [PRE-RENDER] reclaimed {_reclaimed} orphaned codex image(s)")
+    except Exception as _re:
+        print(f"  [PRE-RENDER] orphan reclaim skipped: {_re}")
 
     # Shot images.
     for idx, s in enumerate(shots):
@@ -11199,7 +11460,14 @@ def _resume_episode(state: dict) -> None:
         print(f"  [RESUME] Video exists, skipping: {video_path}")
     else:
         print("\n[PRE-RENDER] Checking all shot images before rendering...")
-        _regen_missing_images_before_render(episode_num, shots, character_sheets, topic)
+        _regen, _still = _regen_missing_images_before_render(
+            episode_num, shots, character_sheets, topic)
+        if _still:
+            print(f"  [HALT] {_still} shot image(s) still missing - NOT "
+                  f"rendering until every frame is intact. Fix/regenerate the "
+                  f"missing images, then resume.")
+            _save("video")
+            return
         print("\n[VIDEO] Rendering (single pass)...")
         video_path = _render_video(shots, episode_num, title_events)
         if not video_path:
@@ -11601,6 +11869,10 @@ def _phase_llm(config: dict):
     narration, sentence_para_map, chapter_events, establishing_map, anchor_events = \
         _flatten_narration_to_sentences(
             narration, chapter_events, establishing_map, anchor_events)
+    narration, sentence_para_map, chapter_events, establishing_map, anchor_events = \
+        _cap_flattened_narration(
+            narration, sentence_para_map, chapter_events,
+            establishing_map, anchor_events)
 
     # NOTE: TTS is NOT started here. PocketTTS runs on the same GPU as LM Studio,
     # so starting it before the shot-list/world LLM work makes the LLM time out
@@ -11762,7 +12034,19 @@ def _phase_finish(ep_ctx: dict) -> None:
     # PRE-RENDER image validation (Joe 2026-08-12): regenerate any shot Joe
     # deleted (missing on disk) before rendering so no frame goes to black.
     print("\n[PRE-RENDER] Checking all shot images before rendering...")
-    _regen_missing_images_before_render(episode_num, shots, character_sheets, topic)
+    _regen, _still = _regen_missing_images_before_render(
+        episode_num, shots, character_sheets, topic)
+    if _still:
+        print(f"  [HALT] {_still} shot image(s) still missing - NOT rendering "
+              f"until every frame is intact. Fix/regenerate the missing images, "
+              f"then resume.")
+        _save_resume_state("video", episode_num, article_url, topic, shots,
+                           character_sheets, titles=[], description="",
+                           tags=[], video_path="",
+                           chapter_events=chapter_events, anchor_events=anchor_events,
+                           location_sheets=location_sheets, prop_assets=prop_assets,
+                           target_paras=target_paras)
+        return
     video_path = _render_video(shots, episode_num, title_events)
     if not video_path:
         print("  [HALT] Video render failed.")

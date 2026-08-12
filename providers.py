@@ -400,9 +400,33 @@ class Codex:
         # cards. We now trust codex's own reported path first, and only fall
         # back to the newest-unclaimed scan if the path can't be parsed.
         out_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        # Strip ANSI/colour escape codes (PowerShell pipes them into the
+        # captured text and they corrupt the "Saved at:" path match).
+        out_text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", out_text)
         src = None
-        m = re.search(r"Saved at:\s*[`'\"]?\s*([A-Za-z]:[^`'\"]+?\.(?:png|jpg|jpeg|webp))",
-                      out_text, re.IGNORECASE)
+        # Codex prints the path as "Saved at:" but the exact wrapper varies by
+        # version (sometimes "Saved at:", "Saved to:", trailing quotes, ANSI).
+        # Match the first drive-letter / absolute path in the output so a
+        # cosmetic format change never breaks claiming under parallelism.
+        m = re.search(
+            r"(?:Saved\s+(?:at|to)|\b(?:image|output)\s+(?:written|saved)\s+(?:to|at))\s*[:=]?\s*"
+            r"[`'\"\u2018\u2019\u201c\u201d]?\s*"
+            r"([A-Za-z]:[^`'\"\u2018\u2019\u201c\u201d\r\n]+?\.(?:png|jpg|jpeg|webp))",
+            out_text, re.IGNORECASE)
+        if not m:
+            # Fall back to ANY absolute image path appearing in the output.
+            # Restricted to .png (codex outputs are always PNG) and we skip any
+            # candidate that is one of THIS call's reference images, so an
+            # echoed "-i C:\...\ref.jpg" can never be claimed as the output.
+            m = re.search(
+                r"([A-Za-z]:[^`'\"\u2018\u2019\u201c\u201d\r\n]+?\.png)",
+                out_text, re.IGNORECASE)
+        _ref_abs = {os.path.abspath(r) for r in (ref_images or [])}
+        while m and os.path.abspath(m.group(1)) in _ref_abs:
+            # keep scanning past an echoed reference path
+            m = re.search(
+                r"([A-Za-z]:[^`'\"\u2018\u2019\u201c\u201d\r\n]+?\.png)",
+                out_text[m.end():], re.IGNORECASE)
         if m:
             cand = os.path.abspath(m.group(1))
             # The image can land on disk a beat AFTER codex prints the path on

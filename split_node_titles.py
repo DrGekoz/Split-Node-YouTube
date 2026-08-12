@@ -183,21 +183,44 @@ def _chapter_events(ev, W, H, fps) -> list[str]:
              f"\\t({int(pop*1000)},{int(pop*1000)+350},\\fscx(100)\\fscy(100))}}{kicker}")
     lines.append(_dialog(ev["start"], ev["end"], "ChapKicker", kcore, layer=3))
 
-    # ---- TITLE TEXT at 0.70H ----
-    cx, cy = W // 2, int(H * 0.70)
-    # Glow layer (soft bloom, pulses)
-    glow = (f"{{\\an5\\pos({cx},{cy})\\blur(16)\\bord(2)\\1c&H0000D7FF&\\alpha&H70&"
-            f"\\fscx(60)\\fscy(60)\\t(0,{int(pop*1000)},\\fscx(100)\\fscy(100)\\alpha&H55&)"
-            f"\\t({int(pop*1000)},{int(pop*1000)+700},\\bord(14)\\alpha&H40&)"
-            f"\\t({int(pop*1000)+700},{int(pop*1000)+1500},\\bord(3)\\alpha&H60&)}}{title}")
-    lines.append(_dialog(ev["start"], ev["end"], "ChapGlow", glow, layer=1))
-
-    # Core layer (sharp white, scale-pop in)
-    core = (f"{{\\an5\\pos({cx},{cy})\\1c&HFFFFFF&\\bord(3)\\3c&H000000&\\shad(0)"
-            f"\\fscx(50)\\fscy(50)\\alpha&HFF&"
-            f"\\t(0,{int(pop*1000)},\\fscx(110)\\fscy(110)\\alpha&H00&)"
-            f"\\t({int(pop*1000)},{int(pop*1000)+350},\\fscx(100)\\fscy(100))}}{title}")
-    lines.append(_dialog(ev["start"], ev["end"], "ChapCore", core, layer=3))
+    # ---- TITLE TEXT at 0.70H - TYPEWRITER REVEAL (Joe 2026-08-12) ----
+    # The chapter title types out character-by-character (Bahnschrift chap_size)
+    # with a blinking block cursor during the hold, so it matches the
+    # typewriter click SFX and reads like the location/person cards - instead of
+    # the old scale-pop. The "CHAPTER N" kicker above keeps its glow-pop.
+    cfs = int(H * 0.075)                 # ~81px @1080 (same as chap_size)
+    text_y = int(H * 0.70 - cfs / 2)     # top edge so the block is centred on 0.70H
+    tw_start = ev["start"] + 0.15        # kicker pops first, then the title types
+    ttext = (title or "").upper().replace("\\", "\\\\").replace("{", "(").replace("}", ")")
+    total_w = _text_width("Bahnschrift", cfs, ttext)
+    widths = [_char_advance("Bahnschrift", cfs, ch) for ch in ttext]
+    n = max(len(ttext), 1)
+    tstep = 0.8 / n                      # per-char typewriter delay
+    t_x = W / 2 - total_w / 2            # left edge so the whole title is centred
+    # Soft cyan glow ghost behind the typed title (depth) - fades in with the card.
+    ghost = (f"{{\\an7\\pos({t_x:.1f},{text_y})\\fs{cfs}\\blur(14)\\bord(2)"
+             f"\\1c&H0000D7FF&\\alpha&H78&\\t(0,{int(pop*1000)},\\alpha&H60&)}}{ttext}")
+    lines.append(_dialog(ev["start"], ev["end"], "ChapGlow", ghost, layer=1))
+    for i, ch in enumerate(ttext):
+        if ch == " ":
+            t_x += widths[i]
+            continue
+        t_show = tw_start + i * tstep
+        tags = (f"{{\\an7\\pos({t_x:.1f},{text_y})\\fs{cfs}\\bord(3)\\3c&H000000&"
+                f"\\shad(0)\\blur(0.4)\\alpha&HFF&"
+                f"\\t({int((t_show-ev['start'])*1000)},"
+                f"{int((t_show-ev['start'])*1000)+110},\\alpha&H00&)}}")
+        lines.append(_dialog(t_show, ev["end"], "ChapCore", tags + ch, layer=4))
+        t_x += widths[i]
+    # Blinking block cursor after the typed title during the hold.
+    cx = W / 2 - total_w / 2 + total_w + 4
+    blink = "".join(
+        f"\\t({k*400},{k*400+200},\\alpha&H00&)\\t({k*400+200},{k*400+400},\\alpha&HFF&)"
+        for k in range(12))
+    cursor = (f"{{\\an7\\pos({cx:.1f},{text_y})\\fs{cfs}\\1c&HFFFFFF&\\bord(1)"
+              f"\\blur(0.4)\\alpha&HFF&{blink}}}"
+              f"{{\\alpha&H00&}}_")
+    lines.append(_dialog(tw_start + 0.8, ev["end"], "ChapCore", cursor, layer=4))
     return lines
 
 
@@ -221,7 +244,7 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
     elif ev.get("_stack_up"):
         base_y -= 74 * min(ev.get("_stack_up", 0), 2)
 
-    text = ev["text"]
+    text = ev["text"].upper()
     # Escape ASS characters
     text = text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
     # Myriad Pro Bold is PROPORTIONAL - measure each char's advance so the
@@ -289,7 +312,7 @@ def _keyword_events(ev, W, H, fps) -> list[str]:
     words the viewer should remember without clashing with the chapter cards
     (centre, larger) or typewriter row (bottom-left)."""
     dur = max(ev.get("end", ev["start"] + 1.2) - ev["start"], 1.0)
-    text = ev["text"]
+    text = ev["text"].upper()
     text = text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
     cx, cy = W // 2, int(H * 0.62)
     pop = min(0.28, dur * 0.4)

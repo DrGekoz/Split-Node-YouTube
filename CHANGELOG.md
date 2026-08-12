@@ -2,6 +2,93 @@
 
 All notable changes to Split Node.
 
+## [1.45.0] - 2026-08-12
+
+### Spoken narration never cuts off mid-sentence (ep13)
+
+ep13's narration had sentences that played out cut off early - even the
+individual TTS files were clipped (e.g. a paragraph ending "...legal conte" or
+on a dangling em-dash). The 4B scriptwriter occasionally hit the token cap
+mid-sentence; the clipped paragraph was spoken verbatim. This was NOT the
+keyword/plan feature (it only extracts words after the script is written).
+
+- New narration truncation guard in `_build_narration_script`: every generated
+  paragraph is checked with `_paragraph_is_truncated` (ends mid-word, no
+  terminal punctuation, or a dangling em/en-dash). A clipped paragraph is
+  re-written (`_write_narration_paragraph`, up to 3 attempts, max_tokens
+  raised to 600) and only if every full re-write clips does it attempt a
+  targeted completion of the final sentence (`_complete_truncated_paragraph`).
+  Every spoken sentence now plays out in its entirety.
+
+### "Story-context words" (crypto / meet character) no longer said verbatim
+
+Establishing shots were inserting synthetic bare narration lines ("Crypto." /
+"Meet Thevamanogari Manivel.") that the narrator read aloud - exactly the
+labels rule 9b of the script prompt forbids. Now `_inject_establishing_shots`
+marks the FIRST real narration sentence that naturally mentions each
+location/character as the establishing point instead of inserting a new line.
+The establishing shot (wide frame + burned "/// NAME" typewriter label,
+camera-shutter + VCR cut) still fires, but the narrator speaks the real story
+prose, so names and places enter mid-action the way the prompt intends.
+
+### codex output-claiming hardened further (v1.44.0 follow-up)
+
+Still under heavy parallel codex generation the "Saved at:" path was
+frequently unparsed (PowerShell pipes ANSI colour escapes into the captured
+text, and the exact path wrapper varies by codex version), so valid images
+were marked failed and fell to the black placeholder / were orphaned.
+
+- Strip ANSI escape codes from codex output before matching the path.
+- Broaden the path regex to "Saved at:" / "Saved to:" / "image written to:"
+  and fall back to ANY absolute .png path, skipping this call's reference
+  images so an echoed "-i C:\...
+ef.jpg" can never be claimed as the output.
+
+### Never render a black / restarted frame for a missing image
+
+A shot whose image is genuinely missing must never render as a fresh black
+clip (or restart the zoom on a reused image).
+
+- `_render_video` now merges visual clips that share one on-screen image: a
+  missing shot image is folded into the PREVIOUS clip, extending it to cover
+  that sentence's duration too (the prior zoompan keeps going - no restart, no
+  black frame), and consecutive clips with the identical image path are merged
+  into ONE continuous zoom. The audio timeline is untouched, so every
+  sentence's narration still plays at its real absolute time.
+- New `_reclaim_orphaned_codex_images`: before rendering, the pre-render pass
+  sweeps `~/.codex/generated_images/` for valid PNGs that were generated but
+  never claimed and rescues them into the episode folder (reclaim only when the
+  orphan count matches the missing-shot count exactly, so a wrong image is
+  never assigned to a sentence). Anything still missing is then regenerated.
+- HARD GATE (Joe 2026-08-12): after the pre-render reclaim + regen pass, the
+  pipeline HALTS before ffmpeg if any shot image is still missing - it never
+  renders until every frame is intact.### Chapter cards always read, typewriter + ALL-CAPS titles (Joe 2026-08-12)
+
+Chapter cards were going silent: the shot-list TTS mapper set a chapter's
+clip path without verifying the worker produced it, and the resume re-speak
+pass skipped chapter shots entirely, so a missing chapter clip was never
+regenerated and the card played with no spoken title.
+
+- Chapter TTS is now built programmatically and GUARANTEED: `_finalize_tts`
+  generates the 'Chapter N - Title' clip on the spot if it is missing, and the
+  regen path re-speaks chapter cards too. The title comes from the same source
+  as the description - read exactly once, no LLM duplication.
+- Chapter ffmpeg titles now use a TYPEWRITER reveal (per-character + blinking
+  cursor, Bahnschrift) instead of the old scale-pop, with a typewriter click
+  SFX placed at the title reveal (whoosh already leads the chapter card).
+- ALL ASS title burn-ins (chapter, location, person, keyword highlights) are
+  now rendered in ALL CAPS.
+
+### Episode length is consistent - the ending is never silently dropped
+
+The shot-list builder capped at 120 shots while the TTS worker queued a clip
+for EVERY flattened sentence (~170 for a default episode). So the episode's
+ending was silently cut AND dozens of TTS clips were generated for sentences
+that never appeared. New `MAX_SHOTS` (default 120) now trims the flattened
+narration list to the same window before TTS + shot building, so narration,
+TTS and shots stay in lock-step (raise MAX_SHOTS for longer episodes).
+
+
 ## [1.44.0] - 2026-08-12
 
 ### Episode 13 QC fixes (faster-whisper audit of ep013)
