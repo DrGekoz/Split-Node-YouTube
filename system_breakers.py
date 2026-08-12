@@ -3977,10 +3977,16 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
             em = establishing_map[i]
             is_loc = em.get("kind") == "location"
             name = em.get("name", "")
+            # Character establishing shots introduce exactly ONE person (Joe
+            # 2026-08-12): if the establishing name somehow carries multiple
+            # comma-separated people, keep only the primary so the intro frame
+            # is a single clean subject (the others get their own shots).
+            if not is_loc:
+                name = name.split(",")[0].strip()
             if is_loc:
                 scene = ("An establishing extreme wide shot of the location, "
                          "the whole place in frame, no people, cinematic atmosphere, "
-                         f"highly detailed, {RENDER_STYLE}")
+                         f"highly detailed, {SCENE_STYLE}")
             else:
                 scene = ("An establishing wide full-body shot of the character, "
                          "whole person in frame from head to toe, "
@@ -4526,7 +4532,7 @@ CHARACTER_ROSTER = [
     },
     {
         "id": "executive", "label": "Corporate Executive",
-        "hints": ["ceo", "executive", "founder", "director", "chairman", "president of", "boss", "owner", "tycoon", "magnate"],
+        "hints": ["ceo", "executive", "founder", "director", "chairman", "president of", "boss", "business owner", "tycoon", "magnate"],
         "gender": "male", "age": "mid 50s",
         "build": "tall, commanding, broad",
         "face": "face shape. Forehead is moderately high and smooth, exhibiting a gentle convex curve. Eyebrows are medium thickness, possessing a defined arch that starts relatively low on the brow bone and sweeps upward in a graceful, slightly elongated manner. Eyes are a deep hazel-brown, almond-shaped, of average size, with moderate spacing; the upper eyelids show a distinct crease, while the lower lids appear smooth but possess subtle puffiness at the outer corners. The nose has a straight, well-defined bridge that is neither overly narrow nor wide, tapering to a slightly rounded tip. Cheekbones are moderately prominent, creating gentle planes of definition beneath the eyes, with the cheeks themselves appearing full and soft rather than gaunt. The jawline is strong and clearly defined, transitioning smoothly into a proportionate chin which is slightly rounded at the center point. The mouth is medium width, featuring lips that are neither overly thin nor excessively plump; the upper lip has a distinct Cupid's bow, while the lower lip offers a fuller curve. Ears are set close to the head, appearing proportional in size, with smooth helix and antihelix contours. Skin tone is a warm, light olive hue, exhibiting a finely textured surface punctuated by visible pores across the T-zone (forehead/nose) and faint, scattered reddish-brown freckles concentrated on the upper cheeks. There are minimal s",
@@ -4616,6 +4622,14 @@ def _age_to_number(age: str) -> int:
     return -1
 
 
+# KNOWN-PERSON GENDER override (Joe 2026-08-12): well-known public figures whose
+# gender a small local LLM reliably mis-guesses. Keyed by lowercase name; the
+# archetype matcher consults this before trusting the story bible / role text.
+_KNOWN_PERSON_GENDER = {
+    "matt damon": "male",
+}
+
+
 def _assign_archetype(name: str, role: str = "", scene: str = "",
                       gender: str = "", age: str = "") -> dict:
     """Map a story character (name + role) to the closest fixed archetype.
@@ -4636,6 +4650,12 @@ def _assign_archetype(name: str, role: str = "", scene: str = "",
     target_age = _age_to_number(age)
     female = bool(re.search(r"\b(female|woman|women|girl|she|her|madam|lady|grandmother)\b", rl)) \
         or (gender and str(gender).lower().startswith("f"))
+    # KNOWN-PERSON GENDER override (Joe 2026-08-12): well-known public figures
+    # get their correct gender regardless of what a small local LLM guessed in
+    # the story bible (the 4B model often mis-genders/mis-ages famous names).
+    _kn = _KNOWN_PERSON_GENDER.get(name.strip().lower())
+    if _kn:
+        female = (_kn == "female")
 
     def _age_ok(arch_age: str) -> bool:
         """True if the archetype's age is consistent with the bible's age.
@@ -4654,10 +4674,18 @@ def _assign_archetype(name: str, role: str = "", scene: str = "",
             return False
         return True
 
-    # 1. Role-keyword match (respecting age veto)
+    # 1. Role-keyword match (respecting age veto AND explicit gender).
+    #    GENDER CONSISTENCY (Joe 2026-08-12): when the story bible (or the
+    #    known-person override) explicitly genders the character, a role-keyword
+    #    archetype of the WRONG gender must not win - e.g. 'Property OWNER' must
+    #    never force an elderly woman into the male 'executive' archetype. A
+    #    wrong-gender role match falls through to the gender/age step instead.
+    _explicit_gender = bool(_kn) or bool(gender and str(gender).strip())
     for arch in CHARACTER_ROSTER:
         if any(h in rl for h in arch["hints"]):
             if not _age_ok(arch.get("age", "")):
+                continue
+            if _explicit_gender and (arch.get("gender", "") == "female") != female:
                 continue
             return arch
 
@@ -4918,6 +4946,10 @@ def _match_prop_visuals(text: str) -> list[str]:
     except Exception:
         return []
     low = text.lower()
+    # Software/hardware-name false positives (Joe 2026-08-12): 'Unreal Engine 5'
+    # and 'Metahuman' are a game engine / tech name, NOT a physical engine. Strip
+    # them before matching so the 'engine' prop can never fire on them.
+    low = re.sub(r"(?i)unreal\s+engine\s*5?|metahuman", " ", low)
     found = []
     # Longer/compound keys first so 'bank vault' wins over 'vault'/'bank'.
     for key in sorted(PROP_VISUALS, key=len, reverse=True):
@@ -5034,6 +5066,13 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     # (vault, library, casino, server, etc), inject its visual descriptor so it
     # appears in the frame with the right context.
     prop_clause = _inject_prop_visuals(f"{narration} {scene}")
+    # Establishing shots establish a person or place cleanly - they never get a
+    # force-injected prop (Joe 2026-08-12). Without this, the word 'Engine' in
+    # 'Unreal Engine 5' (part of every establishing scene) tripped the 'engine'
+    # prop and bolted "a complex mechanical engine in cross-section" onto
+    # character/location establishing frames.
+    if shot.get("is_establishing"):
+        prop_clause = ""
     # NO-TEXT clause (Joe 2026-08-09): when a business logo will be attached as
     # an image ref, drop the hard no-text/watermark ban so the logo's wordmark
     # can render (the logo IS allowed text). Otherwise keep NO text so gpt-image-2
@@ -8443,21 +8482,33 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                     capture_output=True, text=True, timeout=30)
                 f.write(f"file '{str(pad.resolve())}'\n")
         voice_raw = temp_dir / "voice_raw.wav"
-        subprocess.run(
+        r_raw = subprocess.run(
             ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
              "-i", str(concat_list), "-c:a", "pcm_s16le", str(voice_raw)],
             capture_output=True, text=True, timeout=120)
+        if r_raw.returncode != 0 or not voice_raw.is_file() or voice_raw.stat().st_size < 1000:
+            print(f"  [AUDIO] WARN voice_raw concat failed: {r_raw.stderr[-200:]} - "
+                  f"skipping whisper voice track")
+            voice_raw = None
         voice_path = temp_dir / "voice_0db.wav"
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-i", str(voice_raw),
-             "-af", f"volume={VOICE_DB}dB", "-c:a", "pcm_s16le", str(voice_path)],
-            capture_output=True, text=True, timeout=60)
+        if voice_raw is not None:
+            r_0db = subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-i", str(voice_raw),
+                 "-af", f"volume={VOICE_DB}dB", "-c:a", "pcm_s16le", str(voice_path)],
+                capture_output=True, text=True, timeout=60)
+            if r_0db.returncode != 0 or not voice_path.is_file() or voice_path.stat().st_size < 1000:
+                print(f"  [AUDIO] WARN voice_0db volume step failed: {r_0db.stderr[-200:]} - "
+                      f"using voice_raw for whisper track")
+                voice_path = voice_raw
         # Deterministic copy of the voice-only track for the whisper title pass
         voice_out = str(_ep_audio_dir(episode_num) / "voice.wav")
         if os.path.isfile(voice_out) and os.path.getsize(voice_out) > 1000:
             pass
-        else:
-            shutil.copyfile(str(voice_path), voice_out)
+        elif voice_path is not None and os.path.isfile(str(voice_path)):
+            try:
+                shutil.copyfile(str(voice_path), voice_out)
+            except Exception as _ve:
+                print(f"  [AUDIO] WARN could not copy whisper voice track: {_ve}")
 
         # -- Music bed: ONE continuous track, suspense 0-65% of the timeline
         #    crossfading into triumphant 65%-end. No per-shot cuts, no per-shot
@@ -9182,7 +9233,28 @@ def _ensure_voice_track(shots: list[dict], episode_num: int) -> Optional[str]:
             capture_output=True, text=True, timeout=180)
         if r.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 1000:
             return out
-        print(f"  [STT] voice track build failed: {r.stderr[-200:]}")
+        # Padded concat failed (transient Windows file-lock / ffmpeg hiccup on a
+        # long clip list - ep13's title pass died with empty stderr). Fall back
+        # to a simple unpadded concat of the raw clips so the whisper title pass
+        # still gets a voice track to time against; pacing is irrelevant for
+        # timing since we only need relative whisper positions.
+        print(f"  [STT] padded voice track build failed ({r.stderr[-150:]}) - "
+              f"falling back to unpadded concat")
+        try:
+            plain = temp_dir / "vc_plain.txt"
+            with open(plain, "w") as f:
+                for shot in valid:
+                    f.write(f"file '{str(Path(shot['tts_path']).resolve())}'\n")
+            r2 = subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+                 "-i", str(plain), "-c:a", "pcm_s16le", out],
+                capture_output=True, text=True, timeout=180)
+            if r2.returncode == 0 and os.path.isfile(out) and os.path.getsize(out) > 1000:
+                print("  [STT] unpadded voice track built OK")
+                return out
+            print(f"  [STT] unpadded voice track also failed: {r2.stderr[-150:]}")
+        except Exception as _ve2:
+            print(f"  [STT] unpadded fallback error: {_ve2}")
         return None
     finally:
         shutil.rmtree(str(temp_dir), ignore_errors=True)
@@ -10193,6 +10265,18 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
                 json.dumps(state, indent=2, default=str))
         except Exception:
             pass
+        # Ep-folder mirror (Joe 2026-08-12): also drop a copy inside the episode
+        # folder so the state is co-located with the episode. Deleting this
+        # mirror is the signal that the episode is gone - _load_resume_state /
+        # _scan_resume_states then refuse to resume it.
+        try:
+            if episode_num and int(episode_num) > 0:
+                mdir = _episode_dir(episode_num)
+                mdir.mkdir(parents=True, exist_ok=True)
+                (mdir / ".resume_state.json").write_text(
+                    json.dumps(state, indent=2, default=str))
+        except Exception:
+            pass
         print(f"  [STATE] Saved resume state (stage={stage}, {len(state['shots'])} shots)")
     except Exception as e:
         print(f"  [STATE] Could not save resume state: {e}")
@@ -10204,7 +10288,17 @@ def _load_resume_state() -> Optional[dict]:
     Falls back to the .bak copy when the main file is missing or corrupt -
     the resume prompt must never silently disappear because the state file
     got lost (e.g. wiped mid-run or by external tooling).
+
+    EP-FOLDER MIRROR GATE (Joe 2026-08-12): for a per-episode state the
+    authoritative existence marker is the mirror inside episodes/epNNN/. If
+    that mirror has been deleted, the episode is treated as gone and is NOT
+    resumed, even if the project-root file still lingers.
     """
+    m = re.search(r"\.ep(\d{1,3})\.json$", RESUME_FILE.name)
+    if m:
+        ep = int(m.group(1))
+        if not (_episode_dir(ep) / ".resume_state.json").exists():
+            return None
     for f in (RESUME_FILE, RESUME_FILE.with_name(RESUME_FILE.name + ".bak")):
         if not f.exists():
             continue
@@ -10227,6 +10321,11 @@ def _clear_resume_state(episode_num: int = 0, resume_file: Optional[Path] = None
         for f in (rf, rf.with_name(rf.name + ".bak")):
             if f.exists():
                 f.unlink()
+        # Also drop the ep-folder mirror so a cleared episode stays cleared.
+        if episode_num and int(episode_num) > 0:
+            mir = _episode_dir(int(episode_num)) / ".resume_state.json"
+            if mir.exists():
+                mir.unlink()
         print("  [STATE] Resume state cleared")
     except Exception:
         pass
@@ -10267,6 +10366,11 @@ def _scan_resume_states() -> list:
             m = re.search(r"\.ep(\d{1,3})\.json$", name)
             state["_ep"] = int(m.group(1)) if m else int(state.get("episode_num", 0))
             ep = state["_ep"]
+            # Ep-folder mirror gate (Joe 2026-08-12): if the episode's mirror
+            # inside its ep folder was deleted, the episode is considered gone
+            # and is not offered for resume.
+            if ep and int(ep) > 0 and not (_episode_dir(int(ep)) / ".resume_state.json").exists():
+                continue
             if ep in seen_eps:
                 # Newer state for this episode already collected - skip the older dup.
                 continue
@@ -10562,6 +10666,115 @@ def _regenerate_shot_list_for_resume(state: dict) -> list:
     print(f"  [SHOTLIST] regenerated {len(new_shots)} shots "
           f"(carried forward {carried} existing image/tts)")
     return new_shots
+
+
+def _regen_missing_images_before_render(episode_num: int, shots: list[dict],
+                                        character_sheets: dict, topic: str,
+                                        brand_assets: Optional[dict] = None) -> tuple:
+    """PRE-RENDER image validation pass (Joe 2026-08-12).
+
+    Runs right before FFmpeg render. Any shot (or chapter card) whose image
+    file is missing or invalid on disk - e.g. Joe deleted it because he didn't
+    like it - is regenerated in realtime here, using the SAME codex/API path
+    as the normal image phase. This means a manual pass over the script after
+    deleting bad frames self-heals: the video never renders a deleted/broken
+    frame, and only the deleted shots cost a regeneration.
+
+    Also persists the updated shot list back into the episode's resume state so
+    a crash after this pass doesn't lose the regenerations.
+
+    Returns (regenerated, still_missing).
+    """
+    brand_assets = brand_assets or _scan_brand_assets()
+    ep_shot_dir = _episode_dir(episode_num)
+    regen = 0
+    missing = 0
+
+    # Chapter cards first (they're sequential + anchor the chapter burn).
+    for s in shots:
+        if not s.get("is_chapter"):
+            continue
+        p = s.get("image_path") or ""
+        if p and os.path.isfile(p) and "chapter_" in os.path.basename(p):
+            continue
+        print(f"  [PRE-RENDER] regenerating chapter card {s.get('chapter_num')}...")
+        card = _generate_chapter_card(s, episode_num, topic, shots=shots,
+                                      brand_assets=brand_assets,
+                                      character_sheets=character_sheets)
+        if card:
+            s["image_path"] = card
+            regen += 1
+            print(f"  [PRE-RENDER] card ok -> {os.path.basename(card)}")
+        else:
+            missing += 1
+            print(f"  [PRE-RENDER] card FAILED - black placeholder")
+
+    # Shot images.
+    for idx, s in enumerate(shots):
+        if s.get("is_chapter"):
+            continue
+        p = s.get("image_path") or ""
+        if p and os.path.isfile(p):
+            continue
+        seq = int(s.get("seq", 0) or (s.get("narration_idx", idx) + 1))
+        fname = _shot_filename(s, seq)
+        print(f"  [PRE-RENDER] regenerating missing shot seq {s.get('seq')} "
+              f"(nidx {s.get('narration_idx')}) -> {fname}")
+        seed = s.get("seed") or (10000 + random.randint(0, 999))
+        prompt = _build_shot_prompt(s, character_sheets) + " " + _style_inject()
+        try:
+            prompt = _ensure_shot_prompt_relevant(prompt, s, character_sheets, None, topic)
+        except Exception:
+            pass
+        refs, _notes = _select_shot_refs(s, {}, brand_assets, llm_refs=s.get("_llm_refs"))
+        out_path = str(ep_shot_dir / fname)
+        n = len(refs)
+        kwargs = {}
+        if n:
+            kwargs = {"ref_mode": "identity",
+                      "ref_boost": (4.0 if n == 1 else 2.5),
+                      "grounding_px": (768 if n == 1 else 1024),
+                      "negative_prompt": (NO_DUPLICATE_NEGATIVE if n == 1 else "")}
+        ok = _krea_generate(prompt, seed, out_path,
+                            ref_images=refs if n else None,
+                            denoise=1.0, upscale=True, **kwargs)
+        if not ok:
+            print("  [PRE-RENDER] retrying with new seed...")
+            ok = _krea_generate(prompt, seed + 31337, out_path,
+                                ref_images=refs if n else None,
+                                denoise=1.0, upscale=True, **kwargs)
+        s["seed"] = seed
+        if ok:
+            s["image_path"] = out_path
+            regen += 1
+            print(f"  [PRE-RENDER] ok -> {fname}")
+        else:
+            missing += 1
+            print(f"  [PRE-RENDER] FAILED -> {fname} (will render fallback)")
+
+    # Persist updated shots back into the episode's resume state (preserves all
+    # other fields by reloading + swapping in the in-memory shot list).
+    try:
+        rf = _resume_file_for(episode_num)
+        if rf.exists():
+            st = json.loads(rf.read_text(encoding="utf-8"))
+            st["shots"] = shots
+            rf.write_text(json.dumps(st, indent=2, default=str), encoding="utf-8")
+            print("  [PRE-RENDER] resume state updated with regenerated shots")
+    except Exception as e:
+        print(f"  [PRE-RENDER] state persist skipped: {e}")
+
+    try:
+        import providers
+        providers.flush_upscales()
+    except Exception:
+        pass
+
+    if regen or missing:
+        print(f"  [PRE-RENDER] regenerated {regen}, still missing {missing}")
+    else:
+        print("  [PRE-RENDER] all shot images present")
+    return regen, missing
 
 
 def _resume_episode(state: dict) -> None:
@@ -10985,6 +11198,8 @@ def _resume_episode(state: dict) -> None:
     if video_path and os.path.isfile(video_path) and os.path.getsize(video_path) > 1000:
         print(f"  [RESUME] Video exists, skipping: {video_path}")
     else:
+        print("\n[PRE-RENDER] Checking all shot images before rendering...")
+        _regen_missing_images_before_render(episode_num, shots, character_sheets, topic)
         print("\n[VIDEO] Rendering (single pass)...")
         video_path = _render_video(shots, episode_num, title_events)
         if not video_path:
@@ -11544,6 +11759,10 @@ def _phase_finish(ep_ctx: dict) -> None:
                            prop_assets=prop_assets, target_paras=target_paras)
 
     # 7. Render 1080p with full audio mix, then burn the titles.
+    # PRE-RENDER image validation (Joe 2026-08-12): regenerate any shot Joe
+    # deleted (missing on disk) before rendering so no frame goes to black.
+    print("\n[PRE-RENDER] Checking all shot images before rendering...")
+    _regen_missing_images_before_render(episode_num, shots, character_sheets, topic)
     video_path = _render_video(shots, episode_num, title_events)
     if not video_path:
         print("  [HALT] Video render failed.")

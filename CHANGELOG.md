@@ -2,6 +2,56 @@
 
 All notable changes to Split Node.
 
+## [1.44.0] - 2026-08-12
+
+### Episode 13 QC fixes (faster-whisper audit of ep013)
+
+Audited ep13 end-to-end: transcribed the full 944s voice track with
+faster-whisper (word timestamps), cross-referenced every shot image against
+the narration at each minute mark, and found 47/120 shot images were MISSING
+- codex generated valid PNGs but the pipeline never claimed them, so 35% of
+the video rendered as the dark placeholder. Fixed the root causes so shots
+never silently fall to black.
+
+### Codex output-claiming reliability (root cause of black frames)
+
+- **Poll for the reported output to appear on disk.** Codex prints `Saved at:`
+  before Windows flushes the file (real-time Defender scan + async I/O), so a
+  single `os.path.isfile()` returned False and the shot was marked failed even
+  though the image existed. Now we poll up to `CODEX_FLUSH_WAIT` (default 15s)
+  for the reported path before declaring a miss.
+- **Deterministic new-uuid-dir fallback.** Codex creates a FRESH uuid dir under
+  `~/.codex/generated_images/<uuid>/` per call. If the `Saved at:` line is
+  mangled/absent but exactly ONE brand-new unclaimed uuid dir appeared since
+  this call's snapshot, that image belongs to this call and is claimed. This is
+  scoped to dirs that didn't exist before the call, so it can never grab a
+  concurrently-finished sibling's output (the old wrong-filename bug). Only
+  fires when there's exactly one candidate.
+- **Broader rate-limit detection** (capacity / temporarily unavailable /
+  overloaded / slow down / try again in) so a throttled codex run throttles
+  instead of failing shots.
+
+### Render / STT hardening
+
+- `_build_audio_mix`: check returncodes on the voice_raw concat and voice_0db
+  volume steps; a transient ffmpeg failure no longer crashes the whole episode
+  render with `FileNotFoundError: ... voice_0db.wav`.
+- `_ensure_voice_track`: if the padded voice concat fails (empty stderr on a
+  long clip list), fall back to a simple unpadded concat so the whisper title
+  pass still gets a voice track to time against.
+
+### Pre-render image validation pass (self-healing, wired into fresh + resume)
+
+- New `_regen_missing_images_before_render` runs right before FFmpeg: any shot
+  or chapter card whose image is missing/invalid on disk (e.g. Joe deleted it)
+  is regenerated in realtime via the active image backend, then the updated
+  shot list is persisted back to resume state. The video never renders a
+  deleted/broken frame, and only the deleted shots cost a regeneration.
+- Also: character establishing shots now keep only the primary name when a
+  location intro carries multiple comma-separated people; a `_KNOWN_PERSON_GENDER`
+  override stops famous figures (e.g. Matt Damon) being mis-gendered by the
+  small local LLM, and role-keyword archetypes of the wrong gender are vetoed.
+
 ## [1.41.4] - 2026-08-12
 
 ### Position-aware narration (opening / body / outro)

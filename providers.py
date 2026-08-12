@@ -351,6 +351,11 @@ class Codex:
             for p in (glob.glob(str(generated / "**" / "call_*.png"), recursive=True)
                       + glob.glob(str(generated / "**" / "ig_*.png"), recursive=True)):
                 m[os.path.abspath(p)] = os.path.getmtime(p)
+            # Also record every EXISTING uuid dir (keys prefixed 'dir:') so the
+            # brand-new-dir fallback can tell a fresh dir from a stale one.
+            for d in glob.glob(str(generated / "*")):
+                if os.path.isdir(d):
+                    m["dir:" + os.path.abspath(d)] = 0
             return m
 
         # Snapshot BEFORE (under lock) so concurrent threads each get their own
@@ -400,11 +405,61 @@ class Codex:
                       out_text, re.IGNORECASE)
         if m:
             cand = os.path.abspath(m.group(1))
+            # The image can land on disk a beat AFTER codex prints the path on
+            # Windows (real-time Defender scan + async flush). A single
+            # os.path.isfile() here returned False for many ep13 shots even
+            # though codex had produced the image - the shot fell to a black
+            # placeholder and the temp PNG was orphaned. Poll briefly for the
+            # reported file to appear before declaring the call a failure.
+            if not os.path.isfile(cand):
+                import time as _t
+                for _i in range(int(os.environ.get("CODEX_FLUSH_WAIT", "15"))):
+                    if os.path.isfile(cand):
+                        break
+                    _t.sleep(1)
             if os.path.isfile(cand):
                 with self._lock():
                     if cand not in self._claimed:
                         src = cand
                         self._claimed.add(src)
+        if src is None:
+            # DETERMINISTIC new-dir fallback (Joe 2026-08-12): codex creates a
+            # FRESH uuid dir under ~/.codex/generated_images/<uuid>/ for every
+            # single call. So if the "Saved at:" line was mangled/absent but a
+            # BRAND-NEW uuid dir appeared since this call's `before` snapshot
+            # and holds exactly one unclaimed image, that image belongs to THIS
+            # call and only this call (each call owns a unique dir). This is NOT
+            # the old racy "newest unclaimed file" scan (which guessed across
+            # all of ~/.codex and caused the wrong-filename bug) - it is scoped
+            # to dirs that did not exist before this call ran, so it can never
+            # claim a concurrently-finished sibling's output. Only applied when
+            # there is exactly one candidate to keep it unambiguous.
+            try:
+                import glob as _glob
+                cands = []
+                for p in (_glob.glob(str(generated / "**" / "call_*.png"), recursive=True)
+                          + _glob.glob(str(generated / "**" / "ig_*.png"), recursive=True)):
+                    ap = os.path.abspath(p)
+                    # skip anything that existed before this call OR is already claimed
+                    if ap in before:
+                        continue
+                    with self._lock():
+                        if ap in self._claimed:
+                            continue
+                    # parent uuid dir must also be brand-new (this call's own)
+                    if ("dir:" + os.path.dirname(ap)) in before:
+                        continue
+                    if os.path.isfile(ap):
+                        cands.append(ap)
+                if len(cands) == 1:
+                    with self._lock():
+                        if cands[0] not in self._claimed:
+                            src = cands[0]
+                            self._claimed.add(src)
+                            print("  [CODEX] deterministic new-uuid-dir fallback: "
+                                  f"{os.path.basename(cands[0])}")
+            except Exception as _fb:
+                print(f"  [CODEX] new-dir fallback error: {_fb}")
         if src is None:
             # STRICTLY DETERMINISTIC (Joe 2026-08-09): there is NO "newest
             # unclaimed file" fallback here anymore. That fallback was the root
@@ -413,12 +468,14 @@ class Codex:
             # file in ~/.codex, which could be ANOTHER concurrently-finished
             # card's output, and copy that under the wrong name. Now a missing
             # deterministic path is treated as a genuine failure.
-            # RATE-LIMIT: if codex text shows a rate limit / 429 / too many,
-            # throttle to one retry/hour (Joe's rule - never fall back to another
-            # model). Any other failure returns False so the caller retries THIS
-            # card cleanly. A card can never be saved under another card's name.
-            if re.search(r"(?i)rate\s*limit|429|too\s*many\s*requests|quota|limit\s*exceeded",
-                         out_text):
+            # RATE-LIMIT: if codex text shows a rate limit / 429 / too many /
+            # capacity / quota, throttle to one retry/hour (Joe's rule - never
+            # fall back to another model). Any other failure returns False so the
+            # caller retries THIS card cleanly. A card can never be saved under
+            # another card's name.
+            if re.search(r"(?i)rate\s*limit|429|too\s*many\s*requests|quota|"
+                         r"limit\s*exceeded|capacity|temporarily\s*unavailable|"
+                         r"overloaded|slow\s*down|try\s*again\s*in", out_text):
                 print("  [CODEX] rate-limited - throttling: 1 retry/hour until success")
                 return _codex_throttled_retry(self, prompt, out_path, ref_images,
                                               timeout, before)
