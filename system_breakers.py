@@ -2044,14 +2044,13 @@ SECONDS_PER_NARRATION_PARA = 14.3
 DEFAULT_VIDEO_MINUTES = 25
 # Clamp the derived paragraph count so a bad/typo'd length can't blow up.
 MIN_PARAS, MAX_PARAS = 10, 400
-# Hard cap on how many SENTENCES become shots (one shot per sentence). Kept in
-# sync with the shot-list builder so the narration list, the TTS worker and the
-# shot list are trimmed to the SAME window - before this, the TTS worker queued
-# a clip for EVERY flattened sentence while _build_shot_list stopped at 120,
-# so the episode's ending was silently dropped AND dozens of TTS clips were
-# generated for sentences that never appeared (Joe 2026-08-12). Raise to make
-# episodes longer; lower to shorten.
-MAX_SHOTS = 120
+# Cap on how many SENTENCES become shots (one shot per sentence, each with its
+# own image + TTS clip). Joe 2026-08-12: EVERY flattened TTS sentence must get
+# its own image - so this is set effectively UNCAPPED (matches MAX_PARAS). It
+# only exists as an extreme safety bound so a runaway paragraph count can't
+# balloon the episode; normal episodes (~150-190 sentences) are never trimmed,
+# and the narration list, TTS worker and shot list all stay in the SAME window.
+MAX_SHOTS = 400
 
 NARRATION_SYSTEM_PROMPT = (
     "You are a documentary scriptwriter for a YouTube channel called SPLIT NODE. "

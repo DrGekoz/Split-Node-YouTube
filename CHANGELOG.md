@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.45.2] - 2026-08-12
+
+### Every narration sentence gets its own image (shot cap removed)
+
+Joe 2026-08-12: the shot count is no longer capped at 120. `MAX_SHOTS` is now
+effectively uncapped (400, matching the paragraph clamp), so EVERY flattened
+TTS sentence becomes its own shot with its own image + TTS clip - the episode's
+ending is never dropped and the narration list, TTS worker and shot list stay
+in lock-step. Normal episodes (~150-190 sentences) are never trimmed.
+
+## [1.45.1] - 2026-08-12
 ## [1.45.1] - 2026-08-12
 
 ### Timeline consistency (fresh-eyes review of the full pipeline)
