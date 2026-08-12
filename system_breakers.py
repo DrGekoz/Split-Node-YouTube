@@ -8509,6 +8509,43 @@ def _finalize_tts(shots: list[dict], results: dict, episode_num: int) -> None:
     print(f"  [TTS] {ok}/{len(shots)} clips ready (0dB)")
 
 
+def _ensure_all_tts_before_render(shots: list[dict], episode_num: int) -> int:
+    """Regenerate any narration clip that is missing on disk RIGHT BEFORE the
+    audio mix, so a spoken beat is never silently dropped from the final video
+    (Joe 2026-08-12, review finding 4).
+
+    Both _build_audio_mix and _render_video filter to shots with an existing
+    tts_path - if a worker clip failed or was left None, that whole beat (image
+    + narration) silently vanished. This closes the gap by regenerating it here
+    (chapter + narrator + per-character clone voices). Returns number fixed."""
+    ep_dir = _ep_tts_dir(episode_num)
+    fixed = 0
+    for s in shots:
+        narr = (s.get("narration") or "").strip()
+        if not narr:
+            continue
+        nidx = s.get("narration_idx", 0)
+        path = s.get("tts_path") or ""
+        if path and os.path.isfile(path) and os.path.getsize(path) > 1000:
+            continue
+        voice = _lookup_voice(s.get("character", "NONE"))
+        char = bool(voice) and not s.get("is_chapter")
+        out = str(ep_dir / f"narration_{nidx:02d}{'_char' if char else ''}.wav")
+        if _tts_clip_matches(ep_dir, nidx, narr, char=char, path=out):
+            s["tts_path"] = out
+            continue
+        speak = _strip_narration_meta(narr)
+        if speak and _pocket_tts_generate(speak, out, voice=voice):
+            _normalize_voice_0db(out)
+            _tts_map_record(ep_dir, nidx, speak, char=char)
+            s["tts_path"] = out
+            fixed += 1
+            print(f"  [TTS-FIX] regenerated clip {nidx}: {narr[:42]}")
+    if fixed:
+        print(f"  [TTS-FIX] regenerated {fixed} missing narration clip(s) before render")
+    return fixed
+
+
 def _generate_all_tts(shots: list[dict], episode_num: int) -> None:
     """Sequential TTS (used by resume flows where parallelism isn't needed)."""
     print(f"\n[TTS] Generating {len(shots)} narration clips (built-in male voice: {TTS_VOICE})...")
@@ -9277,15 +9314,21 @@ def _master_gain_filter(audio_path: str) -> str:
         return ""
 
 def _compute_clip_starts(shots: list[dict]) -> list[float]:
-    """Absolute start times of each clip in the voice/video timeline (0.3s pads).
+    """Absolute start times of each clip in the voice/video timeline.
+
     Must stay in sync with _build_audio_mix's cursor math. Pacing gaps are
-    applied per-shot (see _pace_gaps_after)."""
+    applied via _pace_gaps_after BEFORE the math so the starts always use the
+    REAL per-shot gaps (1.0s breathing / 1.6s chapter / 1.2s question), never
+    the stale 0.3 default - otherwise title/label burn times drift earlier by
+    ~0.7s per shot (Joe 2026-08-12, review finding). Idempotent: _pace_gaps_after
+    re-sets the same deterministic values if already applied."""
+    _pace_gaps_after(shots)
     starts, cursor = [], 0.0
     for s in shots:
         if not (s.get("tts_path") and os.path.isfile(s["tts_path"])):
             continue
         starts.append(cursor)
-        cursor += _get_audio_duration(s["tts_path"]) + s.get("gap_after", 0.3)
+        cursor += _get_audio_duration(s["tts_path"]) + s.get("gap_after", 1.0)
     return starts
 
 
@@ -9516,6 +9559,12 @@ def _render_video(shots: list[dict], episode_num: int,
     deterministically.
     """
     print("\n[VIDEO] Rendering documentary (SINGLE PASS)...")
+    # Self-heal missing narration clips BEFORE filtering, so a spoken beat is
+    # never silently dropped from the final video (Joe 2026-08-12, review #4).
+    try:
+        _ensure_all_tts_before_render(shots, episode_num)
+    except Exception as _tfix_err:
+        print(f"  [TTS-FIX] self-heal skipped: {_tfix_err}")
     valid = [s for s in shots if s.get("tts_path") and os.path.isfile(s["tts_path"])]
     if not valid:
         print("  [FAIL] No TTS clips to render")
@@ -10812,6 +10861,18 @@ def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
             else:
                 print(f"  [TTS] FAILED - {speak[:50]}...")
             time.sleep(0.5)
+        # Invalidate the old mix.wav: it was built WITHOUT these newly generated
+        # clips, so _render_video would reuse it on resume and leave those
+        # sentences silent while drifting every later clip (Joe 2026-08-12,
+        # review finding 3). Rebuild on the next render.
+        try:
+            _mix = _ep_audio_dir(episode_num) / "mix.wav"
+            if _mix.is_file():
+                _mix.unlink()
+                print("  [TTS] stale mix.wav invalidated (clips changed) - "
+                      "audio mix will rebuild")
+        except Exception as _mixerr:
+            print(f"  [TTS] could not invalidate mix.wav: {_mixerr}")
         save_cb("tts")
     else:
         print(f"  [RESUME] All {len(shots)} TTS clips present")

@@ -2,6 +2,25 @@
 
 All notable changes to Split Node.
 
+## [1.45.1] - 2026-08-12
+
+### Timeline consistency (fresh-eyes review of the full pipeline)
+
+- Clip start times now ALWAYS apply the real per-shot pacing gaps (1.0s
+  breathing / 1.6s chapter / 1.2s question). `_compute_clip_starts` runs
+  `_pace_gaps_after` before the math, so the '/// NAME' establishing labels and
+  other burn times no longer drift earlier by ~0.7s per shot (previously they
+  used the stale 0.3s default while the audio used 1.0s gaps).
+- `_resume_tts_gap_fill` now invalidates a stale `mix.wav` whenever it adds any
+  missing narration clip, so a resumed render rebuilds the audio mix instead of
+  reusing an old mix that lacks those clips (which caused silent sentences and
+  A/V drift).
+- New `_ensure_all_tts_before_render` runs right before the audio mix and
+  regenerates any narration clip missing on disk (chapter, narrator and
+  per-character clone voices), so a spoken beat is never silently dropped from
+  the final video.
+
+## [1.45.0] - 2026-08-12
 ## [1.45.0] - 2026-08-12
 
 ### Spoken narration never cuts off mid-sentence (ep13)
