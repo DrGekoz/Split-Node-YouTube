@@ -4534,6 +4534,14 @@ def _merge_character_aliases(shots: list[dict]) -> list[dict]:
     The canonical name is the fullest (most tokens, then longest, then first-seen).
     """
     canon = _character_canonical_map(shots)
+    # Bug 4 (Joe 2026-08-14): LLM dedupe pass over the resolved names - catches
+    # SEMANTIC duplicates the deterministic alias merge can't (e.g. 'Stefan
+    # Mandel' vs 'Mandel' vs 'Stefan' that aren't token-subsets). Merging canon
+    # HERE propagates to every downstream consumer (sheets, real-photo refs,
+    # on-screen titles) because this function rewrites the shot's character
+    # field to the canonical name. Fail-open; CHAR_DEDUPE=0 disables.
+    if os.environ.get("CHAR_DEDUPE", "1").strip().lower() not in ("0", "false", "no", "off"):
+        canon = _llm_merge_duplicate_characters(canon)
     changed = 0
     for s in shots:
         c = s.get("character", "NONE")
@@ -5123,6 +5131,72 @@ def _bible_meta_for(bible_meta: dict, character_key: str) -> tuple:
             return (gender, age)
     return ("", "")
 
+
+def _llm_merge_duplicate_characters(canon: dict[str, str]) -> dict[str, str]:
+    """LLM dedupe pass over the resolved character names (Bug 4, Joe 2026-08-14).
+
+    The deterministic alias merge (_character_canonical_map) catches spelling and
+    token-subset duplicates, but not SEMANTIC duplicates the LLM would flag (two
+    names that clearly refer to the same real person - e.g. a character introduced
+    as 'Stefan Mandel' in one shot and 'Mandel'/'the Romanian' in another, or two
+    distinct-looking spellings the word-matcher can't unify). We send the final
+    unique name list back to the LLM and ask it to flag any names that are
+    duplicates of one another, returning a merge map {name -> canonical name}.
+
+    Fail-open: on any LLM error / no response, returns the input unchanged.
+    The returned map maps EVERY name to a canonical representative; names the LLM
+    left alone map to themselves.
+    """
+    unique = sorted({v for v in canon.values()})
+    if len(unique) < 2:
+        return {n: n for n in canon}
+    prompt = (
+        "I have a list of characters that appear in a story. Some of these names "
+        "may refer to the SAME person written in slightly different ways (e.g. "
+        "'Stefan Mandel' vs 'Mandel' vs 'Stefan', 'the Romanian' if it clearly "
+        "means a listed person, initials vs full names, one full name and one "
+        "partial).\n\n"
+        "List:\n" + "\n".join(f"- {n}" for n in unique) + "\n\n"
+        "Return ONLY a JSON object mapping each name to the SINGLE canonical name "
+        "it should be merged INTO. Names that are NOT duplicates map to themselves. "
+        "When multiple names are the same person, they must ALL map to the same "
+        "canonical (fullest/most correct) name. Do not merge names that are "
+        "genuinely different people, and do not invent names not on the list.\n"
+        'Example: {"Stefan Mandel": "Stefan Mandel", "Mandel": "Stefan Mandel", '
+        '"Stefan": "Stefan Mandel", "Elena Petrova": "Elena Petrova"}'
+    )
+    resp = _llm_json([
+        {"role": "system", "content":
+         "You merge duplicate character names in a cast list. Reply with JSON only."},
+        {"role": "user", "content": prompt},
+    ], max_tokens=1200, temp=0.1)
+    if not isinstance(resp, dict) or not resp:
+        print("  [DEDUPE] LLM returned nothing - keeping character names as-is")
+        return {n: n for n in canon}
+    # Build {name -> canonical}, validating that canonical targets exist on the
+    # list (never invent/map to an off-list name, which would orphan the sheet).
+    valid = set(unique)
+    merge: dict[str, str] = {}
+    for raw_name, canon_name in resp.items():
+        src = str(raw_name).strip()
+        tgt = str(canon_name).strip()
+        if not src or src not in valid:
+            continue
+        if tgt not in valid:
+            tgt = src  # off-list target -> treat as no-merge
+        merge[src] = tgt
+    merged = {n: merge.get(n, n) for n in unique}
+    _dupes = sorted({f"{k} -> {v}" for k, v in merged.items() if k != v})
+    if _dupes:
+        print(f"  [DEDUPE] LLM merged {len(_dupes)} duplicate name(s):")
+        for d in _dupes:
+            print(f"          {d}")
+    else:
+        print("  [DEDUPE] no duplicate characters found")
+    # Propagate the merge through the original canonical map (every distinct
+    # spelling -> final canonical).
+    return {n: merged.get(canon[n], canon[n]) for n in canon}
+
 def _character_view_block(sheet: dict, angle: str) -> str:
     """Pick the character description that matches the camera angle.
     Returns the view-specific paragraph (front/left/right/back) or the full body."""
@@ -5146,8 +5220,16 @@ def _character_view_block(sheet: dict, angle: str) -> str:
         label = "seen from directly in front"
     return f"{view} ({label})"
 
-def _character_prompt_block(sheet: dict, angle: str) -> str:
-    """Build the full prepend block for a character in a shot: identity + angle view."""
+def _character_prompt_block(sheet: dict, angle: str, expression: str = "",
+                            gaze: str = "") -> str:
+    """Build the full prepend block for a character in a shot: identity + angle view.
+
+    `expression`/`gaze` are per-SHOT fields (Joe 2026-08-14): each shot derives
+    them from the narration/scene so the SAME character isn't stuck with one
+    frozen facial expression. They render as explicit 'Expression: ...' and
+    'Eyes: ...' lines so the image model varies the face per shot. When empty
+    they're omitted (the sheet's neutral look is used).
+    """
     if not sheet:
         return ""
     parts = []
@@ -5166,11 +5248,187 @@ def _character_prompt_block(sheet: dict, angle: str) -> str:
     view = _character_view_block(sheet, angle)
     if view:
         parts.append(f"View: {view}")
+    # Per-shot expression + gaze (Bug 1 fix): explicit lines so the face changes
+    # per shot instead of reusing the static neutral identity look every time.
+    if expression:
+        parts.append(f"Expression: {expression}")
+    if gaze:
+        parts.append(f"Eyes: {gaze}")
     # Full body canonical description last as the anchor (always included when
     # present - it carries the full outfit, so dropping it would lose the clothing)
     if sheet.get("full_body"):
         parts.append(f"Canonical: {sheet['full_body']}")
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Bug 1 / Bug 3 helpers (Joe 2026-08-14)
+# ---------------------------------------------------------------------------
+# Deterministic emotion keyword -> facial expression, applied per shot so the
+# same character isn't frozen in a neutral face across the whole episode.
+_EXPRESSION_MAP = [
+    # (match words, expression text). Order matters: first hit wins.
+    (("anger", "angry", "rage", "furious", "enraged", "outraged", "fury",
+      "screaming", "shouting", "yelling", "snarl", "clench"), 
+     "angry, jaw tight, brow furrowed"),
+    (("fear", "fearful", "afraid", "terrified", "scared", "panic", "panic",
+      "terror", "dread", "shaking"), 
+     "fearful, wide eyes, tense jaw"),
+    (("sad", "sadness", "grief", "grieving", "mourn", "crying", "cried",
+      "tears", "weeping", "heartbroken", "devastated", "hopeless"),
+     "sad, downcast eyes, sorrowful"),
+    (("smil", "grin", "smiling", "laugh", "laughed", "chuckle", "pleased",
+      "proud", "happy", "content", "satisfied"), 
+     "subtle knowing smile"),
+    (("shock", "shocked", "surprise", "surprised", "astonished", "stunned",
+      "amazed", "bewildered"), 
+     "shocked, raised eyebrows"),
+    (("suspici", "suspicious", "distrust", "wary", "skeptic", "sceptic",
+      "doubt", "narrowed"), 
+     "suspicious, narrowed eyes"),
+    (("calm", "calmly", "composed", "coolly", "measured", "collected",
+      "stoic", "calmness"), 
+     "calm, steady gaze"),
+    (("determined", "determination", "focused", "resolute", "ruthless",
+      "cold-eyed", "calculating"), 
+     "determined, intense focus"),
+    (("confus", "confused", "bewildered", "puzzled", "uncertain"), 
+     "confused, furrowed brow"),
+    (("greed", "greedy", "lust", "covet", "hungry", "desire", "obsess"),
+     "hungry, covetous expression"),
+    (("desperat", "desperate", "pleading", "begging", "anguish"), 
+     "desperate, pleading look"),
+    (("smirk", "smug", "smugly", "self-satisfied", "condescending"), 
+     "smug smirk"),
+]
+
+
+def _shot_expression_gaze(narration: str, scene: str) -> tuple:
+    """Derive (expression, gaze) for a shot from its narration + scene text.
+
+    Deterministic keyword mapping (no LLM cost, fail-open): returns empty
+    strings when nothing matches so the character's neutral sheet look is used.
+    Gaze defaults to the scene's main subject when a likely subject word appears,
+    else 'directly into the camera' for dramatic beats, else '' (neutral).
+    """
+    text = f"{narration} {scene}".lower()
+    expression = ""
+    for words, expr in _EXPRESSION_MAP:
+        if any(w in text for w in words):
+            expression = expr
+            break
+    gaze = ""
+    # Gaze at a named in-scene subject (person/object/keyword) when present.
+    gaze_target = re.search(
+        r"(?:looking at|staring at|gazing at|watching|toward\w*|towards)\s+"
+        r"(?:the\s+|at\s+)?([A-Za-z][A-Za-z0-9' -]{2,40}?)(?:\b(?:and|while|as)\b|\.|,|$)",
+        text)
+    if gaze_target:
+        t = gaze_target.group(1).strip().title()
+        gaze = f"looking at {t}"
+    elif re.search(r"\b(directly into camera|into the lens|at the viewer)\b", text):
+        gaze = "looking directly into the camera"
+    elif not expression:
+        gaze = ""
+    return expression, gaze
+
+
+def _active_render_style() -> str:
+    """Style-aware RENDER_STYLE (Bug 3 rec).
+
+    RENDER_STYLE (photoreal skin, perfect anatomy, subsurface scattering) is
+    correct for photoreal profiles but FIGHTS the stylized profiles (arcane,
+    bold-outline, artsy, noir, synthwave, editorial, watercolor). The
+    contradiction drives gpt-image-2 to hallucinate hands/anatomy. For stylized
+    profiles return a matching stylized render style WITHOUT the photoreal
+    anatomy language so the model isn't torn between two directives.
+    """
+    name = _active_style_name().lower()
+    _stylized = {"arcane", "bold-outline", "artsy", "noir", "synthwave",
+                 "editorial", "watercolor"}
+    if name in _stylized:
+        return (
+            "Stylized 3D render style, consistent character proportions, natural "
+            "well-proportioned hands with five fingers, clean anatomy, detailed "
+            "finish, cinematic lighting, moody atmosphere, dark color grade, film "
+            "grain, high detail, dramatic documentary recreation"
+        )
+    return RENDER_STYLE
+
+
+def _shot_shows_hands(shot) -> bool:
+    """True when a shot is likely to show a character's hands (close-up/hand
+    framing or the scene explicitly mentions hands) - triggers the anatomy-correct
+    hands clause so gpt-image-2 doesn't hallucinate fingers."""
+    st = str(shot.get("shot_type", "")).upper()
+    scene = (shot.get("scene") or "").lower()
+    narr = (shot.get("narration") or "").lower()
+    if st in ("ECU", "CU") and re.search(
+            r"\b(hand|hands|fingers|typing|grabbing|holding|clutching|"
+            r"gestur|wrist|palms|grip)\b", scene):
+        return True
+    if re.search(r"\b(hand|hands|fingers)\b", narr):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Bug 2 alt (Joe 2026-08-14): pre-stylized canonical identity portrait
+# ---------------------------------------------------------------------------
+# codex shots use the real person's photo as the identity ref. But feeding the
+# RAW photo makes gpt-image-2 copy it photorealistically (one look) while the
+# style-in-text pulls toward stylized (a DIFFERENT look) - two distinct
+# characters for one person. Fix: pre-stylize a SINGLE canonical portrait once
+# per person (facing forward, neutral expression, rendered in the channel style)
+# and reuse THAT as the identity ref for every shot. Cached to
+# cast_refs/real/<safe>_portrait.png so it's generated once, not per shot.
+
+
+def _stylized_identity_portrait(char_name: str, role: str) -> Optional[str]:
+    """Return the pre-stylized canonical portrait for char_name (codex backend).
+
+    Resolves the real photo (_find_real_reference), then produces ONE stylized
+    forward-facing neutral-expression portrait in the channel style and caches it.
+    Reuse on subsequent calls/shot renders so every shot of this person uses the
+    SAME face AND style (no more photo-vs-style split). Returns the portrait path
+    or None (falls back to the raw real photo / txt2img).
+    """
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", char_name.lower()).strip("_") or "char"
+    out = REAL_REFS_DIR / f"{safe}_portrait.png"
+    if out.is_file() and _is_real_image(str(out)):
+        _regen = os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")
+        if not _regen:
+            print(f"  [REALREF] reuse stylized portrait {os.path.basename(out)}")
+            return str(out)
+        try:
+            out.unlink()
+        except OSError:
+            pass
+    src = _find_real_reference(char_name, role)
+    if not src or not os.path.isfile(src):
+        return None
+    REAL_REFS_DIR.mkdir(parents=True, exist_ok=True)
+    style = _style_inject()
+    prompt = (
+        f"Portrait of the person in the attached reference photo, FACING FORWARD "
+        f"directly into the camera, NEUTRAL expression, eyes open looking straight "
+        f"ahead. Preserve the person's facial identity exactly (bone structure, "
+        f"features, hairstyle) but render them entirely in this visual style. "
+        f"{style} Head and shoulders framing, evenly lit, clean single subject, "
+        f"NO text, no words, no watermark. Single clean portrait, no grid, no "
+        f"collage, no duplicates."
+    )
+    # Route through the codex backend (same as shots) so the portrait matches
+    # the shots' model. Use the raw photo as the single identity ref.
+    ok = _krea_generate(prompt, 55500 + len(safe) * 7, str(out),
+                        ref_images=[src], denoise=1.0,
+                        ref_mode="identity", ref_boost=4.0, grounding_px=768,
+                        upscale=True)
+    if ok and out.is_file() and _is_real_image(str(out)):
+        print(f"  [REALREF] stylized portrait for {char_name} -> {os.path.basename(out)}")
+        return str(out)
+    # Fall back to the raw real photo if the stylized pass failed.
+    return src
 
 # -- RunPod Z-Image-Turbo --------------------------------------------
 
@@ -5457,22 +5715,42 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     facing_txt = {"left": "facing left", "right": "facing right",
                   "front": "facing the camera", "back": "seen from behind",
                   "behind": "seen from behind"}
+    # Bug 1 fix (Joe 2026-08-14): derive ONE per-shot expression + gaze from the
+    # narration + scene so the same character isn't rendered with a frozen
+    # neutral face in every shot. Deterministic keyword mapping, fail-open to
+    # empty (omitted) so the sheet's neutral look is used on no-match.
+    expression, gaze = _shot_expression_gaze(narration, scene)
     blocks = []
     for ch in chars:
         name = ch["name"]
         sheet = _sheet_for_name(character_sheets, name)
-        cb = _character_prompt_block(sheet, angle) if sheet else ""
+        cb = _character_prompt_block(sheet, angle, expression, gaze) if sheet else ""
         if not cb:
             cb = f"a person named {name}"
+            if expression:
+                cb += f", expression: {expression}"
+            if gaze:
+                cb += f", eyes: {gaze}"
         facing = facing_txt.get(ch["facing"], "facing the camera")
         blocks.append(f"{cb} ({facing})")
     char_part = " ".join(blocks)
+    # Bug 3 rec (Joe 2026-08-14): resolve the anatomy conflict + hands. For the
+    # Arcane/stylized profiles RENDER_STYLE's photoreal-anatomy clauses fight the
+    # stylized look and drive gpt-image-2 hand hallucinations. Use the style-aware
+    # render style (strips photoreal skin/anatomy language for stylized profiles)
+    # and, on hand-visible shots, append an explicit anatomy-correct-hands clause.
+    render_style = _active_render_style()
+    hands_clause = ""
+    if _shot_shows_hands(shot):
+        hands_clause = (" Anatomy-correct hands: exactly five natural fingers per "
+                        "hand, correct proportions, no extra, fused, webbed or "
+                        "claw-like fingers, no deformed or misplaced digits.")
     return (
-        f"{RENDER_STYLE}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx}{prop_clause} "
+        f"{render_style}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx}{prop_clause} "
         f"{_business_building_clause(shot)}"
         f"16:9 widescreen cinematic documentary frame, high detail "
         f"illustration,{DOF_CLAUSE} EXACTLY ONE continuous "
-        f"scene, no collage, no duplicated figures{no_text_clause}"
+        f"scene, no collage, no duplicated figures{hands_clause}{no_text_clause}"
     )
 
 
@@ -7805,12 +8083,15 @@ def _select_shot_refs(shot, char_panels_cache, brand_assets=None, llm_refs=None)
         if not visible:
             break
         if use_real_refs:
-            # Real-person photo as the identity ref (no sheet panels).
-            real = _find_real_reference(
+            # Real-person photo as the identity ref (no sheet panels). Bug 2 alt:
+            # use the PRE-STYLIZED canonical portrait (facing forward, neutral
+            # expression, in the channel style) so every shot of this person holds
+            # BOTH their likeness AND the style - no more photo-vs-style split.
+            real = _stylized_identity_portrait(
                 ch["name"], shot.get("character_role", ""))
             if real and os.path.isfile(real):
                 refs.append(real)
-                notes.append(f"{ch['name']}: real photo ({ch['facing']})")
+                notes.append(f"{ch['name']}: stylized portrait ({ch['facing']})")
             continue
         panels = char_panels_cache.get(ch["name"])
         if not panels:

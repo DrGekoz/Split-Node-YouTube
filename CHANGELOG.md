@@ -2,6 +2,44 @@
 
 All notable changes to Split Node.
 
+## [1.48.0] - 2026-08-14
+
+### Character rendering fixes (Bug 1-3, codex backend)
+
+Joe 2026-08-14. The codex (gpt-image-2) shots had three recurring visual bugs:
+every shot showed the same frozen facial expression, one character rendered as
+two distinct-looking people (one photoreal, one stylized), and the Arcane style
+hallucinated hands.
+
+- **Per-shot facial expression + gaze.** `_character_prompt_block` now accepts
+  optional `expression`/`gaze`, derived per shot by `_shot_expression_gaze()`
+  from the narration + scene (deterministic emotion-keyword map, fail-open to
+  the neutral sheet look). Every character block emits explicit `Expression:`
+  and `Eyes:` lines, so the same person's face changes shot to shot instead of
+  being frozen in one neutral pose.
+- **Pre-stylized canonical identity portrait.** New `_stylized_identity_portrait()`
+  resolves the real person's photo once, produces a single forward-facing,
+  neutral-expression portrait rendered in the channel style, and caches it to
+  `cast_refs/real/<safe>_portrait.png`. codex shots now use THIS as the identity
+  ref (via `_select_shot_refs`) instead of the raw photo, so every shot holds
+  both the person's likeness AND the style - no more photo-vs-style split into
+  two distinct characters. Falls back to the raw photo if the pass fails.
+- **Anatomy conflict resolved + hands clause.** `_active_render_style()` returns
+  a style-aware render style: the photoreal RENDER_STYLE (perfect anatomy,
+  subsurface scattering) previously fought the Arcane/stylized profiles and
+  drove gpt-image-2 to hallucinate hands. Stylized profiles now get a matching
+  stylized render style without the photoreal anatomy language. `_shot_shows_hands()`
+  detects hand-visible shots (CU/ECU/hand narration) and appends an explicit
+  anatomy-correct-hands clause (five natural fingers, no extra/fused/claw digits).
+
+### Character dedupe pass (Bug 4)
+
+New `_llm_merge_duplicate_characters()` sends the resolved cast list back to the
+LLM and asks it to flag semantic duplicates the deterministic alias merge can't
+catch (e.g. `Stefan Mandel` vs `Mandel` vs `Stefan`). Wired into
+`_collapse_characters` so merged canon propagates to sheets, real-photo refs and
+on-screen titles. Fail-open on LLM error; `CHAR_DEDUPE=0` disables.
+
 ## [1.47.0] - 2026-08-13
 
 ### YouTube titles drop the episode number
