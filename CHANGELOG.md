@@ -2,6 +2,21 @@
 
 All notable changes to Split Node.
 
+## [1.49.0] - 2026-08-14
+
+### Story resolve-and-retry (don't quit / skip on a blocked article)
+
+Joe 2026-08-14. Previously the article URL was chosen during setup but fetched
+later in the LLM phase, so a blocked / dead / paywalled / empty article aborted
+the whole episode (single) or silently skipped a video (batch) after all the
+setup prompts. Now `_episode_setup` resolves the article via
+`_pick_resolvable_story()`: it fetches the article immediately, and on failure
+rejects that URL and loops back to picking a different story. Works for BOTH
+single and batch (setup runs once per video), so a batch can't move to the next
+video until the current one resolves. The resolved paragraphs are carried in the
+config and reused in `_phase_llm` (no second fetch that could fail on a
+block-repeat site). Retries up to `STORY_RESOLVE_ATTEMPTS` (default 5).
+
 ## [1.48.0] - 2026-08-14
 
 ### Character rendering fixes (Bug 1-3, codex backend)

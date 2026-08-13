@@ -1714,6 +1714,38 @@ def _pick_story() -> tuple[str, str]:
         rejected_set.add(chosen["link"])
         print("  [NEXT] Trying another story...")
 
+
+def _pick_resolvable_story() -> tuple[str, str, list]:
+    """Pick a story AND confirm its article actually resolves before committing.
+
+    Joe 2026-08-14: previously the URL was chosen here but fetched later in
+    _phase_llm, so a blocked / dead / empty article aborted the whole episode
+    (or silently skipped a batch video) after all the setup prompts. Now we
+    fetch the article immediately: if it returns nothing usable (blocked,
+    paywalled, dead link, redirect-to-empty), reject it and loop back to
+    picking a different story instead of quitting. Works for BOTH single and
+    batch pipelines because _episode_setup runs this once per video, so a
+    batch can't move on to the next video until the current one resolves.
+
+    Returns (url, title, paragraphs) on success, or ("", "", []) on abort /
+    total failure after STORY_RESOLVE_ATTEMPTS tries.
+    """
+    max_attempts = int(os.environ.get("STORY_RESOLVE_ATTEMPTS", "5"))
+    for _attempt in range(1, max_attempts + 1):
+        url, title = _pick_story()
+        if not url:
+            return ("", "", [])
+        paras = fetch_article_paragraphs(url)
+        if paras:
+            print(f"  [RESOLVE] article OK ({len(paras)} paragraphs) -> {url[:70]}")
+            return (url, title, paras)
+        print(f"  [RESOLVE] article did not resolve (blocked / no content): {url[:70]}")
+        print(f"  [RETRY] Picking a different story ({_attempt}/{max_attempts})...")
+        _save_rejected_article(url)
+    print(f"  [RESOLVE] Could not resolve a story after {max_attempts} attempts.")
+    return ("", "", [])
+
+
 # -- Article ---------------------------------------------------------
 
 # Boilerplate / site-chrome patterns that are NOT part of the article story
@@ -12508,15 +12540,18 @@ def _episode_setup(default_ep: int):
     print(f"  [IMAGES] mode: shots={'REGEN' if regen_shots else 'resume'}, "
           f"chapters={'REGEN' if regen_chapters else 'resume'}\n")
 
-    article_url, article_title = _pick_story()
+    article_url, article_title, article_paras = _pick_resolvable_story()
     if not article_url:
-        print("  [HALT] No story found. Check RSS feeds.")
+        print("  [HALT] No story found (could not resolve any article). Check RSS feeds.")
         return None
 
     return {
         "episode_num": episode_num,
         "target_paras": target_paras,
         "resolution": res,
+        "article_url": article_url,
+        "article_title": article_title,
+        "article_paras": article_paras,
         "thumb_backend": thumb_backend,
         "thumb_model": thumb_model,
         "img_backend": img_backend,
@@ -12524,8 +12559,6 @@ def _episode_setup(default_ep: int):
         "regen_images": regen_shots,
         "regen_chapters": regen_chapters,
         "style": chosen_style or "",
-        "article_url": article_url,
-        "topic": article_title,
     }
 
 
@@ -12535,10 +12568,16 @@ def _phase_llm(config: dict):
     _apply_config_env(config)
     episode_num = config["episode_num"]
     article_url = config["article_url"]
-    topic = config["topic"]
+    topic = config.get("article_title") or config.get("topic") or ""
     target_paras = config["target_paras"]
 
-    paragraphs = fetch_article_paragraphs(article_url)
+    # Pre-resolved paragraphs (Joe 2026-08-14): _episode_setup already fetched +
+    # verified the article, so reuse that instead of re-fetching (a second fetch
+    # could fail on a site that blocks repeat hits). Fall back to a fresh fetch
+    # for legacy configs / resume states that don't carry article_paras.
+    paragraphs = list(config.get("article_paras") or [])
+    if not paragraphs:
+        paragraphs = fetch_article_paragraphs(article_url)
     if paragraphs:
         paragraphs = _rate_paragraph_relevance(topic, paragraphs)
     if not paragraphs:

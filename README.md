@@ -503,6 +503,7 @@ split-node/
 - **RSS "beat the system" ingestion** — hack / lottery / loophole keywords with junk-article filtering (cookie, newsletter, paywall, sponsored, boilerplate stripped before paragraph extraction)
 - **Recency-first selection** — candidate articles are sorted **most recent first** (matching the filters), so fresh stories surface before older ones instead of the same few looping
 - **Rejection cooldown** — if you say **no** to an article, it's recorded and **not re-presented for 7 days** (`REJECT_COOLDOWN_DAYS`), so rejected links stop repeating every run; used articles are never re-shown
+- **Story resolve-and-retry** — a picked article is fetched and verified up front (`_pick_resolvable_story`); if it's blocked / dead / paywalled / empty it's rejected and you loop back to picking a different story instead of quitting or skipping — for single AND batch runs (`STORY_RESOLVE_ATTEMPTS`, default 5)
 - **LLM relevance scoring** — every paragraph scored 0-10 vs the topic; off-topic beats discarded (fail-open keep-on-error)
 - **Trend scoring toolkit** — SerpAPI demand + YouTube competition analysis to pick topics with actual demand (cached 24h)
 
