@@ -39,9 +39,14 @@ TREND_CACHE = PROJECT_DIR / "trend_scan_cache.json"
 
 SERPAPI_KEY = ""  # read lazily at call time (pipeline loads .env after import)
 
+# Google Trends geo filter. Empty string = WORLDWIDE. Override with TREND_GEO env.
+def _geo() -> str:
+    return os.environ.get("TREND_GEO", "")
+
 
 def _serpapi_key() -> str:
     return os.environ.get("SERPAPI_API_KEY", "") or SERPAPI_KEY
+
 
 # Category -> candidate topic terms (one SerpAPI TIMESERIES call per category,
 # so a full scan is 5 calls; cached for TREND_SCAN_CACHE_HOURS, default 24h)
@@ -80,8 +85,7 @@ def scan_topics(creds_fn=None, cache_hours: int = 24) -> dict:
                  "trajectory": "n/a", "room_to_rank": None, "score": 50.0}
         demand = {}
         try:
-            if _serpapi_key():
-                demand = _trend_demand(terms)
+            demand = _trend_demand(terms)  # pytrends free; SerpAPI fallback
         except Exception as e:
             print(f"  [TREND] {cat} demand failed: {str(e)[:120]}")
         if not demand:
@@ -123,7 +127,8 @@ def scan_topics(creds_fn=None, cache_hours: int = 24) -> dict:
     return results
 
 # ---------------------------------------------------------------------------
-# Demand: Google Trends via SerpAPI (toolkit script, stdlib only)
+# Demand: Google Trends. Tries FREE pytrends first, falls back to SerpAPI
+# (keyed, reliable) if pytrends is blocked/rate-limited or missing.
 # ---------------------------------------------------------------------------
 
 def _extract_json(raw: str) -> dict:
@@ -136,14 +141,68 @@ def _extract_json(raw: str) -> dict:
     return json.loads(raw[start:end + 1])
 
 
-def _trend_demand(terms: list[str]) -> dict:
+def _trend_demand(terms: list[str], geo: str = "") -> dict:
+    """Return {term: {avg, trajectory}}. pytrends (free) first, SerpAPI fallback."""
+    geo = geo or _geo()
+    try:
+        return _trend_demand_pytrends(terms, geo)
+    except Exception as e:
+        print(f"  [TREND] pytrends unavailable ({str(e)[:120]}); "
+              f"falling back to SerpAPI")
+    return _trend_demand_serpapi(terms, geo)
+
+
+def _trend_demand_pytrends(terms: list[str], geo: str) -> dict:
+    """Google Trends direct via pytrends (no key, free). Returns
+    {term: {avg, trajectory}} on the 0-100 relative-interest scale.
+
+    pytrends is flaky under Google's 429 rate limiting / scraper detection;
+    callers wrap this and fall back to SerpAPI."""
+    import pytrends.request  # installed in the runtime Python
+    import requests
+    # Seed a browser-like consent cookie so Google doesn't 429 us as a scraper.
+    s = requests.Session()
+    s.headers["User-Agent"] = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                               "AppleWebKit/537.36 (KHTML, like Gecko) "
+                               "Chrome/126.0.0.0 Safari/537.36")
+    s.get("https://www.google.com/", timeout=15)
+    cookies = {c.name: c.value for c in s.cookies}
+
+    pt = pytrends.request.TrendReq(hl="en-US", tz=0,
+                                   timeout=(15, 30), retries=0,
+                                   backoff_factor=0.5)
+    pt.cookies = cookies
+    pt.build_payload(terms[:5], timeframe="today 3-m", geo=geo or "")
+    df = pt.interest_over_time()
+    out = {}
+    for term in terms[:5]:
+        if term not in df.columns:
+            out[term] = {"avg": 0.0, "trajectory": "flat"}
+            continue
+        vals = df[term].dropna().tolist()
+        avg = round(sum(vals) / len(vals), 1) if vals else 0.0
+        traj = "flat"
+        if len(vals) >= 4:
+            k = max(1, len(vals) // 3)
+            early, late = sum(vals[:k]) / len(vals[:k]), sum(vals[-k:]) / len(vals[-k:])
+            if early == 0:
+                traj = "rising" if late > 0 else "flat"
+            else:
+                ch = (late - early) / early * 100.0
+                traj = "rising" if ch >= 15 else ("declining" if ch <= -15 else "flat")
+        out[term] = {"avg": avg, "trajectory": traj}
+    return out
+
+
+def _trend_demand_serpapi(terms: list[str], geo: str) -> dict:
     """Return {term: {avg, trajectory}} — one SerpAPI call for all terms."""
     out = {}
     env = dict(os.environ)
     env["SERPAPI_API_KEY"] = _serpapi_key()
     r = subprocess.run(
         [_sys_python(), str(TOOLKIT), "--terms", ",".join(terms),
-         "--timeframe", "today 3-m", "--type", "TIMESERIES"],
+         "--timeframe", "today 3-m", "--type", "TIMESERIES",
+         "--geo", geo or ""],
         capture_output=True, text=True, timeout=120, env=env)
     if r.returncode != 0:
         raise RuntimeError(r.stderr.strip()[-300:] or "serpapi exit != 0")
@@ -278,18 +337,15 @@ def score_titles(titles: list[str], creds_fn=None) -> list[dict]:
                    "score": 50.0} for t in titles}
     msgs = []
 
-    # 1) demand
-    if _serpapi_key():
-        try:
-            demand = _trend_demand(terms)
-            for t, term in zip(titles, terms):
-                d = demand.get(term, {})
-                results[t]["demand"] = d.get("avg")
-                results[t]["trajectory"] = d.get("trajectory", "flat")
-        except Exception as e:
-            msgs.append(f"trends: {str(e)[:150]}")
-    else:
-        msgs.append("trends: SERPAPI_API_KEY not set")
+    # 1) demand (pytrends free first, SerpAPI fallback)
+    try:
+        demand = _trend_demand(terms)
+        for t, term in zip(titles, terms):
+            d = demand.get(term, {})
+            results[t]["demand"] = d.get("avg")
+            results[t]["trajectory"] = d.get("trajectory", "flat")
+    except Exception as e:
+        msgs.append(f"trends: {str(e)[:150]}")
 
     # 2) competition via OAuth creds
     try:

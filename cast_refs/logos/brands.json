@@ -1,11 +1,10 @@
 {
   "brands": {
-    "Duke University": "screen",
-    "Heidelberg University": "building",
-    "Jersey Shore Medical Center": "building",
-    "University of London": "screen",
-    "Sanremo Casino": "building",
-    "Atlantic City": "building",
-    "Las Vegas": "building"
+    "Happy Valley Racecourse": "building",
+    "Mascot Treasure": "screen",
+    "Bobo Duck": "screen",
+    "Frat Rat": "screen",
+    "Global Betting & Gaming Consultants": "screen",
+    "Bloomberg Businessweek": "screen"
   }
 }

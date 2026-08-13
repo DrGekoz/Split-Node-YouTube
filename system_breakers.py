@@ -620,9 +620,45 @@ def remove_easter_egg(name: str) -> bool:
     return False
 
 
+def _input_timeout(prompt: str, timeout: float = 10.0, default: str = "") -> str:
+    """Read a line from stdin with a timeout; return `default` if the user
+    doesn't answer in time. On Windows uses msvcrt for non-blocking reads so a
+    headless/automated run (no one at the keyboard) falls through to the
+    default instead of hanging the pipeline forever."""
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+    try:
+        import msvcrt  # Windows only
+    except ImportError:
+        try:
+            line = input()
+            return line.strip()
+        except EOFError:
+            return default
+    chars = []
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if msvcrt.kbhit():
+            ch = msvcrt.getwche()
+            if ch == "\r" or ch == "\n":
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "".join(chars).strip()
+            chars.append(ch)
+        else:
+            time.sleep(0.05)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return default
+
+
 def _ask_easter_egg() -> Optional[str]:
     """Ask whether to hide an easter egg in one shot. Returns the egg NAME or
-    None. EASTER_EGG=<name> env selects directly without prompting."""
+    None. EASTER_EGG=<name> env selects directly without prompting.
+
+    Joe 2026-08-13: if there's no answer in 10s default to YES, then after
+    another 10s default the egg choice to 'duck pope' - so an unattended run
+    always gets a duck-pope easter egg instead of stalling on the prompt."""
     if os.environ.get("EASTER_EGG"):
         name = os.environ.get("EASTER_EGG").strip().lower()
         eggs = _load_easter_eggs()
@@ -631,19 +667,26 @@ def _ask_easter_egg() -> Optional[str]:
             return name
         print(f"  [EGG] unknown easter egg '{name}' - skipping")
         return None
-    resp = input("\n  Hide an easter egg in one shot? [Y/n]: ").strip().lower()
+    resp = _input_timeout("\n  Hide an easter egg in one shot? [Y/n]: ", 10.0, "y").lower()
     if resp in ("n", "no"):
         return None
+    if not resp or resp in ("y", "yes"):
+        print("  [EGG] defaulting to YES")
     eggs = _load_easter_eggs()
     names = list(eggs.keys())
     print("  Select an easter egg:")
     for i, n in enumerate(names, 1):
         print(f"    {i}. {n}")
     print(f"    {len(names)+1}. add new")
-    choice = input(f"  Choose [1-{len(names)+1}, or a name]: ").strip()
+    # Default to 'duck pope' after 10s if no answer (Joe 2026-08-13)
+    choice = _input_timeout(f"  Choose [1-{len(names)+1}, or a name]: ", 10.0, "duck pope").strip()
+    if not choice or choice.lower() == "duck pope":
+        if "duck pope" in [n.lower() for n in names]:
+            print("  [EGG] defaulting to 'duck pope'")
+            return "duck pope"
     if choice.lower() in ("add", "add new", "new", "custom", str(len(names)+1)):
-        newname = input("  Easter egg name: ").strip()
-        newprompt = input("  Easter egg prompt (describes the small background element): ").strip()
+        newname = _input_timeout("  Easter egg name: ", 10.0, "").strip()
+        newprompt = _input_timeout("  Easter egg prompt (describes the small background element): ", 10.0, "").strip()
         if newname and newprompt:
             add_easter_egg(newname, newprompt)
             return newname.lower()
@@ -653,6 +696,10 @@ def _ask_easter_egg() -> Optional[str]:
         return names[int(choice) - 1].lower()
     if choice.lower() in [n.lower() for n in names]:
         return choice.lower()
+    # Fall back to duck pope if we have it
+    if "duck pope" in [n.lower() for n in names]:
+        print("  [EGG] invalid choice - defaulting to 'duck pope'")
+        return "duck pope"
     print("  [EGG] invalid choice - no easter egg this episode")
     return None
 
@@ -694,16 +741,26 @@ def _fmt_timecode(seconds: float) -> str:
 
 def _easter_egg_report(shots: list[dict]) -> Optional[str]:
     """Where the hidden easter egg lands in the final video timecode. Returns a
-    human string, or None if no easter egg was injected."""
+    human string, or None if no easter egg was injected.
+
+    Uses the SAME timeline math as the render (_compute_clip_starts, which
+    applies the real per-shot pacing gaps via _pace_gaps_after). A naive flat
+    +0.3s-per-shot estimate drifts earlier than the actual video by ~0.7-1.3s
+    per shot, so the reported timecode didn't match where the egg really is
+    (Joe 2026-08-13). clip_starts only contains TTS-bearing shots, so we walk
+    the list and consume a start for each clip shot."""
     egg_shot = next((s for s in shots if s.get("easter_egg")), None)
     if not egg_shot:
         return None
+    starts = _compute_clip_starts(shots)
+    si = 0
     cursor = 0.0
     for s in shots:
-        if s.get("easter_egg"):
+        if s is egg_shot:
+            cursor = starts[si] if si < len(starts) else 0.0
             break
         if s.get("tts_path") and os.path.isfile(s["tts_path"]):
-            cursor += _get_audio_duration(s["tts_path"]) + 0.3
+            si += 1
     name = str(egg_shot.get("easter_egg", "easter egg"))
     return (f"[EASTER EGG] '{name}' is hidden in the shot at "
             f"{_fmt_timecode(cursor)} in the final video")
@@ -2057,6 +2114,12 @@ SECONDS_PER_NARRATION_PARA = 14.3
 DEFAULT_VIDEO_MINUTES = 25
 # Clamp the derived paragraph count so a bad/typo'd length can't blow up.
 MIN_PARAS, MAX_PARAS = 10, 400
+# Deterministic cap on sentences PER narration paragraph (Joe 2026-08-13).
+# The length prompt derives the paragraph count from SECONDS_PER_NARRATION_PARA
+# (measured on 2-4 sentence paragraphs), so each paragraph MUST stay within that
+# range or the video balloons past the requested length. _pace_narration trims
+# every paragraph to this many sentences; the writer prompt also asks for it.
+SENTENCES_PER_PARAGRAPH = 4
 # Cap on how many SENTENCES become shots (one shot per sentence, each with its
 # own image + TTS clip). Joe 2026-08-12: EVERY flattened TTS sentence must get
 # its own image - so this is set effectively UNCAPPED (matches MAX_PARAS). It
@@ -2448,50 +2511,70 @@ def _complete_truncated_paragraph(para: str, sys_prompt: str,
     return joined
 
 
-def _write_narration_paragraph(sys_prompt: str, section: str, ctx: str,
-                               dedup: str, k: int, per_para: int,
-                               max_attempts: int = 3) -> str:
-    """Generate ONE narration paragraph with a truncation guard: if the model
-    clips it mid-sentence we retry the full write (a fresh call lands a clean
-    paragraph almost always); only after exhausting attempts do we attempt a
-    targeted completion of the last clipped sentence. Returns a paragraph that
-    plays out in full, or '' if nothing usable was produced."""
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences (keep ? ! . boundaries), stripped."""
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+def _cap_paragraph_sentences(para: str, max_sents: int = SENTENCES_PER_PARAGRAPH) -> str:
+    """Deterministically trim a paragraph to at most max_sents sentences
+    (Joe 2026-08-13: without a hard sentence cap each 'paragraph' written by
+    the 4B model is really 4-6+ sentences, so a N-paragraph target balloons to
+    a 2-3x longer video than the length prompt promised)."""
+    sents = _split_sentences(re.sub(r"\s+", " ", para or "").strip())
+    if len(sents) <= max_sents:
+        return " ".join(sents)
+    return " ".join(sents[:max_sents])
+
+
+def _write_narration_block(sys_prompt: str, section: str, ctx: str, dedup: str,
+                           per_para: int, max_attempts: int = 3) -> list[str]:
+    """Generate ALL the narration paragraphs for ONE article paragraph in a
+    SINGLE LLM call, then split them by logic.
+
+    Joe 2026-08-13: writing each sub-paragraph in its own call lets the model
+    drift and repeat beats (especially near the end of a long video), and makes
+    the paragraph count ~meaningless for length because each returned 'paragraph'
+    is really several sentences. Instead we ask the model to write EXACTLY
+    per_para paragraphs of EXACTLY SENTENCES_PER_PARAGRAPH sentences each,
+    separated by blank lines, in one call; we split on blank lines and enforce
+    the sentence cap in code. Returns the cleaned paragraphs (already capped)."""
+    n_sents = SENTENCES_PER_PARAGRAPH
     user = (
         f"{section}\n\n"
         f"STORY CONTEXT (article excerpt):\n{ctx}\n\n"
-        f"You are writing narration paragraph {k + 1} of {per_para} that this "
-        f"article excerpt expands into.\n"
-        f"ALREADY WRITTEN for this section (do NOT repeat these beats - "
-        f"advance to a NEW one):\n{dedup}\n\n"
-        f"Generate exactly ONE narration paragraph. It MUST cover a DIFFERENT "
-        f"beat, fact, angle or cause-and-effect step than everything listed "
-        f"above - expand a fresh part of the excerpt with cinematic detail, "
-        f"sensory description and dramatic tension. Do NOT restate, rephrase "
-        f"or echo anything already written above. Output ONLY the raw "
-        f"narration paragraph - nothing else.\n"
-        f"IMPORTANT: end the paragraph with a complete sentence and terminal "
-        f"punctuation. Do NOT leave a sentence cut off or dangling."
+        f"ALREADY WRITTEN in the episode (do NOT repeat these beats - advance to "
+        f"NEW ones):\n{dedup}\n\n"
+        f"Write EXACTLY {per_para} narration paragraphs expanding THIS excerpt, "
+        f"separated by a BLANK LINE. Each paragraph must be EXACTLY {n_sents} "
+        f"sentences long (no more, no fewer).\n"
+        f"- Paragraph 1 covers the first beat/fact/angle of the excerpt.\n"
+        f"- Each subsequent paragraph advances to a DIFFERENT beat, fact, angle or "
+        f"cause-and-effect step - never restate, rephrase or echo paragraph 1 or "
+        f"anything in ALREADY WRITTEN.\n"
+        f"- Vary each paragraph's sentence length; end each paragraph on a complete "
+        f"sentence with terminal punctuation (never cut off or dangling).\n"
+        f"Output ONLY the {per_para} paragraphs separated by blank lines - nothing else."
     )
-    para = ""
     for attempt in range(max_attempts):
         raw = _llm_chat([{"role": "system", "content": sys_prompt},
                          {"role": "user", "content": user}],
-                        max_tokens=600, temp=0.85)
-        cand = _extract_first_clean_para(raw)
-        if cand and not _paragraph_is_truncated(cand):
-            return cand
-        para = cand or para
+                        max_tokens=600 * per_para, temp=0.85)
+        blocks = [b.strip() for b in re.split(r"\n\s*\n", raw or "")
+                  if b and b.strip()]
+        out = []
+        for b in blocks:
+            b = _cap_paragraph_sentences(b)
+            if b and not _paragraph_is_truncated(b):
+                out.append(b)
+        if len(out) >= per_para:
+            return out[:per_para]
+        # Not enough usable paragraphs -> regenerate
         if attempt < max_attempts - 1:
-            print("  [LLM] narration paragraph truncated - regenerating "
-                  f"(attempt {attempt + 2}/{max_attempts})")
+            print(f"  [LLM] narration block short ({len(out)}/{per_para}) - "
+                  f"regenerating (attempt {attempt + 2}/{max_attempts})")
             time.sleep(0.4)
-    # All full re-writes clipped. Try to complete the last sentence in place.
-    if para:
-        done = _complete_truncated_paragraph(para, sys_prompt, section, ctx)
-        if done and not _paragraph_is_truncated(done):
-            print("  [LLM] completed truncated narration tail")
-            return done
-    return para
+    return out
 
 
 def _pace_narration(paras: list[str], bible: Optional[dict] = None) -> list[str]:
@@ -2534,7 +2617,13 @@ def _pace_narration(paras: list[str], bible: Optional[dict] = None) -> list[str]
                     bands = ["short" if _sentence_words(x) < _MID_LEN_LO else
                              ("long" if _sentence_words(x) > _MID_LEN_HI else "mid")
                              for x in sents]
-        # 4. rebuild the paragraph (join with single spaces; keep sentence caps)
+        # 4. enforce the deterministic SENTENCE CAP (Joe 2026-08-13): the length
+        #    prompt's paragraph count assumes ~2-4 sentence paragraphs, so trim
+        #    any paragraph that ran longer back to SENTENCES_PER_PARAGRAPH to
+        #    stop the video ballooning past the requested minutes.
+        if len(sents) > SENTENCES_PER_PARAGRAPH:
+            sents = sents[:SENTENCES_PER_PARAGRAPH]
+        # 5. rebuild the paragraph (join with single spaces; keep sentence caps)
         out.append(" ".join(sents))
     return out
 
@@ -2695,30 +2784,21 @@ def _build_narration_script(paragraphs: list[str],
                        "action and the cause-and-effect chain. Vary every paragraph's "
                        "ending; never end consecutive paragraphs with a question or a "
                        "tease (rule 17).")
-        # Generate the per_para narration paragraphs ONE AT A TIME so each gets the
-        # paragraphs written before it for THIS article paragraph as context.
-        written_this_section = []  # sub-paragraphs produced for the current article para
-        for k in range(per_para):
-            # Dedupe block = the sibling sub-paragraphs already written for THIS
-            # article paragraph (highest priority) + the rolling cross-article tail.
-            same = [f"- {p[:160]}" for p in written_this_section[-2:]]
-            cross = [f"- {p[:160]}" for p in covered[-2:]]
-            dedup = "\n".join(same + cross) if (same or cross) else "None yet."
-            # Truncation-guarded write (Joe 2026-08-12): the 4B model clips the
-            # occasional paragraph mid-word, which was spoken verbatim as the
-            # "sentences cut off early" bug. _write_narration_paragraph retries
-            # clipped writes (and completes the tail as a last resort) so every
-            # spoken sentence plays out in its entirety.
-            p_clean = _write_narration_paragraph(
-                sys_prompt, section, ctx, dedup, k, per_para)
+        # Generate ALL the per_para narration paragraphs for this article
+        # paragraph in ONE LLM call (Joe 2026-08-13: per-paragraph calls drift
+        # and repeat beats near the end of a long video, and the returned
+        # 'paragraphs' balloon past the length target). The block writer asks
+        # for EXACTLY per_para paragraphs of EXACTLY SENTENCES_PER_PARAGRAPH
+        # sentences each and splits them on blank lines in code.
+        cross = [f"- {p[:160]}" for p in covered[-3:]]
+        dedup = "\n".join(cross) if cross else "None yet."
+        block = _write_narration_block(sys_prompt, section, ctx, dedup, per_para)
+        for k, p_clean in enumerate(block):
             if p_clean:
                 narration_paras.append(p_clean)
-                written_this_section.append(p_clean)
                 print(f"  [LLM] ({i+1}/{n_art}.{k+1}/{per_para}) {p_clean[:60]}...")
-            else:
-                print(f"  [LLM] ({i+1}/{n_art}.{k+1}/{per_para}) empty - skipped")
         # Roll the actual text into the cross-article dedupe tail.
-        covered.extend(written_this_section)
+        covered.extend([p for p in block if p])
         covered = covered[-4:]
         time.sleep(0.3)
 
@@ -2849,7 +2929,8 @@ def _generate_intro(paragraphs: list[str]) -> tuple[list[str], dict]:
     sys_prompt = (
         "You write the opening INTRO paragraph of a true-crime documentary, using "
         "the viral 'Split Node Shorts' 6-phase formula. Write EXACTLY ONE flowing, "
-        "natural paragraph (4-6 sentences, ~55-80 words) that moves smoothly through "
+        "natural paragraph of AT MOST 3 sentences (MANDATORY - never 4+, keep it "
+        "tight, ~30-60 words total) that moves smoothly through "
         "the formula in order: HOOK (grab attention), DECLARE (a big claim + a "
         "specific REAL number from the article summary), ASSESS (why this matters), "
         "ISOLATE (the central figure or situation), PROCESS (what is happening behind "
@@ -6199,6 +6280,19 @@ def _save_realref_failure(char_name: str):
         pass
 
 
+def _clear_realref_failure(char_name: str):
+    """Drop a character from the cached no-real-ref set so a fresh search is
+    attempted next time (used when a prior run had the internet off)."""
+    try:
+        fails = _load_realref_failures()
+        if char_name.lower() in fails:
+            fails.discard(char_name.lower())
+            _REALREF_FAIL_FILE.parent.mkdir(parents=True, exist_ok=True)
+            _REALREF_FAIL_FILE.write_text(json.dumps(sorted(fails)))
+    except Exception:
+        pass
+
+
 def _find_real_reference(char_name: str, role: str) -> Optional[str]:
     """Search GOOGLE IMAGES (SerpAPI, Openverse fallback) for a photo of the
     REAL person from the story and cache it to cast_refs/real/. Returns None
@@ -8706,6 +8800,69 @@ def _generate_all_tts(shots: list[dict], episode_num: int) -> None:
 
 # -- Audio mix: voice + music + timecoded SFX ------------------------
 
+def _build_music_chain(pool: list, target_dur: float, out_path: Path,
+                       xf: float = 2.0, max_clips: int = 24) -> bool:
+    """Build a continuous music bed from a tone pool by CROSSFADING DISTINCT
+    tracks back to back (cycling through the pool, not looping one track).
+
+    Each source clip plays to its NATURAL full length (never cut to a fixed
+    chunk, and never cut to a shot/sentence boundary - the music just runs),
+    then crossfades into the next distinct track until the section fills
+    ~target_dur. Writes out_path (24kHz mono PCM) and returns success.
+
+    Joe 2026-08-13: multiple music tracks rather than the same one over and
+    over - whole clips play out regardless of the shot/sentence, roughly 65%
+    suspense then 35% triumphant, NOT a separate clip per shot.
+    """
+    try:
+        segs = []
+        total = 0.0
+        i = 0
+        while total < target_dur and i < max_clips:
+            src = SFX_DIR / pool[i % len(pool)]
+            if not src.is_file():
+                i += 1
+                continue
+            d = _get_audio_duration(str(src))
+            if d <= 0:
+                i += 1
+                continue
+            seg = out_path.parent / f"{out_path.name}.s{i}.wav"
+            ok = subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-stream_loop", "-1",
+                 "-i", str(src), "-t", f"{d:.2f}",
+                 "-af", (f"afade=t=in:st=0:d={min(xf, d):.2f},"
+                         f"afade=t=out:st={max(d - xf, 0):.2f}:d={min(xf, d):.2f}"),
+                 "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(seg)],
+                capture_output=True, text=True, timeout=180).returncode == 0
+            if not ok or not seg.is_file():
+                i += 1
+                continue
+            segs.append(seg)
+            total += d
+            i += 1
+        if not segs:
+            return False
+        m = len(segs)
+        inputs = []
+        for s in segs:
+            inputs += ["-i", str(s)]
+        fc = []
+        for k in range(1, m):
+            prev = "[a0]" if k == 1 else f"[a{k-1}]"
+            outl = "[afin]" if k == m - 1 else f"[a{k}]"
+            fc.append(f"[{k-1}:a]{prev}acrossfade=d={xf}{outl}")
+        fc.append(f"[afin]atrim=0:{target_dur:.2f}[out]")
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error"] + inputs +
+            ["-filter_complex", ";".join(fc), "-map", "[out]",
+             "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(out_path)],
+            capture_output=True, text=True, timeout=300)
+        return r.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 1000
+    except Exception:
+        return False
+
+
 def _pace_gaps_after(shots: list[dict]) -> None:
     """Deterministic pacing: assign the silence GAP AFTER each shot's clip.
 
@@ -8841,40 +8998,26 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             except Exception as _ve:
                 print(f"  [AUDIO] WARN could not copy whisper voice track: {_ve}")
 
-        # -- Music bed: ONE continuous track, suspense 0-65% of the timeline
-        #    crossfading into triumphant 65%-end. No per-shot cuts, no per-shot
-        #    fades, no track cycling - the music runs uninterrupted under the
-        #    whole episode and SFX sit on top (user: 'music running continuously').
+        # -- Music bed: continuous, MULTIPLE distinct tracks. Suspense 0-65%
+        #    of the timeline crossfading into triumphant 65%-end. Within each
+        #    section the pool's tracks are crossfaded back-to-back at their
+        #    NATURAL length (no per-shot cuts, no fixed chunks, no single-track
+        #    loop) - the music just runs under the whole episode and SFX sit on
+        #    top (Joe 2026-08-13: multiple tracks, whole clips play out, ~65/35).
         music_segments = []  # fallback path only
         music_path = None
         try:
             suspense_pool = MUSIC_LIBRARY["suspense"]
             triumphant_pool = MUSIC_LIBRARY["triumphant"]
             section_cut = total_dur * 0.65
-            xf = 2.0  # crossfade seconds at the suspense->triumphant boundary
+            xf = 2.0  # crossfade seconds at each track boundary and at the style switch
 
-            def _pool_track(pool, idx):
-                t = pool[idx % len(pool)]
-                p = SFX_DIR / t
-                return p if p.is_file() else None
-
-            sus_src = _pool_track(suspense_pool, 0)
-            tri_src = _pool_track(triumphant_pool, 0)
-            if sus_src and tri_src and section_cut > 6 and (total_dur - section_cut) > 6:
+            if section_cut > 6 and (total_dur - section_cut) > 6:
                 sus_raw = temp_dir / "music_sus_raw.wav"
                 tri_raw = temp_dir / "music_tri_raw.wav"
                 music_raw = temp_dir / "music_cont.wav"
-                # stream_loop=-1 loops the source, -t trims to the section length
-                ok1 = subprocess.run(
-                    ["ffmpeg", "-y", "-v", "error", "-stream_loop", "-1",
-                     "-i", str(sus_src), "-t", f"{section_cut:.2f}",
-                     "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(sus_raw)],
-                    capture_output=True, text=True, timeout=180).returncode == 0
-                ok2 = subprocess.run(
-                    ["ffmpeg", "-y", "-v", "error", "-stream_loop", "-1",
-                     "-i", str(tri_src), "-t", f"{total_dur - section_cut:.2f}",
-                     "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(tri_raw)],
-                    capture_output=True, text=True, timeout=180).returncode == 0
+                ok1 = _build_music_chain(suspense_pool, section_cut, sus_raw, xf)
+                ok2 = _build_music_chain(triumphant_pool, total_dur - section_cut, tri_raw, xf)
                 if ok1 and ok2 and sus_raw.is_file() and tri_raw.is_file():
                     r = subprocess.run(
                         ["ffmpeg", "-y", "-v", "error",
@@ -8893,9 +9036,11 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                         capture_output=True, text=True, timeout=300)
                     if r.returncode == 0 and music_raw.is_file() and music_raw.stat().st_size > 1000:
                         music_path = str(music_raw)
-                        print(f"  [AUDIO] Music: ONE continuous bed - suspense "
-                              f"0-{section_cut:.0f}s, {xf:.0f}s crossfade into triumphant "
-                              f"to {total_dur:.0f}s, -{abs(MUSIC_DB):.0f}dB, no per-shot cuts")
+                        print(f"  [AUDIO] Music: multi-track continuous bed - "
+                              f"suspense 0-{section_cut:.0f}s, {xf:.0f}s crossfade into "
+                              f"triumphant to {total_dur:.0f}s, "
+                              f"x{len(suspense_pool)}/{len(triumphant_pool)} tracks, "
+                              f"-{abs(MUSIC_DB):.0f}dB, no per-shot cuts")
         except Exception as e:
             print(f"  [AUDIO] Continuous music bed failed ({e}) - using fallback")
 
@@ -10039,7 +10184,6 @@ def _generate_titles(topic: str, episode_num: int,
         {"role": "system", "content": (
             "You are a viral YouTube title generator for 'Split Node' - a channel about "
             "ordinary people who beat the system. Write 6 clickbaity titles. "
-            "Each starts with '#XXX - ' where XXX is the episode number. "
             "Use the FERN formula: each title must IMPLICITLY promise the story's "
             "VISUAL HOOK (the striking thing the viewer will see) and tease the "
             "DEEPER QUESTION (the 'how did this happen / why' the episode answers) "
@@ -10047,7 +10191,9 @@ def _generate_titles(topic: str, episode_num: int,
             "2 each: (a) curiosity-driven - a mystery or tease the episode answers, "
             "(b) number-driven - lead with an exact figure/amount from the story, "
             "(c) outcome-driven - the transformation, the win, or the price paid. "
-            "Keep each under 70 characters INCLUDING the episode prefix. Reference "
+            "Do NOT include any episode number or '#XXX' prefix - these are the "
+            "public YouTube titles and must stand alone with just the clickbaity "
+            "text. Keep each under 70 characters. Reference "
             "the story directly. Return ONLY 6 lines, one title per line, no numbering."
         )},
         {"role": "user", "content": (
@@ -10060,16 +10206,15 @@ def _generate_titles(topic: str, episode_num: int,
     ]
     text = _llm_chat(msg, max_tokens=250, temp=0.85)
     titles = [t.strip() for t in text.split("\n") if t.strip()]
-    prefix = f"#{episode_num:03d} -"
     result = []
     for t in titles:
-        if not t.startswith("#"):
-            t = f"{prefix} {t}"
-        elif prefix not in t:
-            t = f"{prefix} {t.lstrip('#0123456789').lstrip('- ')}"
-        result.append(t)
+        # Defensively strip any episode-number prefix the model still emits
+        t = re.sub(r"^#\s*\d+\s*[-:]\s*", "", t.strip())
+        t = re.sub(r"^\d+\s*[-:]\s*", "", t.strip())
+        if t:
+            result.append(t)
     while len(result) < 6:
-        result.append(f"{prefix} The {topic[:40]} story that broke the system")
+        result.append(f"The {topic[:40]} story that broke the system")
     result = result[:6]
 
     # Score the 3 titles against REAL Google Trends demand + YouTube competition
@@ -11143,6 +11288,56 @@ def _reclaim_orphaned_codex_images(shots: list[dict], ep_shot_dir) -> int:
     return reclaimed
 
 
+def _retry_realref_before_render(shots: list[dict]) -> int:
+    """Retry real-person photo downloads for codex/fal runs just before ffmpeg.
+
+    Joe 2026-08-13: when the internet was off during image generation, every
+    person's real photo failed to download and got cached as 'no-real-ref', so
+    all shots rendered without a real face. This pass re-runs the download for
+    any character that is cached as a failure (and has no usable ref on disk),
+    and if a ref now succeeds it flags the affected shots so the shot loop
+    below regenerates them with the real face. Returns how many refs were
+    freshly obtained."""
+    if not shots:
+        return 0
+    fails = _load_realref_failures()
+    if not fails:
+        return 0
+    # Unique characters that are cached as no-real-ref across the shot list.
+    chars: set[str] = set()
+    for s in shots:
+        for ch in _parse_shot_characters(s):
+            n = ch["name"].strip()
+            if n and n.lower() in fails:
+                chars.add(n)
+    if not chars:
+        return 0
+    got = 0
+    for name in sorted(chars):
+        # Clear the cached failure and force a fresh search (the photo file
+        # may already exist from a later successful run, in which case
+        # _find_real_reference just reuses it).
+        _clear_realref_failure(name)
+        role = next((s.get("character_role", "") for s in shots
+                     if any(c["name"].lower() == name.lower()
+                            for c in _parse_shot_characters(s))), "")
+        ref = _find_real_reference(name, role)
+        if ref and os.path.isfile(ref):
+            got += 1
+            # Flag every shot featuring this person so the shot loop below
+            # regenerates them with the real-face ref instead of skipping
+            # because an image already exists.
+            for s in shots:
+                if any(c["name"].lower() == name.lower()
+                       for c in _parse_shot_characters(s)):
+                    s["_force_regen_realref"] = True
+            print(f"  [REALREF] retry ok: {name} -> {os.path.basename(ref)} "
+                  f"(shots flagged for regen)")
+        else:
+            print(f"  [REALREF] retry still failed: {name}")
+    return got
+
+
 def _regen_missing_images_before_render(episode_num: int, shots: list[dict],
                                         character_sheets: dict, topic: str,
                                         brand_assets: Optional[dict] = None) -> tuple:
@@ -11195,12 +11390,22 @@ def _regen_missing_images_before_render(episode_num: int, shots: list[dict],
     except Exception as _re:
         print(f"  [PRE-RENDER] orphan reclaim skipped: {_re}")
 
+    # REAL-PERSON PHOTO RETRY (Joe 2026-08-13): if the codex/fal backend uses
+    # real photo refs and the internet was off when images were generated, every
+    # shot rendered without its person's real face (cached as no-real-ref).
+    # Retry the downloads here BEFORE ffmpeg; any that now succeed force the
+    # affected shots to regenerate so the final video has the real faces.
+    if _active_image_backend() in ("codex", "fal"):
+        _retried = _retry_realref_before_render(shots)
+        if _retried:
+            print(f"  [PRE-RENDER] retried {_retried} real-person photo ref(s)")
+
     # Shot images.
     for idx, s in enumerate(shots):
         if s.get("is_chapter"):
             continue
         p = s.get("image_path") or ""
-        if p and os.path.isfile(p):
+        if p and os.path.isfile(p) and not s.get("_force_regen_realref"):
             continue
         seq = int(s.get("seq", 0) or (s.get("narration_idx", idx) + 1))
         fname = _shot_filename(s, seq)
@@ -11732,7 +11937,7 @@ def _resume_episode(state: dict) -> None:
     if video_id:
         print(f"  [RESUME] Already uploaded: https://youtu.be/{video_id}")
     elif YOUTUBE_UPLOAD_ENABLED:
-        title = titles[0] if titles else f"#{episode_num:03d} - {topic[:60]}"
+        title = titles[0] if titles else f"{topic[:60]}"
         print(f"  Title: {title}")
         video_id = _upload_video_with_progress(video_path, title, description, tags_str)
         if video_id and thumb_ok:
@@ -12329,7 +12534,7 @@ def _phase_finish(ep_ctx: dict) -> None:
     if YOUTUBE_UPLOAD_ENABLED:
         print(f"\n  {'='*50}\n  YOUTUBE UPLOAD ({CHANNEL_NAME})\n  {'='*50}")
         print(f"  Video: {video_path}")
-        title = titles[0] if titles else f"#{episode_num:03d} - {topic[:60]}"
+        title = titles[0] if titles else f"{topic[:60]}"
         print(f"  Title: {title}")
         _ensure_youtube_secret()
         _privacy = os.environ.get("YOUTUBE_PRIVACY", "public").strip().lower()

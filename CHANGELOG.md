@@ -2,6 +2,54 @@
 
 All notable changes to Split Node.
 
+## [1.47.0] - 2026-08-13
+
+### YouTube titles drop the episode number
+
+Joe 2026-08-13: episode numbers stay internal (folders, filenames, resume
+state, descriptions) but the public YouTube video titles no longer carry the
+`#NNN - ` prefix. `_generate_titles` stops emitting the prefix (and defensively
+strips any the model still adds); the upload fallback titles dropped it too.
+
+### Deterministic video length (no more ballooning)
+
+Joe 2026-08-13: a requested length now actually lands. Previously the length
+prompt converted minutes -> paragraphs assuming ~14.3s/paragraph (2-4
+sentences), but the 4B model wrote 4-6+ sentences per "paragraph", so a 7-min
+request could render ~25 min. Fixes:
+- `SENTENCES_PER_PARAGRAPH = 4` hard cap enforced in `_pace_narration`
+  (`_cap_paragraph_sentences`), so paragraph count maps to real duration.
+- `_write_narration_block` replaces the one-paragraph-per-call writer: ONE LLM
+  call per article paragraph asks for EXACTLY N paragraphs of EXACTLY N
+  sentences each, split on blank lines in code. This kills both the end-of-
+  video beat repetition and the length blowup.
+- Intro capped at 3 sentences (was 4-6).
+
+### Multi-track music bed (65% suspense / 35% triumphant)
+
+Joe 2026-08-13: the continuous music bed now CROSSFADES DISTINCT tracks back
+to back at their natural length instead of looping one track per section.
+`_build_music_chain` cycles the suspense pool for the first ~65% of the
+timeline, crossfades into the triumphant pool for the final ~35%. Whole clips
+play out - no per-shot cuts, no single-track repetition.
+
+### Unattended easter-egg defaults
+
+Joe 2026-08-13: the easter-egg prompt no longer hangs an unattended run.
+`_input_timeout` (msvcrt non-blocking stdin) falls through to defaults: no
+answer to "Hide an easter egg?" in 10s -> YES; no answer to the egg choice in
+another 10s -> 'duck pope'. Invalid choices also fall back to duck pope.
+
+### Pre-render self-healing (chapter cards + real photos)
+
+Joe 2026-08-13: before ffmpeg, if the internet was off during image gen the
+pipeline now heals itself:
+- Missing/black chapter cards are regenerated (already handled, confirmed).
+- NEW `_retry_realref_before_render`: real-person photo downloads that were
+  cached as `no-real-ref` (internet off) are retried; any that now succeed flag
+  the affected shots (`_force_regen_realref`) so they regenerate with the real
+  face instead of being skipped because an image already exists.
+
 ## [1.46.1] - 2026-08-13
 
 ### Two-voice narration: announcement intro + storytelling body
