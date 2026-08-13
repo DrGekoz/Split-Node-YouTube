@@ -5234,7 +5234,10 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     if _active_image_backend() == "codex":
         codex_hard = (
             " Use the attached reference photo(s) ONLY for each person's face "
-            "and identity - keep their likeness true to the reference. Render a "
+            "and identity - keep their likeness true to the reference. "
+            "Use the face image as reference only - do not copy it directly "
+            "rather use it as inspiration to get the face of the person looking "
+            "correct. Render a "
             "SINGLE clean cinematic frame: one person per subject, whole bodies "
             "composed in one scene, NO multi-panel grid, NO character sheet, "
             "NO side-by-side thumbnails, NO repeated copies of the same person, "

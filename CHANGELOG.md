@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.45.3] - 2026-08-13
+
+### Codex face reference is inspiration, not a copy source
+
+When `IMAGE_BACKEND=codex`, the shot prompt now explicitly tells the model the
+attached face reference is guidance only - "use the face image as reference
+only - do not copy it directly rather use it as inspiration to get the face of
+the person looking correct" - so likeness comes through without the model
+copying the ref verbatim into the cinematic frame.
+
 ## [1.45.2] - 2026-08-12
 
 ### Every narration sentence gets its own image (shot cap removed)
