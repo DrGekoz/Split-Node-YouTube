@@ -2,6 +2,25 @@
 
 All notable changes to Split Node.
 
+## [1.46.1] - 2026-08-13
+
+### Two-voice narration: announcement intro + storytelling body
+
+Joe 2026-08-13: the narrator now uses TWO cloned voices cut from the SAME
+source video (`7AfSuJfFkMY`, "Dark Confession Threads" by Snook):
+- `voice_refs/split_node_intro.wav` = the START of the video (announcement
+  style) -> the episode INTRO is spoken in this voice, so it sounds like an
+  announcement.
+- `voice_refs/split_node_story.wav` = the MIDDLE of the video (storytelling
+  style) -> everything from chapter 1 onwards is spoken in this more
+  storytelling voice.
+
+`_tts_worker` (and the resume gap-fill / render-time repair paths) pick the
+voice by narration index: the leading `intro_count` sentences use `INTRO_VOICE`,
+the rest use `STORY_VOICE`. `intro_count` is computed from the prepended intro
+paragraph and persisted in the resume state so a resume regenerates any missing
+clip with the correct voice. `TTS_VOICE` now defaults to the storytelling voice.
+
 ## [1.46.0] - 2026-08-13
 
 ### Intro is ONE natural paragraph (no more stilted 7-beat list)

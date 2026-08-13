@@ -131,10 +131,18 @@ FAL_API_KEY = os.environ.get("FAL_API_KEY", "")
 RUNPOD_API_KEY = os.environ.get("RUNPOD_API_KEY", "")
 RUNPOD_ENDPOINT = "https://api.runpod.ai/v2/z-image-turbo/runsync"
 
-# TTS: custom cloned voice ref (from youtube.com/shorts/wBJdFVdCCyM).
-# When TTS_VOICE is a file path it is uploaded as voice_wav (clone); a bare
+# TTS: TWO custom cloned voice refs (Joe 2026-08-13) cut from the SAME source
+# video (7AfSuJfFkMY, "Dark Confession Threads" by Snook):
+#   - split_node_intro.wav = the START of the video (announcement style) -> the
+#     episode INTRO is spoken in this voice so it sounds like an announcement.
+#   - split_node_story.wav = the MIDDLE of the video (storytelling style) -> the
+#     episode from chapter 1 onwards is spoken in this more storytelling voice.
+# When the voice value is a file path it is uploaded as voice_wav (clone); a bare
 # name (e.g. "alba") selects a built-in PocketTTS catalog voice via voice_url.
-TTS_VOICE = str(PROJECT_DIR / "voice_refs" / "split_node.wav")
+INTRO_VOICE = str(PROJECT_DIR / "voice_refs" / "split_node_intro.wav")
+STORY_VOICE = str(PROJECT_DIR / "voice_refs" / "split_node_story.wav")
+# Default narrator = the storytelling voice (chapter 1 onwards).
+TTS_VOICE = STORY_VOICE
 
 # Channel / branding
 CHANNEL_NAME = "Split Node"
@@ -8524,7 +8532,8 @@ def _normalize_voice_0db(wav_path: str) -> str:
     return wav_path
 
 def _tts_worker(narration_paras: list[str], episode_num: int,
-                results: dict, stop: threading.Event) -> None:
+                results: dict, stop: threading.Event,
+                intro_count: int = 0) -> None:
     """Background worker: queue EVERY narration paragraph into the PocketTTS
     server, one at a time, with retries. Runs concurrently with the shot list,
     character sheets and image generation (the big time win of the pipeline).
@@ -8532,6 +8541,11 @@ def _tts_worker(narration_paras: list[str], episode_num: int,
     results[i] = path of the finished clip (or None on failure). Files are
     named by NARRATION index (narration_{i:02d}.wav) so they map 1:1 to shots
     via shot['narration_idx'] even when shot parsing skips a paragraph.
+
+    Two-voice narration (Joe 2026-08-13): the first `intro_count` sentences
+    (the episode INTRO) are spoken with INTRO_VOICE (announcement, video start);
+    everything from chapter 1 onwards uses STORY_VOICE (storytelling, video
+    middle).
     """
     ep_dir = _ep_tts_dir(episode_num)
     ep_dir.mkdir(parents=True, exist_ok=True)
@@ -8544,33 +8558,39 @@ def _tts_worker(narration_paras: list[str], episode_num: int,
             results[i] = out
             print(f"  [TTS {i+1}/{len(narration_paras)}] reused ({_get_audio_duration(out):.1f}s)")
             continue
+        voice = INTRO_VOICE if i < intro_count else STORY_VOICE
         ok = False
         for attempt in range(3):
-            if _pocket_tts_generate(text, out):
+            if _pocket_tts_generate(text, out, voice=voice):
                 _normalize_voice_0db(out)
                 ok = os.path.isfile(out) and os.path.getsize(out) > 1000
                 if ok:
                     _tts_map_record(ep_dir, i, text)
                     break
             time.sleep(1 + attempt)
+        tag = "INTRO" if i < intro_count else "STORY"
         if ok:
             results[i] = out
-            print(f"  [TTS {i+1}/{len(narration_paras)}] {_get_audio_duration(out):.1f}s - {text[:50]}...")
+            print(f"  [TTS {i+1}/{len(narration_paras)}] {tag} {_get_audio_duration(out):.1f}s - {text[:50]}...")
         else:
             results[i] = None
-            print(f"  [TTS {i+1}/{len(narration_paras)}] FAILED after retries - {text[:50]}...")
+            print(f"  [TTS {i+1}/{len(narration_paras)}] {tag} FAILED after retries - {text[:50]}...")
         time.sleep(0.2)
 
 
-def _start_tts_worker(narration_paras: list[str], episode_num: int):
+def _start_tts_worker(narration_paras: list[str], episode_num: int,
+                      intro_count: int = 0):
     """Kick off TTS generation in a background thread. Returns (thread, results,
-    stop_event). Join the thread before rendering."""
+    stop_event). Join the thread before rendering. intro_count = number of
+    leading sentences spoken with INTRO_VOICE (announcement)."""
+    n_intro = max(0, min(intro_count, len(narration_paras)))
     print(f"\n[TTS] Queueing {len(narration_paras)} narration clips into PocketTTS "
-          f"({TTS_VOICE}) in the background...")
+          f"(intro: {n_intro} x {INTRO_VOICE}, rest: {STORY_VOICE}) in the background...")
     results: dict[int, Optional[str]] = {}
     stop = threading.Event()
     t = threading.Thread(target=_tts_worker,
-                         args=(narration_paras, episode_num, results, stop),
+                         args=(narration_paras, episode_num, results, stop,
+                               n_intro),
                          daemon=True)
     t.start()
     return t, results, stop
@@ -8644,7 +8664,9 @@ def _ensure_all_tts_before_render(shots: list[dict], episode_num: int) -> int:
         if path and os.path.isfile(path) and os.path.getsize(path) > 1000:
             continue
         voice = _lookup_voice(s.get("character", "NONE"))
-        char = bool(voice) and not s.get("is_chapter")
+        if not voice and nidx < _state_intro_count(episode_num):
+            voice = INTRO_VOICE  # announcement intro voice (Joe 2026-08-13)
+        char = bool(voice) and not s.get("is_chapter") and voice != INTRO_VOICE
         out = str(ep_dir / f"narration_{nidx:02d}{'_char' if char else ''}.wav")
         if _tts_clip_matches(ep_dir, nidx, narr, char=char, path=out):
             s["tts_path"] = out
@@ -8669,8 +8691,10 @@ def _generate_all_tts(shots: list[dict], episode_num: int) -> None:
     for idx, shot in enumerate(shots):
         nidx = shot.get("narration_idx", idx)
         out = str(ep_dir / f"narration_{nidx:02d}.wav")
-        ok = _pocket_tts_generate(shot["narration"], out,
-                                  voice=_lookup_voice(shot.get("character", "NONE")))
+        voice = _lookup_voice(shot.get("character", "NONE"))
+        if not voice and nidx < _state_intro_count(episode_num):
+            voice = INTRO_VOICE  # announcement intro voice (Joe 2026-08-13)
+        ok = _pocket_tts_generate(shot["narration"], out, voice=voice)
         if ok:
             _normalize_voice_0db(out)
             dur = _get_audio_duration(out)
@@ -10578,7 +10602,8 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
                        bible: Optional[dict] = None,
                        sentence_para_map: Optional[dict] = None,
                        establishing_map: Optional[dict] = None,
-                       resume_file: Optional[Path] = None) -> None:
+                       resume_file: Optional[Path] = None,
+                       intro_count: int = 0) -> None:
     """Save episode state so it can be resumed if interrupted."""
     state = {
         "version": 3,
@@ -10610,6 +10635,11 @@ def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topi
         "bible": bible or {},
         "sentence_para_map": sentence_para_map or {},
         "establishing_map": establishing_map or {},
+        # Two-voice narration (Joe 2026-08-13): number of leading narration
+        # sentences spoken in the announcement INTRO_VOICE (video start); the
+        # rest use the storytelling STORY_VOICE (video middle). Persisted so a
+        # resume regenerates missing clips with the correct voice.
+        "intro_count": int(intro_count or 0),
     }
     try:
         rf = resume_file or _resume_file_for(episode_num)
@@ -10672,6 +10702,19 @@ def _load_resume_state() -> Optional[dict]:
         except Exception:
             continue
     return None
+
+
+def _state_intro_count(episode_num: int) -> int:
+    """intro_count for an episode from its resume state (falls back to 0 when
+    absent/mismatched). Used by render-time / sequential TTS repair paths so a
+    regenerated missing INTRO clip is spoken in the announcement voice."""
+    try:
+        st = _load_resume_state()
+        if st and int(st.get("episode_num", -1)) == int(episode_num):
+            return int(st.get("intro_count", 0) or 0)
+    except Exception:
+        pass
+    return 0
 
 
 def _clear_resume_state(episode_num: int = 0, resume_file: Optional[Path] = None) -> None:
@@ -10912,7 +10955,7 @@ def _rebuild_script_for_resume(state: dict) -> dict:
 
 
 def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
-                         save_cb) -> None:
+                         save_cb, intro_count: int = 0) -> None:
     """Gap-fill TTS for a resume: reuse any narration clip already on disk and
     generate only what's missing. Runs BEFORE image generation (Joe 2026-08-09)
     so images aren't generated against missing audio. Matches both the narrator
@@ -10963,7 +11006,13 @@ def _resume_tts_gap_fill(shots: list[dict], episode_num: int, regen_tts: bool,
             _voice = _lookup_voice(shot.get("character", "NONE"))
             out = str(ep_dir / f"narration_{nidx:02d}.wav")
             _is_char = False
-            if _voice:
+            # Two-voice narration (Joe 2026-08-13): a missing INTRO sentence
+            # (no character clone, narration_idx < intro_count) is re-spoken in
+            # the announcement INTRO_VOICE; everything else uses the character
+            # clone voice if present, else the storytelling STORY_VOICE.
+            if not _voice and intro_count and nidx < intro_count:
+                _voice = INTRO_VOICE
+            elif _voice:
                 out = str(ep_dir / f"narration_{nidx:02d}_char.wav")
                 _is_char = True
             shot["tts_path"] = out
@@ -11373,7 +11422,8 @@ def _resume_episode(state: dict) -> None:
     # 0. TTS GAP-FILL FIRST (Joe 2026-08-09): generate any missing narration
     #    clips BEFORE image generation, so images are never rendered against
     #    audio that doesn't exist yet. Reuses clips already on disk.
-    _resume_tts_gap_fill(shots, episode_num, regen_tts, _save)
+    _resume_tts_gap_fill(shots, episode_num, regen_tts, _save,
+                         intro_count=int(state.get("intro_count", 0) or 0))
 
     # 1. Images: regenerate only the missing ones (same seeds -> same look),
     #    or ALL of them when REGEN_IMAGES=1 (a style change forces this so the
@@ -12105,6 +12155,15 @@ def _phase_llm(config: dict):
     prop_assets = _build_prop_assets(
         context, 43000 + episode_num * 7, _episode_dir(episode_num), brands=brands)
 
+    # Two-voice narration (Joe 2026-08-13): the leading intro sentence(s) speak
+    # in the announcement INTRO_VOICE; chapter 1 onwards uses STORY_VOICE. The
+    # count is persisted in the resume state so a resume regenerates missing
+    # clips with the correct voice.
+    _intro_count = 0
+    if intro:
+        _intro_count = len([_s for _s in
+                            re.split(r"(?<=[.!?])\s+", intro[0]) if _s.strip()])
+
     _save_resume_state("story", episode_num, article_url, topic, shots,
                        character_sheets, chapter_events=chapter_events,
                        anchor_events=anchor_events,
@@ -12112,15 +12171,17 @@ def _phase_llm(config: dict):
                        target_paras=target_paras,
                        narration=narration, context=context, bible=bible,
                        sentence_para_map=sentence_para_map,
-                       establishing_map=establishing_map)
+                       establishing_map=establishing_map,
+                       intro_count=_intro_count)
 
     # START TTS AFTER all LLM work is done (Joe 2026-08-12): PocketTTS shares the
     # GPU with LM Studio, so it must not run while the shot-list/world LLM calls
     # are in flight. Starting it here means it runs concurrently with the API/cloud
     # image generation (_phase_images) with the LLM already idle.
-    tts_thread, tts_results, tts_stop = _start_tts_worker(narration, episode_num)
+    tts_thread, tts_results, tts_stop = _start_tts_worker(
+        narration, episode_num, intro_count=_intro_count)
     print(f"  [TTS] worker started after shot-list/world LLM work "
-          f"({len(narration)} clips)")
+          f"({len(narration)} clips, {_intro_count} intro in announcement voice)")
 
     return {
         "config": config,
