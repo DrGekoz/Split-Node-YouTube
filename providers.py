@@ -378,8 +378,37 @@ class Codex:
         for ref in (ref_images or []):
             if ref and os.path.isfile(ref):
                 ref_args += " -i " + _ps_quote(os.path.abspath(ref))
-        p_quoted = _ps_quote("/imagegen " + prompt)
-        ps_cmd = (f"echo {p_quoted} | codex exec --skip-git-repo-check "
+        # Feed the prompt via a temp FILE, not the command line (Joe's ep014
+        # fix): embedding a multi-KB prompt with double-quotes inside
+        # `echo '<prompt>' | codex` pushes the powershell.exe -Command string
+        # past its argument-parser limit -> PowerShell raises "The string is
+        # missing the terminator: \"" and the call dies in ~0s (rc=1, no
+        # output). Short prompts slipped through, but real 4-5KB shot prompts
+        # failed every time. Writing `/imagegen <prompt>` to a temp file and
+        # piping it in via Get-Content keeps the command line tiny and immune
+        # to quote/length issues. The temp file is removed in every path below
+        # (success, timeout, and any early return) so nothing lingers.
+        _tmp = None
+        _payload = "/imagegen " + prompt
+        try:
+            import tempfile
+            import uuid
+            _tmp = os.path.join(tempfile.gettempdir(),
+                                f"codex_payload_{uuid.uuid4().hex[:8]}.txt")
+            with open(_tmp, "w", encoding="utf-8") as _f:
+                _f.write(_payload)
+        except Exception as _e:
+            print(f"  [CODEX] could not write prompt temp file: {_e}")
+            return False
+
+        def _del_tmp():
+            if _tmp:
+                try:
+                    os.remove(_tmp)
+                except Exception:
+                    pass
+
+        ps_cmd = (f"Get-Content -Raw '{_tmp}' | codex exec --skip-git-repo-check "
                   f"{ref_args}")
         cmd = ["powershell.exe", "-NoProfile", "-Command", ps_cmd]
         print(f"  [CODEX] running codex exec /imagegen"
@@ -389,7 +418,13 @@ class Codex:
                                   timeout=timeout)
         except subprocess.TimeoutExpired:
             print("  [CODEX] timed out generating image")
+            _del_tmp()
             return False
+
+        # Temp prompt file was consumed by Get-Content during the run - drop it
+        # now so it's cleaned up on every remaining path (success, rate-limit,
+        # copy failure, etc). Joe's rule: the helper cleans up after itself.
+        _del_tmp()
 
         # Claim the output for THIS call DETERMINISTICALLY (Joe 2026-08-09).
         # Codex prints "Saved at: <path>" in its stdout, naming the exact file

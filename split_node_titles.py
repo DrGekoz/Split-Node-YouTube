@@ -183,44 +183,23 @@ def _chapter_events(ev, W, H, fps) -> list[str]:
              f"\\t({int(pop*1000)},{int(pop*1000)+350},\\fscx(100)\\fscy(100))}}{kicker}")
     lines.append(_dialog(ev["start"], ev["end"], "ChapKicker", kcore, layer=3))
 
-    # ---- TITLE TEXT at 0.70H - TYPEWRITER REVEAL (Joe 2026-08-12) ----
-    # The chapter title types out character-by-character (Bahnschrift chap_size)
-    # with a blinking block cursor during the hold, so it matches the
-    # typewriter click SFX and reads like the location/person cards - instead of
-    # the old scale-pop. The "CHAPTER N" kicker above keeps its glow-pop.
+    # ---- TITLE TEXT at 0.70H - SINGLE-LINE pop reveal (Joe 2026-08-13) ----
+    # Was a per-char \pos typewriter: PIL-measured advances disagreed with
+    # libass, so the proportional font rendered with gaps and the yellow glow
+    # ghost sat misaligned behind the typed chars -> hard to read. Now the whole
+    # title is ONE dialogue anchored \an5 at the centre: libass lays out the
+    # font with correct spacing (no gaps) and the glow hugs the text exactly.
     cfs = int(H * 0.075)                 # ~81px @1080 (same as chap_size)
-    text_y = int(H * 0.70 - cfs / 2)     # top edge so the block is centred on 0.70H
-    tw_start = ev["start"] + 0.15        # kicker pops first, then the title types
+    ty = int(H * 0.70)
     ttext = (title or "").upper().replace("\\", "\\\\").replace("{", "(").replace("}", ")")
-    total_w = _text_width("Bahnschrift", cfs, ttext)
-    widths = [_char_advance("Bahnschrift", cfs, ch) for ch in ttext]
-    n = max(len(ttext), 1)
-    tstep = 0.8 / n                      # per-char typewriter delay
-    t_x = W / 2 - total_w / 2            # left edge so the whole title is centred
-    # Soft cyan glow ghost behind the typed title (depth) - fades in with the card.
-    ghost = (f"{{\\an7\\pos({t_x:.1f},{text_y})\\fs{cfs}\\blur(14)\\bord(2)"
-             f"\\1c&H0000D7FF&\\alpha&H78&\\t(0,{int(pop*1000)},\\alpha&H60&)}}{ttext}")
+    tpop = pop
+    # Yellow glow ghost behind the title - same \an5 anchor so it's concentric.
+    ghost = (f"{{\\an5\\pos({W//2},{ty})\\fs{cfs}\\blur(14)\\bord(2)\\1c&H0000D7FF&\\alpha&H78&"
+             f"\\fscx(60)\\fscy(60)\\t(0,{int(tpop*1000)},\\fscx(100)\\fscy(100)\\alpha&H60&)}}{ttext}")
     lines.append(_dialog(ev["start"], ev["end"], "ChapGlow", ghost, layer=1))
-    for i, ch in enumerate(ttext):
-        if ch == " ":
-            t_x += widths[i]
-            continue
-        t_show = tw_start + i * tstep
-        tags = (f"{{\\an7\\pos({t_x:.1f},{text_y})\\fs{cfs}\\bord(3)\\3c&H000000&"
-                f"\\shad(0)\\blur(0.4)\\alpha&HFF&"
-                f"\\t({int((t_show-ev['start'])*1000)},"
-                f"{int((t_show-ev['start'])*1000)+110},\\alpha&H00&)}}")
-        lines.append(_dialog(t_show, ev["end"], "ChapCore", tags + ch, layer=4))
-        t_x += widths[i]
-    # Blinking block cursor after the typed title during the hold.
-    cx = W / 2 - total_w / 2 + total_w + 4
-    blink = "".join(
-        f"\\t({k*400},{k*400+200},\\alpha&H00&)\\t({k*400+200},{k*400+400},\\alpha&HFF&)"
-        for k in range(12))
-    cursor = (f"{{\\an7\\pos({cx:.1f},{text_y})\\fs{cfs}\\1c&HFFFFFF&\\bord(1)"
-              f"\\blur(0.4)\\alpha&HFF&{blink}}}"
-              f"{{\\alpha&H00&}}_")
-    lines.append(_dialog(tw_start + 0.8, ev["end"], "ChapCore", cursor, layer=4))
+    core = (f"{{\\an5\\pos({W//2},{ty})\\fs{cfs}\\bord(3)\\3c&H000000&\\shad(0)\\blur(0.4)\\alpha&HFF&"
+            f"\\fscx(70)\\fscy(70)\\t(0,{int(tpop*1000)},\\fscx(100)\\fscy(100)\\alpha&H00&)}}{ttext}")
+    lines.append(_dialog(ev["start"], ev["end"], "ChapCore", core, layer=4))
     return lines
 
 

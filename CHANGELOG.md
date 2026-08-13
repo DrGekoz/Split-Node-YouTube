@@ -2,6 +2,65 @@
 
 All notable changes to Split Node.
 
+## [1.46.0] - 2026-08-13
+
+### Intro is ONE natural paragraph (no more stilted 7-beat list)
+
+Joe 2026-08-13: the intro used to be 7 separate punchy sentences (a JSON array)
+which read like a checklist. Now the article is summarized ONE paragraph at a
+time (each paragraph -> its own one-line summary, saved), then ALL the summaries
+are sent as context to a single intro call along with the intro rules, and the
+model writes ONE flowing ~4-6 sentence paragraph that moves through the Split
+Node Shorts 6-phase formula naturally (HOOK -> DECLARE -> ASSESS -> ISOLATE ->
+PROCESS -> BUILD -> loop-tease). It still flattens into per-sentence shots and
+keeps up to 2 key-sentence highlights with real key words.
+
+### Key-word titles show REAL words, not 3 characters
+
+Joe 2026-08-13: the 4B LLM frequently returned key_words as single characters
+('c','o','l') so the on-screen highlight read as 3 letters. New `_sanitize_key_words`
+keeps only items that are whole-word substrings of the key sentence and, when
+nothing survives, falls back to the 2-3 most distinctive content words of the
+sentence. Applied to both the narration plan and the intro.
+
+### Character detection + real-person reference hardening
+
+Joe 2026-08-13: the shot-list model sometimes wrote the character field as
+'ION CECAN, NONE' or 'Robert Pagliarini, attorney, tax person, financial adviser'.
+Those polluted tokens showed up verbatim in the bottom-left person title
+('(name), none') AND made the codex real-ref search look up ROLE WORDS as if
+they were people, so real-people reference images came out wrong. New
+`_clean_character_field` collapses a shot's character to its real names (drops
+placeholders + lowercase role/descriptor tokens while preserving genuine
+multi-person lists). Because the field is now canonical, every shot of the same
+person resolves to the SAME cached real-photo file in `cast_refs/real/` - the
+exact same image reference for each character, every time.
+
+### Foley: all SFX to -15dB, typewriter only on real typing
+
+Joe 2026-08-13: foley was too loud / annoying. All foley is now `FOLEY_DB = -15`
+(was -5). The typewriter click no longer fires from a bare 'keyboard'/'typewriter'
+object in the scene - it now only triggers on active typing verbs ('typing',
+'types on', 'at the keyboard', 'taps on', 'hits the keys', etc.) so it never
+plays when no one is physically typing in the image and it plays far less often.
+The chapter-card whoosh keeps its current volume (`CHAPTER_DB = -4`).
+
+### Chapter titles: single-line pop reveal (alignment fixed)
+
+Joe 2026-08-13: the chapter title used a per-char `\pos` typewriter whose
+PIL-measured advances disagreed with libass, producing gaps and a misaligned
+yellow glow ghost that made it hard to read. The title (and its glow) are now a
+single `\an5` centred dialogue, so libass lays out the proportional font with
+correct spacing and the glow hugs the text exactly - no gaps, perfectly aligned.
+
+### Codex prompt no longer breaks on long/quoting shot prompts (ep014)
+
+The providers.py fix from ep014: feeding `/imagegen <prompt>` via a temp file
+(`Get-Content -Raw` piped into codex) instead of `echo '<prompt>'` on the
+command line, so multi-KB shot prompts with embedded double-quotes can't push
+the PowerShell command past its argument-parser limit (the "missing terminator"
+instant-fail that blackened shots).
+
 ## [1.45.3] - 2026-08-13
 
 ### Codex face reference is inspiration, not a copy source

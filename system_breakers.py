@@ -956,9 +956,13 @@ def _sfx_path(name: str) -> Optional[Path]:
 # library wins. Keywords are matched case-insensitively against the scene.
 # ---------------------------------------------------------------------------
 FOLEY_MAP: list[tuple[tuple[str, ...], tuple[str, ...]]] = [
-    # typing / keyboard / typewriter
-    (("typing", "types", "typewriter", "keyboard", "keys on", "at the keyboard",
-      "tapping", "taps on", "types on", "hits the keys"),
+    # typing - ONLY when someone is ACTIVELY typing (Joe 2026-08-13). A bare
+    # 'keyboard' / 'typewriter' / 'keys on' object in the scene must NOT trigger
+    # typing foley when no one is physically typing in the image. Removed those
+    # object-noun keywords so the typewriter click only fires on real typing.
+    (("typing", "types on", "types away", "types rapidly", "typing on",
+      "at the keyboard", "tapping", "taps on", "taps at", "hits the keys",
+      "pounding the keys", "hammers the keys", "clacks the keys"),
      ("foley-typewriter-style-sound", "typewriter-clicks")),
     # boat / ship - BEFORE driving so 'boat engine' matches the boat rule
     (("boat", "ship", "sailing", "sailor", "vessel", "canoe", "rowing",
@@ -1138,8 +1142,9 @@ SFX_DB = -15.0
 # through (Joe: -4dB for camera AND chapter sounds).
 SHUTTER_DB = -4.0
 CHAPTER_DB = -4.0
-# Foley bed - sits under narration, audible but not dominant (Joe: -5dB).
-FOLEY_DB = -5.0
+# Foley bed - sits under narration (Joe 2026-08-13: ALL foley reduced to -15dB
+# so it no longer masks/cuts over the voice; previously -5dB was too loud).
+FOLEY_DB = -15.0
 # Key-word whoosh highlight - a quick pointer, kept subtle (not specified by Joe).
 KEYWORD_DB = -8.0
 
@@ -2741,72 +2746,132 @@ def _norm_text(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9' ]", " ", str(s or "").lower())).strip()
 
 
-def _summarize_paragraphs(paragraphs: list[str], chunk: int = 10) -> list[str]:
-    """One-line summary per article paragraph (max 14 words) - used as compact
-    context for the intro so the intro LLM call stays small (Joe 2026-08-12)."""
+# Words that carry no punch for an on-screen key-word highlight.
+_KEYWORD_STOP = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "for", "with",
+    "that", "this", "these", "those", "it", "its", "his", "her", "their", "they",
+    "he", "she", "we", "you", "i", "from", "by", "as", "was", "were", "had", "has",
+    "have", "not", "but", "so", "then", "there", "would", "could", "should", "did",
+    "does", "do", "is", "are", "be", "been", "into", "out", "over", "under", "than",
+    "when", "while", "after", "before", "about", "them", "him", "me", "my", "our",
+    "your", "just", "only", "every", "each", "more", "most", "very", "such", "how",
+    "what", "why", "who", "whose", "which", "because", "also", "still", "even",
+    "though", "all", "any", "some", "no", "yes", "one", "two", "three", "where",
+}
+
+
+def _sanitize_key_words(key_sentence: str, raw) -> list[str]:
+    """Return 2-3 REAL key words/phrases for an on-screen highlight.
+
+    The 4B LLM frequently returns single CHARACTERS ('c','o','l') or fragments
+    instead of words (Joe 2026-08-13: key-word titles were showing only 3 chars).
+    This keeps only items that are WHOLE-WORD substrings of the key sentence
+    (rejecting 1-char tokens), and if nothing survives falls back to the 2-3 most
+    distinctive (longest) content words of the sentence.
+    """
+    s = _norm_text(key_sentence)
+    out: list[str] = []
+    for w in (raw or []):
+        nw = _norm_text(w)
+        if not nw:
+            continue
+        if len(nw.split()) == 1 and len(nw) < 2:   # single char is never a word
+            continue
+        # must be a whole-word substring (not mid-word)
+        if not re.search(r"(?<![a-z0-9'])"
+                         + re.escape(nw) + r"(?![a-z0-9'])", s):
+            continue
+        out.append(str(w).strip())
+        if len(out) >= 3:
+            break
+    if not out:
+        toks = re.findall(r"[A-Za-z]{3,}", key_sentence)
+        content = [t for t in toks if t.lower() not in _KEYWORD_STOP]
+        if not content:
+            content = toks
+        content.sort(key=lambda t: (-len(t), t.lower()))
+        out = content[:3]
+    return out[:3]
+
+
+def _summarize_paragraphs(paragraphs: list[str]) -> list[str]:
+    """One-line summary PER article paragraph (max 14 words), used as compact
+    context for the intro.
+
+    Joe 2026-08-13: the article is sent ONE paragraph at a time and each summary
+    is saved, so every paragraph's single key fact is captured faithfully (a
+    chunked call in one prompt makes the 4B model skip/merge paragraphs). Returns
+    one summary string per input paragraph, in order.
+    """
     summaries: list[str] = []
-    sys_p = ("You summarize a news article for a documentary writer. For each "
-             "paragraph given, output ONE short line (max 14 words) capturing the "
-             "single key fact or event in that paragraph. Output one line per "
-             "paragraph, in the same order. No labels, no numbering, no bullets.")
-    for start in range(0, len(paragraphs), chunk):
-        seg = paragraphs[start:start + chunk]
-        block = "\n".join(f"{j + 1}: {seg[j]}" for j in range(len(seg)))
+    sys_p = ("You summarize a news article for a documentary writer. I give you "
+             "ONE paragraph. Output ONE short line (max 14 words) capturing the "
+             "single key fact or event in that paragraph. No labels, no "
+             "numbering, no bullets, no commentary.")
+    for i, para in enumerate(paragraphs):
+        if not para or not para.strip():
+            continue
         try:
             text = _llm_chat([{"role": "system", "content": sys_p},
-                              {"role": "user", "content": block}],
-                             max_tokens=1800, temp=0.2)
-            for ln in text.split("\n"):
-                ln = re.sub(r"^\s*\d+\s*[:.)]\s*", "", ln).strip()
-                if ln:
-                    summaries.append(ln[:130])
+                              {"role": "user", "content": para.strip()}],
+                             max_tokens=80, temp=0.2)
+            line = re.sub(r"^[-\s]*", "", (text or "").strip())
+            line = re.sub(r"^\d+\s*[:.)]\s*", "", line).strip()
+            if line:
+                summaries.append(line[:130])
         except Exception:
             continue
-        time.sleep(0.2)
+        time.sleep(0.15)
     return summaries
 
 
 def _generate_intro(paragraphs: list[str]) -> tuple[list[str], dict]:
-    """Write the episode intro at the END of script-writing, using a one-line
-    summary of each article paragraph as context (saves the context window).
-    The intro follows the Split Node Shorts 6-phase formula + a 3s hook (7 short
-    sentences) and is still prepended to the START of the video, one image per
-    sentence. Up to 2 intro sentences are marked KEY (with 2-3 key words) so they
-    get the key-word whoosh + on-screen highlight. Returns (intro_sentences,
-    intro_plan)."""
+    """Write the episode intro at the END of script-writing.
+
+    Joe 2026-08-13: the intro is ONE natural paragraph (NOT seven disjoint punchy
+    sentences - those read stilted). Each article paragraph is first summarized
+    one-at-a-time, then ALL the summaries are sent as context to a single intro
+    call along with the intro rules, and the model writes one flowing paragraph
+    that moves through the Split Node Shorts 6-phase formula naturally. The
+    paragraph is later flattened into per-sentence shots; up to 2 of its
+    sentences are marked KEY (with 2-3 real key words) for the whoosh + on-screen
+    highlight. Returns (intro_paras, intro_plan)."""
     summaries = _summarize_paragraphs(paragraphs)
     ctx = "\n".join(f"- {s}" for s in summaries) or "(no article context)"
     sys_prompt = (
-        "You write the opening INTRO SEQUENCE of a true-crime documentary, using "
-        "the viral 'Split Node Shorts' 6-phase formula. Output a JSON object:\n"
-        "{\"sentences\": [7 short punchy sentences (6-10 words each), one per "
-        "phase in order: HOOK, DECLARE (a big claim / a specific REAL number), "
-        "ASSESS, ISOLATE, PROCESS, BUILD, REVEAL (end on a loop beat '...but the "
-        "story doesn't end there')],\n"
-        "\"key\": [2 entries, each {\"sentence\": \"one of the sentences VERBATIM "
-        "as written\", \"words\": [2-3 exact contiguous substrings of it that a "
-        "viewer should land on]}]}\n"
+        "You write the opening INTRO paragraph of a true-crime documentary, using "
+        "the viral 'Split Node Shorts' 6-phase formula. Write EXACTLY ONE flowing, "
+        "natural paragraph (4-6 sentences, ~55-80 words) that moves smoothly through "
+        "the formula in order: HOOK (grab attention), DECLARE (a big claim + a "
+        "specific REAL number from the article summary), ASSESS (why this matters), "
+        "ISOLATE (the central figure or situation), PROCESS (what is happening behind "
+        "it), BUILD (the stakes rising), and end on a loop-tease ('...but the story "
+        "doesn't end there'). Write it as ONE continuous, natural-sounding narrative "
+        "paragraph - NOT a list, NOT seven disjoint punchy beats. Vary sentence "
+        "length so it reads like a narrator speaking, not staccato.\n"
         "STRICT: NO people's names, NO city/town/place names, NO brand or company "
         "names, NO dates. Use ONLY real figures from the article summaries, never "
         "invent numbers. The intro sets up the hook WITHOUT revealing the specific "
-        "people or places (those enter in chapter 1). Return ONLY the JSON.")
-    data = _llm_json([{"role": "system", "content": sys_prompt},
+        "people or places (those enter in chapter 1). Return ONLY the paragraph text, "
+        "nothing else.")
+    text = _llm_chat([{"role": "system", "content": sys_prompt},
                       {"role": "user", "content":
-                       f"ARTICLE SUMMARY:\n{ctx}\n\nReturn the intro JSON."}],
+                       f"ARTICLE SUMMARY:\n{ctx}\n\nWrite the intro paragraph."}],
                      max_tokens=700, temp=0.85)
-    sentences = [s.strip() for s in (data.get("sentences") or [])
-                 if isinstance(s, str) and s.strip()]
-    sentences = sentences[:7]
-    if len(sentences) < 5:
+    text = re.sub(r"\s+", " ", (text or "").strip()).strip()
+    if len(text) < 40:
         return [], {}
+    intro_paras = [text]
+    # Derive 1-2 key sentences from the paragraph's own sentences (they will
+    # appear verbatim in the flattened output, so the whoosh aligns by text).
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
     key_plan = {}
-    for k in (data.get("key") or [])[:2]:
-        if isinstance(k, dict) and k.get("sentence"):
-            kw = [str(w) for w in (k.get("words") or []) if w][:3]
-            key_plan[len(key_plan)] = {
-                "key_sentence": str(k["sentence"]).strip(),
-                "key_words": kw, "foley": []}
-    return sentences, key_plan
+    candidates = sentences[1:3] if len(sentences) > 2 else sentences[:1]
+    for i, s in enumerate(candidates):
+        kw = _sanitize_key_words(s, re.findall(r"[A-Za-z]{3,}", s))
+        if kw:
+            key_plan[i] = {"key_sentence": s, "key_words": kw, "foley": []}
+    return intro_paras, key_plan
 
 
 def _plan_narration(narration: list[str], episode_num: int) -> dict:
@@ -2848,7 +2913,9 @@ def _plan_narration(narration: list[str], episode_num: int) -> dict:
             foley = entry.get("foley")
             plan[i] = {
                 "key_sentence": str(entry.get("key_sentence") or "").strip(),
-                "key_words": [str(w) for w in (entry.get("key_words") or []) if w][:3],
+                "key_words": _sanitize_key_words(
+                    str(entry.get("key_sentence") or ""),
+                    entry.get("key_words") or []),
                 "foley": [f for f in (foley if isinstance(foley, list) else [])
                           if isinstance(f, dict)],
             }
@@ -3269,34 +3336,37 @@ def _build_person_events(shots: list[dict], clip_starts: list[float]) -> list[di
     """First on-screen appearance of each canonical character -> a bottom-left
     PERSON typewriter title (gold). Fires at the exact moment the name is first
     spoken (whisper-matched, scoped to the character's first shot onward so an
-    earlier passing mention doesn't steal the title)."""
+    earlier passing mention doesn't steal the title).
+
+    Joe 2026-08-13: names are parsed + cleaned through _parse_shot_characters /
+    _clean_character_field, so a polluted 'ION CECAN, NONE' never shows as
+    '(name), none' on the card and a multi-person shot emits one title per real
+    person."""
     canon = _character_canonical_map(shots)
     seen = set()
     events = []
     for pos, shot in enumerate(shots):
         if shot.get("is_chapter"):
             continue
-        ch = shot.get("character", "NONE")
-        if ch == "NONE":
-            continue
-        name = canon.get(ch, ch)
-        key = _norm_char_name(name)[0]
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        # all-caps spellings (e.g. the LLM wrote 'STEFAN MANDEL') display as
-        # proper case on the card; genuine mixed-case names are left alone.
-        display = name.title() if name.isupper() else name
-        nidx = shot.get("narration_idx", pos)
-        start = clip_starts[pos] if pos < len(clip_starts) else 0.0
-        words = re.findall(r"[A-Za-z']+", display)
-        events.append({
-            "kind": "person",
-            "text": display,
-            "para_idx": nidx,
-            "search_from": start,
-            "anchor_words": words[:2] if words else [display.lower()],
-        })
+        for ch in _parse_shot_characters(shot):
+            name = canon.get(ch["name"], ch["name"])
+            key = _norm_char_name(name)[0]
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            # all-caps spellings (e.g. the LLM wrote 'STEFAN MANDEL') display as
+            # proper case on the card; genuine mixed-case names are left alone.
+            display = name.title() if name.isupper() else name
+            nidx = shot.get("narration_idx", pos)
+            start = clip_starts[pos] if pos < len(clip_starts) else 0.0
+            words = re.findall(r"[A-Za-z']+", display)
+            events.append({
+                "kind": "person",
+                "text": display,
+                "para_idx": nidx,
+                "search_from": start,
+                "anchor_words": words[:2] if words else [display.lower()],
+            })
     if events:
         print("  [TITLES] person titles (first appearance): " +
               ", ".join(e["text"] for e in events))
@@ -4126,6 +4196,9 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                          "the whole place in frame, no people, cinematic atmosphere, "
                          f"highly detailed, {SCENE_STYLE}")
             else:
+                # Clean the name so a polluted 'X, role, role' establishing name
+                # becomes just the person's real name (Joe 2026-08-13).
+                name = _clean_character_field(name)
                 scene = ("An establishing wide full-body shot of the character, "
                          "whole person in frame from head to toe, "
                          f"highly detailed, {RENDER_STYLE}")
@@ -4221,9 +4294,10 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 tone = "neutral"
 
         # Normalize character name: strip role-y artifacts, keep the name itself
-        character = character.strip().strip(".").strip()
-        if character.upper() in ("NONE", "N/A", "NOBODY", "NO ONE", "-", ""):
-            character = "NONE"
+        # (Joe 2026-08-13: 'ION CECAN, NONE' / 'Robert Pagliarini, attorney, tax
+        # person' -> clean real names so titles + real-ref lookups are correct).
+        character = _clean_character_field(character)
+        character_role = (character_role or "").strip()
         # If role field is absurdly long, the model squeezed scene text into it -
         # salvage: if scene is empty, use the tail of the long role as the scene
         if len(character_role) > 120:
@@ -4411,6 +4485,43 @@ def _norm_char_name(name: str) -> tuple[str, set[str]]:
     compact = "".join(t for t in raw_toks if t not in CHAR_STOPWORDS)
     toks = {t for t in raw_toks if len(t) > 1 and t not in CHAR_STOPWORDS}
     return compact, toks
+
+
+# Placeholder tokens that carry no identity.
+_ROLE_PLACEHOLDERS = {"none", "n/a", "na", "nobody", "no one", "unknown", "unnamed",
+                      "-", "—", "etc", "unidentified"}
+
+
+def _clean_character_field(raw) -> str:
+    """Strip role/descriptor tokens + placeholders from a shot's character field.
+
+    Joe 2026-08-13: the 4B shot-list model sometimes writes the character field
+    as 'ION CECAN, NONE' or 'Robert Pagliarini, attorney, tax person, financial
+    adviser'. Those polluted tokens (1) showed up verbatim in the bottom-left
+    person title ('(name), none') and (2) made the codex real-ref search look up
+    ROLE WORDS as if they were people -> 'the real people reference images are
+    all wrong'. This collapses to the real names only: placeholder tokens are
+    always dropped, and lowercase descriptor tokens are dropped whenever at least
+    one proper-name token is present (so genuine multi-person lists like
+    'Elena Petrova, Bogdan Vasilescu' survive intact).
+    """
+    raw = (raw or "").strip()
+    if not raw or raw.upper() in ("NONE", "N/A", "NOBODY", "NO ONE", "-"):
+        return "NONE"
+    toks = [t.strip() for t in raw.split(",") if t and t.strip()]
+    kept = [t for t in toks if t.lower() not in _ROLE_PLACEHOLDERS
+            and t.upper() not in ("NONE", "N/A")]
+    if not kept:
+        return "NONE"
+    # A token is "name-like" if its first alpha character is a capital letter.
+    def _name_like(t: str) -> bool:
+        m = re.search(r"[A-Za-zÀ-ÖØ-öø-ÿ]", t)
+        return bool(m) and m.group(0).isupper()
+    if any(_name_like(t) for t in kept):
+        kept = [t for t in kept if _name_like(t)]
+    if not kept:
+        return "NONE"
+    return ", ".join(kept)
 
 
 def _character_canonical_map(shots: list[dict]) -> dict[str, str]:
@@ -7397,8 +7508,10 @@ def _shot_facing(shot, default: str = "front") -> str:
 def _parse_shot_characters(shot) -> list[dict]:
     """Parse the shot's character field into [{name, facing}]. Supports a
     comma list ('Stefan Mandel, Richard Lustig') and per-name facing via
-    'Name(left)'. Defaults facing from the shot's scene/angle heuristics."""
-    raw = str(shot.get("character", "NONE")).strip()
+    'Name(left)'. Defaults facing from the shot's scene/angle heuristics.
+    The raw field is cleaned first (Joe 2026-08-13) so role/placeholder tokens
+    never become 'characters' (which would fetch a wrong real-photo ref)."""
+    raw = _clean_character_field(shot.get("character", "NONE"))
     if not raw or raw.upper() == "NONE":
         return []
     default_facing = _shot_facing(shot)
