@@ -2,6 +2,16 @@
 
 All notable changes to Split Node.
 
+## [1.52.1] - 2026-08-14
+
+### SA3 startup port prompt: type a port to override
+
+Joe 2026-08-14. At the SA3 startup prompt you can now **type a different port
+directly** if the auto-detected one is wrong, instead of only accepting it or
+saying no. The detected-port prompt accepts Enter/Y/yes (accept detected), a
+port number (override), or n/no (fall through to manual entry). Blank still
+skips music and falls back to the static pool.
+
 ## [1.52.0] - 2026-08-14
 
 ### Story-adaptive Stable Audio 3 music beds via resident medium model

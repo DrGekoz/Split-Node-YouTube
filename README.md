@@ -288,7 +288,7 @@ python providers.py --list-videos   # show every video backend/model
 | **SFX library** | 130+ cinematic sounds (Nikko Hunt) with pre-analyzed build/hit/decay times, hit-aligned at -14dB; camera shutter at -4dB |
 | **Foley pipeline** | Auto-detects the **action** in each shot's scene text and beds the matching sound for the whole clip — typing → typewriter, driving → engine/traffic, walking → footsteps, rain → downpour, fire → crackle, boat → engine, and more |
 
-> **SA3 startup port prompt (NEW):** SA3's Pinokio launcher opens on a **different localhost port each run** (7860, 7861, …), so before doing any pipeline work the script auto-scans ports 7860–7890 for a live SA3 Gradio UI (`detect_sa3_port`, socket probe + `/config` signature check). It then **asks you to confirm the port it found** (or type it manually; blank to skip music), and uses that URL for the story-adaptive music bed. Set `SA3_GRADIO_URL` to skip the prompt, or `MUSIC_BACKEND=pool` to force the static-pool fallback.
+> **SA3 startup port prompt (NEW):** SA3's Pinokio launcher opens on a **different localhost port each run** (7860, 7861, …), so before doing any pipeline work the script auto-scans ports 7860–7890 for a live SA3 Gradio UI (`detect_sa3_port`, socket probe + `/config` signature check). It then **asks you to confirm the port it found** — press Enter/Y to accept it, type a different port to override, or say no to enter it manually (blank to skip music), and uses that URL for the story-adaptive music bed. Set `SA3_GRADIO_URL` to skip the prompt, or `MUSIC_BACKEND=pool` to force the static-pool fallback.
 
 ### Video
 

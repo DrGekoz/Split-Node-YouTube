@@ -230,23 +230,37 @@ def detect_sa3_port() -> int | None:
 def resolve_sa3_port(project: str = "pipeline") -> int | None:
     """Ask the user which port SA3 is running on and update SA3_GRADIO_URL.
 
-    Auto-detects a single live SA3 UI and proposes it (default = accept). If
-    none/ambiguous, prompts for the port. Returns the resolved port or None if
-    the user chose to skip (music generation will fall back to the static pool).
+    Auto-detects a single live SA3 UI and proposes it. The detected-port prompt
+    accepts any of:
+      - Enter / y / yes  -> accept the detected port
+      - a port number    -> override and use that port (e.g. if detection is wrong)
+      - n / no           -> fall through to a manual port entry prompt
+    If nothing is detected it prompts for the port directly. Returns the
+    resolved port or None if the user chose to skip (music generation will
+    fall back to the static pool).
     """
     global SA3_GRADIO_URL
     detected = detect_sa3_port()
     if detected is not None:
         try:
             ans = input(f"\n  [{project}] Stable Audio 3 detected on port "
-                        f"{detected} - use it? [Y/n]: ").strip().lower()
+                        f"{detected} - use it? [Y/n, or type a port]: ").strip()
         except EOFError:
             ans = ""
-        if ans not in ("n", "no"):
+        low = ans.lower()
+        if low in ("", "y", "yes"):
             SA3_GRADIO_URL = f"http://127.0.0.1:{detected}/"
             print(f"  [SA3] using http://127.0.0.1:{detected}/")
             return detected
-    # Manual entry (or skipped auto-detect).
+        # A numeric answer overrides the detected port directly.
+        try:
+            port = int(low)
+            SA3_GRADIO_URL = f"http://127.0.0.1:{port}/"
+            print(f"  [SA3] using http://127.0.0.1:{port}/ (override)")
+            return port
+        except ValueError:
+            pass  # treat 'n'/'no' as "enter it manually"
+    # Manual entry (or rejected auto-detect).
     try:
         raw = input(f"  [{project}] Enter SA3 port (or blank to skip music): ").strip()
     except EOFError:
