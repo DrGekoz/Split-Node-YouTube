@@ -28,6 +28,7 @@ CREDS_FILE = Path.home() / ".youtube-upload-credentials.json"
 SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube",
+    "https://www.googleapis.com/auth/youtube.force-ssl",
 ]
 
 SETUP_LINK = "https://console.cloud.google.com/apis/credentials"

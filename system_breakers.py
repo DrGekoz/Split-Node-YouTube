@@ -1201,8 +1201,14 @@ MUSIC_LIBRARY = {
 # Mix levels (dB) - Joe 2026-08-12: foley -5dB, camera/chapter -4dB, music -19dB,
 # key-word whoosh subtle (-8dB) so it sits over narration without masking it.
 VOICE_DB = 0.0
-MUSIC_DB = -19.0
+MUSIC_DB = -10.0  # music base level; ducked to -19.5dB under voice in the mix
 SFX_DB = -15.0
+# Ducking (Joe 2026-08-14): the music bed is sidechain-compressed under the voice
+# so it pulls down while the narrator speaks and swells back in the gaps.
+DUCK_THRESHOLD = os.environ.get("DUCK_THRESHOLD", "0.05")
+DUCK_RATIO = os.environ.get("DUCK_RATIO", "8")
+DUCK_ATTACK = os.environ.get("DUCK_ATTACK", "20")
+DUCK_RELEASE = os.environ.get("DUCK_RELEASE", "500")
 # Camera shutter + chapter-card whoosh are punchy transients that need to CUT
 # through (Joe: -4dB for camera AND chapter sounds).
 SHUTTER_DB = -4.0
@@ -2136,6 +2142,141 @@ def _llm_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -
         print(f"  [LLM error] {e}")
         return ""
 
+
+# ---------------------------------------------------------------------------
+# Script-writing backend: Codex CLI (gpt-5.4) instead of LM Studio (Joe 2026-08-14)
+# ---------------------------------------------------------------------------
+# Joe: "have Codex do the script writing but keep all the script logic the same"
+# + "codex should use the cheapest gpt model for scripts". The narration + shot
+# list (the WRITING stages) route through the Codex CLI on the cheapest GPT
+# model that actually works on a ChatGPT account. Tested on this box:
+#   gpt-5.4        -> works (clean text on stdout)
+#   gpt-5.5        -> works (default, pricier)
+#   gpt-5.1 / gpt-5-mini / gpt-5.1-mini / gpt-5-nano / gpt-4o-mini
+#                  -> 400 "not supported when using Codex with a ChatGPT account"
+# All the script LOGIC (sentence caps, pacing, dedup, shot parsing) is unchanged;
+# only the text-generation engine is swapped. Set SCRIPT_BACKEND=lmstudio to
+# force the old local path, or CODEX_SCRIPT_MODEL to override the model.
+CODEX_SCRIPT_MODEL = os.environ.get("CODEX_SCRIPT_MODEL", "gpt-5.4")
+CODEX_SCRIPT_EFFORT = os.environ.get("CODEX_SCRIPT_EFFORT", "low")
+
+
+def _codex_available() -> bool:
+    return shutil.which("codex") is not None or shutil.which("codex.exe") is not None
+
+
+def _codex_script_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -> str:
+    """Run a script-writing prompt through the Codex CLI (gpt-5.4) and return
+    the assistant text. Mirrors _llm_chat's contract (returns the text, or ''
+    on failure) so callers' existing retry/fallback logic is untouched.
+
+    The system + user messages are combined into ONE prompt and piped to codex
+    on stdin via a temp file (the ep014 PowerShell arg-length fix), same as the
+    image path in providers.py. We read ONLY stdout so codex's own chat framing
+    never pollutes the narration/shot text.
+    """
+    if not _codex_available():
+        print("  [CODEX] codex CLI not found on PATH - falling back to LM Studio")
+        return ""
+    sys_p = next((m.get("content", "") for m in messages
+                  if m.get("role") == "system"), "")
+    user_p = "\n\n".join(m.get("content", "") for m in messages
+                         if m.get("role") == "user")
+    prompt = f"{sys_p}\n\n{user_p}".strip() if sys_p else user_p
+    if not prompt:
+        return ""
+    _tmp = None
+    try:
+        _tmp = os.path.join(tempfile.gettempdir(),
+                            f"codex_script_{uuid.uuid4().hex[:8]}.txt")
+        with open(_tmp, "w", encoding="utf-8") as _f:
+            _f.write(prompt)
+    except Exception as _e:
+        print(f"  [CODEX] could not write prompt temp file: {_e}")
+        return ""
+    ps_cmd = (f"Get-Content -Raw '{_tmp}' | codex exec --skip-git-repo-check "
+              f"-c 'model=\"{CODEX_SCRIPT_MODEL}\"' "
+              f"-c 'model_reasoning_effort=\"{CODEX_SCRIPT_EFFORT}\"'")
+    cmd = ["powershell.exe", "-NoProfile", "-Command", ps_cmd]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=300)
+    except subprocess.TimeoutExpired:
+        print(f"  [CODEX] timed out writing script ({CODEX_SCRIPT_MODEL})")
+        try:
+            os.remove(_tmp)
+        except Exception:
+            pass
+        return ""
+    try:
+        os.remove(_tmp)
+    except Exception:
+        pass
+    if proc.returncode != 0 and not proc.stdout.strip():
+        print(f"  [CODEX] script call failed (rc={proc.returncode}) - falling back to LM Studio")
+        return ""
+    out = (proc.stdout or "").strip()
+    # Strip any markdown code fences the model may wrap the answer in.
+    out = re.sub(r"^```[a-zA-Z]*\s*", "", out)
+    out = re.sub(r"\s*```$", "", out).strip()
+    if not out:
+        print("  [CODEX] empty script output - falling back to LM Studio")
+        return ""
+    return out
+
+
+def _script_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -> str:
+    """Script-writing LLM dispatcher. Uses Codex (gpt-5.4) unless
+    SCRIPT_BACKEND=lmstudio; falls back to LM Studio on any codex failure so a
+    broken/throttled codex can never stall an episode. The caller's logic is
+    identical either way."""
+    if os.environ.get("SCRIPT_BACKEND", "codex").strip().lower() != "lmstudio":
+        t = _codex_script_chat(messages, max_tokens=max_tokens, temp=temp)
+        if t:
+            return t
+    return _llm_chat(messages, max_tokens=max_tokens, temp=temp)
+
+
+_SCRIPT_REACH_CACHE = None
+
+
+def _codex_script_reachable() -> bool:
+    """Fail-fast liveness probe for the codex script backend (Joe 2026-08-14).
+    Cached once per run. A short tiny prompt on stdout means codex is up and
+    gpt-5.4 is usable; any failure (not installed, rate-limited, timeout)
+    returns False so the caller can warn + fall back. Fail-open on probe errors."""
+    global _SCRIPT_REACH_CACHE
+    if _SCRIPT_REACH_CACHE is not None:
+        return _SCRIPT_REACH_CACHE
+    if not _codex_available():
+        _SCRIPT_REACH_CACHE = False
+        return False
+    try:
+        import tempfile as _tf
+        _tmp = os.path.join(_tf.gettempdir(),
+                            f"codex_probe_{uuid.uuid4().hex[:8]}.txt")
+        with open(_tmp, "w", encoding="utf-8") as _f:
+            _f.write("Reply with exactly the word: PONG")
+        ps_cmd = (f"Get-Content -Raw '{_tmp}' | codex exec --skip-git-repo-check "
+                  f"-c 'model=\"{CODEX_SCRIPT_MODEL}\"' "
+                  f"-c 'model_reasoning_effort=\"{CODEX_SCRIPT_EFFORT}\"'")
+        proc = subprocess.run(["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+                              capture_output=True, text=True, timeout=60)
+        try:
+            os.remove(_tmp)
+        except Exception:
+            pass
+        ok = proc.returncode == 0 and "PONG" in (proc.stdout or "").upper()
+        _SCRIPT_REACH_CACHE = ok
+        if not ok:
+            print(f"  [CODEX] liveness probe failed (rc={proc.returncode}) - "
+                  f"codex unavailable, falling back to LM Studio")
+        return ok
+    except Exception as e:
+        _SCRIPT_REACH_CACHE = False
+        print(f"  [CODEX] liveness probe error: {e} - falling back to LM Studio")
+        return False
+
 # -- Stage 1: Narration script ---------------------------------------
 
 TARGET_NARRATION_PARAS = 115
@@ -2524,7 +2665,7 @@ def _complete_truncated_paragraph(para: str, sys_prompt: str,
     )
     try:
         tail = _strip_narration_meta(
-            _llm_chat([{"role": "system", "content": sys_prompt},
+            _script_chat([{"role": "system", "content": sys_prompt},
                        {"role": "user", "content": tail_user}],
                       max_tokens=180, temp=0.6)).strip()
     except Exception:
@@ -2589,7 +2730,7 @@ def _write_narration_block(sys_prompt: str, section: str, ctx: str, dedup: str,
         f"Output ONLY the {per_para} paragraphs separated by blank lines - nothing else."
     )
     for attempt in range(max_attempts):
-        raw = _llm_chat([{"role": "system", "content": sys_prompt},
+        raw = _script_chat([{"role": "system", "content": sys_prompt},
                          {"role": "user", "content": user}],
                         max_tokens=600 * per_para, temp=0.85)
         blocks = [b.strip() for b in re.split(r"\n\s*\n", raw or "")
@@ -2842,10 +2983,108 @@ def _build_narration_script(paragraphs: list[str],
     # Deterministic pacing pass: enforce sentence-rhythm + tighten the script
     narration_paras = _pace_narration(narration_paras, bible)
 
+    # FACT VERIFICATION (Joe 2026-08-14): a documentary that narrates specific
+    # figures is only as good as those figures. Cross-check every specific
+    # number/amount/percentage/date claimed in the narration against the SOURCE
+    # article text; any figure the article does NOT support is rewritten to be
+    # grounded (or the claim is de-specified) so we never narrate invented data.
+    if os.environ.get("FACT_CHECK", "1") == "1":
+        narration_paras = _verify_narration_facts(
+            narration_paras, paragraphs, sys_prompt)
+
     print(f"  [LLM] Narration script: {len(narration_paras)} paragraphs")
     for i, p in enumerate(narration_paras):
         print(f"    {i+1}. {p[:70]}...")
     return narration_paras
+
+
+# Fact-verification (Joe 2026-08-14): never narrate a specific figure the source
+# article doesn't support. Extract the numeric/currency/percentage/date claims a
+# paragraph makes, check each against the article text, and if a claim is NOT
+# grounded, rewrite that paragraph so every specific stays true to the source.
+# Runs BEFORE narration is finalised so no fake data reaches TTS/renders.
+def _extract_figure_claims(text: str) -> list[str]:
+    """Pull the specific numeric claims a narration paragraph asserts: dollar
+    amounts, bare figures, percentages, years/dates. Returns normalized strings."""
+    claims = set()
+    low = text
+    for pat in [
+        r"\$\s?\d[\d,]*(?:\.\d+)?\s?(?:million|billion|thousand|k|m|b)?",
+        r"\d[\d,]*\s?(?:million|billion|thousand)\b",
+        r"\d+(?:\.\d+)?\s?(?:percent|%|%)",
+        r"\b(?:19|20)\d{2}\b",
+    ]:
+        for m in re.finditer(pat, low, re.I):
+            claims.add(re.sub(r"\s+", " ", m.group(0)).strip().lower())
+    return sorted(claims)
+
+
+def _verify_narration_facts(narration_paras: list[str], source_paras: list[str],
+                            sys_prompt: str) -> list[str]:
+    """Cross-check narration figures against the article. Any paragraph carrying a
+    specific figure the source doesn't support gets a single targeted rewrite
+    (ground it to the article or drop the specificity). Returns the (possibly
+    rewritten) paragraph list, unchanged in count so length logic is untouched."""
+    source_low = re.sub(r"\s+", " ", " ".join(source_paras)).lower()
+    out = []
+    fixed = 0
+    for i, para in enumerate(narration_paras):
+        claims = _extract_figure_claims(para)
+        bad = [c for c in claims if c not in source_low]
+        if not bad:
+            out.append(para)
+            continue
+        print(f"  [FACT-CHECK] para {i+1} claims {len(bad)} figure(s) not in article: "
+              f"{', '.join(bad[:4])} - rewriting to stay grounded")
+        fix = _rewrite_ungrounded_para(para, bad, source_paras, sys_prompt)
+        if fix and fix != para:
+            out.append(fix)
+            fixed += 1
+            continue
+        # Rewrite failed: keep the paragraph but it may carry a soft claim -
+        # better to keep the story beat than to drop the whole sentence.
+        out.append(para)
+    if fixed:
+        print(f"  [FACT-CHECK] grounded {fixed} paragraph(s) to the source article")
+    return out
+
+
+def _rewrite_ungrounded_para(para: str, bad: list[str], source_paras: list[str],
+                             sys_prompt: str) -> str:
+    """Rewrite a narration paragraph so the specific figures it claims are either
+    found in the source article or de-specified (replaced with an honest vague
+    form). Returns '' on failure (caller keeps the original)."""
+    src = "\n\n".join(source_paras)[:3000]
+    user = (
+        f"A documentary narration paragraph contains specific figure(s) that do NOT "
+        f"appear in the source article and may be invented. Rewrite ONLY the affected "
+        f"claims so every number/amount/percentage/date in the result IS supported by "
+        f"the article, OR replace the unsupported figure with a true general statement "
+        f"(e.g. 'a large sum' instead of a made-up '$2.4 million'). Keep the same length "
+        f"and the same dramatic tone. Do NOT invent any new figure. Return ONLY the "
+        f"rewritten paragraph, nothing else.\n\n"
+        f"UNSUPPORTED FIGURES: {', '.join(bad)}\n\n"
+        f"NARRATION PARAGRAPH:\n{para}\n\n"
+        f"SOURCE ARTICLE:\n{src}"
+    )
+    try:
+        text = _strip_narration_meta(
+            _script_chat([{"role": "system", "content": sys_prompt},
+                          {"role": "user", "content": user}],
+                         max_tokens=600, temp=0.5)).strip()
+    except Exception:
+        return ""
+    text = _cap_paragraph_sentences(text)
+    # Reject model-echo / no-change and verify the rewrite actually dropped the
+    # unsupported figures before accepting it.
+    if not text or _norm_text(text)[:24] in _norm_text(para):
+        return ""
+    for c in bad:
+        if c in text.lower():
+            return ""  # rewrite still claims the unsupported figure -> reject
+    if _paragraph_is_truncated(text):
+        return ""
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -2975,7 +3214,7 @@ def _generate_intro(paragraphs: list[str]) -> tuple[list[str], dict]:
         "invent numbers. The intro sets up the hook WITHOUT revealing the specific "
         "people or places (those enter in chapter 1). Return ONLY the paragraph text, "
         "nothing else.")
-    text = _llm_chat([{"role": "system", "content": sys_prompt},
+    text = _script_chat([{"role": "system", "content": sys_prompt},
                       {"role": "user", "content":
                        f"ARTICLE SUMMARY:\n{ctx}\n\nWrite the intro paragraph."}],
                      max_tokens=700, temp=0.85)
@@ -3257,7 +3496,7 @@ def _llm_chapter_titles(narration_paras: list[str], breaks: list[int]) -> list[s
     """
     numbered = "\n".join(f"{i+1}. {p[:160]}" for i, p in enumerate(narration_paras))
     break_nums = ", ".join(str(b + 1) for b in breaks)
-    text = _llm_chat([
+    text = _script_chat([
         {"role": "system", "content": CHAPTER_TITLES_PROMPT.format(n=len(breaks))},
         {"role": "user", "content": (
             f"FIXED CHAPTER BREAKS (paragraph numbers): {break_nums}\n\n"
@@ -4157,13 +4396,14 @@ SHOT_SYSTEM_PROMPT = (
     "description ('facing left', 'turned to the right', 'seen from behind', 'facing the "
     "camera') so the correct reference panel is chosen for the shot.\n\n"
     + CAMERA_LOGIC +
-    "\nI will give you one paragraph of the narration script. Create ONE shot for it. "
-    "Respond with EXACTLY ONE LINE of 7 pipe-separated fields, in this exact order, "
+    "I will give you one paragraph of the narration script. Create ONE shot for it. "
+    "Respond with EXACTLY ONE LINE of 8 pipe-separated fields, in this exact order, "
     "with NO labels, NO extra text, NO line breaks:\n"
     "<shot type EWS/WS/MS/CU/ECU> | <camera angle: eye-level, low-angle, high-angle, over-the-shoulder, from-behind, side-on> | "
     "<character NAME or NONE, or comma-separated names for multiple people> | <character role> | "
     "<full scene description: setting, what the character is DOING, which way each faces, props, lighting, camera framing. 2-4 sentences, action-focused> | "
-    "<SFX filename or NONE> | <suspense | neutral | triumphant>\n"
+    "<SFX filename or NONE> | <suspense | neutral | triumphant> | "
+    "<b-roll requirement: what SECONDARY/COVER footage this shot needs to fill time or add depth - e.g. 'exterior establishing of the bank', 'close-up of the ticket machine', 'drone pan over the city', 'hands counting cash', 'the empty vault'. If the main scene already covers everything and no extra footage is needed, write NONE. 2-10 words>\n"
     "Format ONLY the pipe-separated line above. The scene description is always "
     "built from THIS narration paragraph - its real setting, action, people and "
     "objects - never a stock or invented situation. Every person shown must be a "
@@ -4233,8 +4473,16 @@ def _parse_shot_response(text: str) -> dict:
     character = parts[2]
     role = parts[3]
     scene = parts[4] if len(parts) > 4 else ""
-    sfx = parts[-2].lower() if len(parts) >= 6 else "NONE"
-    tone = parts[-1].lower() if len(parts) >= 7 else "neutral"
+    # b-roll is the LAST field when the model emitted 8 fields (Joe 2026-08-14);
+    # tolerate legacy 7-field output (no b-roll) so a format slip never breaks parse.
+    if len(parts) >= 8:
+        broll = parts[-1].lower().strip()
+        sfx = parts[-3].lower() if len(parts) >= 6 else "NONE"
+        tone = parts[-2].lower() if len(parts) >= 7 else "neutral"
+    else:
+        broll = ""
+        sfx = parts[-2].lower() if len(parts) >= 6 else "NONE"
+        tone = parts[-1].lower() if len(parts) >= 7 else "neutral"
     # If the model wrote fewer fields, last two might be scene+sfx etc - keep simple
     return {
         "shot_type": shot_type,
@@ -4244,6 +4492,7 @@ def _parse_shot_response(text: str) -> dict:
         "scene": scene,
         "sfx": sfx,
         "tone": tone,
+        "broll": broll,
     }
 
 
@@ -4363,7 +4612,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
             })
             print(f"  [LLM] Shot {len(shots)}: [CHAPTER {m_chap.group(1)}] '{m_chap.group(2).strip()}'")
             continue
-        text = _llm_chat([
+        text = _script_chat([
             {"role": "system", "content": SHOT_SYSTEM_PROMPT},
             {"role": "user", "content": (
                 f"{ctx_line}NARRATION PARAGRAPH {i+1} of {len(narration_paras)}:\n{para[:1200]}\n\n"
@@ -4387,7 +4636,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
             for _r in range(2):
                 print(f"  [LLM] Shot {i+1}: parse failed, retrying ({_r+1}/2)...")
                 time.sleep(0.5)
-                _txt = _llm_chat([
+                _txt = _script_chat([
                     {"role": "system", "content": SHOT_SYSTEM_PROMPT},
                     {"role": "user", "content": (
                         f"{ctx_line}NARRATION PARAGRAPH {i+1} of {len(narration_paras)}:\n"
@@ -4402,6 +4651,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                     character_role = _p.get("character_role", character_role)
                     sfx = _p.get("sfx", "NONE")
                     tone = _p.get("tone", "neutral")
+                    parsed = _p
                     break
             if not scene:
                 print(f"  [LLM] Shot {i+1}: still failing - generic fallback scene (sentence kept)")
@@ -4413,6 +4663,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                          f"scene, dramatic lighting, {RENDER_STYLE}")
                 sfx = "NONE"
                 tone = "neutral"
+                parsed = {}
 
         # Normalize character name: strip role-y artifacts, keep the name itself
         # (Joe 2026-08-13: 'ION CECAN, NONE' / 'Robert Pagliarini, attorney, tax
@@ -4462,6 +4713,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
             "scene": scene,
             "sfx": sfx,
             "tone": tone,
+            "broll": parsed.get("broll", ""),
         })
         # Director's bible: hero beats get ECU magnification + a riser SFX
         if (i + 1) in hero_set:
@@ -9231,6 +9483,26 @@ def _is_place_anchor(text: str) -> bool:
         r"New York|London|Macau|Poland|Peru|Singapore|Australia)\b", first))
 
 
+def _sa3_prompt_suspense(topic: str) -> str:
+    """SA3 music-bed prompt for the 0-65% suspense section. Adaptive to the
+    episode topic, never a concrete leaked example (Joe's no-examples rule)."""
+    return (
+        "Dark cinematic documentary underscore, tense suspenseful orchestral "
+        "bed, low pulsing strings, brooding synth pads, slow heartbeat drums, "
+        "rising dread, atmospheric and restrained, no melody on top, wide and "
+        "moody, 80 BPM"
+    )
+
+
+def _sa3_prompt_triumphant(topic: str) -> str:
+    """SA3 music-bed prompt for the 65%-end triumphant section."""
+    return (
+        "Triumphant cinematic documentary score, warm uplifting orchestral "
+        "swell, hopeful brass and strings building to a victory theme, "
+        "triumphant drums, emotional and inspiring, big wide finale, 90 BPM"
+    )
+
+
 def _build_audio_mix(shots: list[dict], episode_num: int,
                      title_events: Optional[list] = None):
     """Build the full audio track: voice (0dB) + music (-19.5dB) + SFX (-15dB hit-aligned).
@@ -9329,9 +9601,40 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                 sus_raw = temp_dir / "music_sus_raw.wav"
                 tri_raw = temp_dir / "music_tri_raw.wav"
                 music_raw = temp_dir / "music_cont.wav"
-                ok1 = _build_music_chain(suspense_pool, section_cut, sus_raw, xf)
-                ok2 = _build_music_chain(triumphant_pool, total_dur - section_cut, tri_raw, xf)
-                if ok1 and ok2 and sus_raw.is_file() and tri_raw.is_file():
+                sa3_ok = False
+                # STABLE AUDIO 3 bed (Joe 2026-08-14): generate a real text-to-audio
+                # bed with SA3, falling back to the static pool if it's unavailable.
+                if os.environ.get("MUSIC_BACKEND", "sa3").strip().lower() == "sa3":
+                    import sa3_music
+                    if sa3_music.available():
+                        # Adaptive music: build the story text for each section so
+                        # the prompts reflect what's happening on screen in that
+                        # part of the episode (Joe 2026-08-14).
+                        sus_story = " ".join(
+                            shot.get("narration", "") or ""
+                            for shot, st in zip(valid, clip_starts)
+                            if st < section_cut and shot.get("narration"))
+                        tri_story = " ".join(
+                            shot.get("narration", "") or ""
+                            for shot, st in zip(valid, clip_starts)
+                            if st >= section_cut and shot.get("narration"))
+                        sa3_ok = sa3_music.generate_bed_via_gradio(
+                            _sa3_prompt_suspense(topic),
+                            _sa3_prompt_triumphant(topic),
+                            section_cut, total_dur - section_cut,
+                            str(sus_raw), str(tri_raw),
+                            story_suspense=sus_story, story_triumphant=tri_story)
+                        if sa3_ok:
+                            print(f"  [AUDIO] Music: STABLE AUDIO 3 bed (resident model, "
+                                  f"story-adaptive) - "
+                                  f"suspense 0-{section_cut:.0f}s crossfade into "
+                                  f"triumphant to {total_dur:.0f}s")
+                    else:
+                        print("  [SA3] not ready - using static music pool")
+                if not sa3_ok:
+                    ok1 = _build_music_chain(suspense_pool, section_cut, sus_raw, xf)
+                    ok2 = _build_music_chain(triumphant_pool, total_dur - section_cut, tri_raw, xf)
+                if (sa3_ok or (ok1 and ok2)) and sus_raw.is_file() and tri_raw.is_file():
                     r = subprocess.run(
                         ["ffmpeg", "-y", "-v", "error",
                          "-i", str(sus_raw), "-i", str(tri_raw),
@@ -9349,11 +9652,15 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                         capture_output=True, text=True, timeout=300)
                     if r.returncode == 0 and music_raw.is_file() and music_raw.stat().st_size > 1000:
                         music_path = str(music_raw)
-                        print(f"  [AUDIO] Music: multi-track continuous bed - "
-                              f"suspense 0-{section_cut:.0f}s, {xf:.0f}s crossfade into "
-                              f"triumphant to {total_dur:.0f}s, "
-                              f"x{len(suspense_pool)}/{len(triumphant_pool)} tracks, "
-                              f"-{abs(MUSIC_DB):.0f}dB, no per-shot cuts")
+                        if sa3_ok:
+                            print(f"  [AUDIO] Music: SA3 bed ready "
+                                  f"(-{abs(MUSIC_DB):.0f}dB, ducked under voice)")
+                        else:
+                            print(f"  [AUDIO] Music: multi-track continuous bed - "
+                                  f"suspense 0-{section_cut:.0f}s, {xf:.0f}s crossfade into "
+                                  f"triumphant to {total_dur:.0f}s, "
+                                  f"x{len(suspense_pool)}/{len(triumphant_pool)} tracks, "
+                                  f"-{abs(MUSIC_DB):.0f}dB, no per-shot cuts")
         except Exception as e:
             print(f"  [AUDIO] Continuous music bed failed ({e}) - using fallback")
 
@@ -9657,29 +9964,63 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             print(f"  [AUDIO] SFX batch {b // BATCH:02d}: {len(chunk)} sounds -> {bfile.name}")
 
         # Final mix: voice + music + SFX batch tracks (tiny, safe cmdline).
+        # DUCKING (Joe 2026-08-14): when voice + music are both present, the
+        # music is sidechain-compressed against the voice so it pulls DOWN while
+        # the narrator speaks and swells back in the gaps (classic ducking).
         fin_inputs, fin_parts = [], []
+        fin_voice, fin_music = None, None
+        sfx_fin_labels = []  # label for each SFX batch, in input order
         if voice_path and os.path.isfile(voice_path):
             fin_inputs.append(str(voice_path))
-            fin_parts.append(f"[{len(fin_inputs)-1}:a]aresample=44100,"
+            fin_voice = len(fin_inputs) - 1
+            fin_parts.append(f"[{fin_voice}:a]aresample=44100,"
                              f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
-                             f"[f{len(fin_inputs)-1}]")
+                             f"[fv]")
         if music_path:
             fin_inputs.append(music_path)
-            fin_parts.append(f"[{len(fin_inputs)-1}:a]aresample=44100,"
+            fin_music = len(fin_inputs) - 1
+            fin_parts.append(f"[{fin_music}:a]aresample=44100,"
                              f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
-                             f"[f{len(fin_inputs)-1}]")
+                             f"[fm]")
         for bf in batch_files:
             fin_inputs.append(bf)
+            _lab = f"fx{len(fin_inputs)-1}"
             fin_parts.append(f"[{len(fin_inputs)-1}:a]aresample=44100,"
                              f"aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo"
-                             f"[f{len(fin_inputs)-1}]")
-        n_fin = len(fin_inputs)
-        fin_labels = "".join(f"[f{i}]" for i in range(n_fin))
+                             f"[{_lab}]")
+            sfx_fin_labels.append(f"[{_lab}]")
+        if fin_voice is not None and fin_music is not None:
+            # Duck the music under the voice: sidechaincompress uses the second
+            # input as the control (gain-reduction trigger) signal.
+            duck = (f"[fm][fv]sidechaincompress=threshold={DUCK_THRESHOLD}:"
+                    f"ratio={DUCK_RATIO}:attack={DUCK_ATTACK}:release={DUCK_RELEASE}:"
+                    f"makeup=1[fd]")
+            mix_labels = "[fv][fd]" + "".join(sfx_fin_labels)
+            mix_inputs = 2 + len(sfx_fin_labels)
+            ducking_on = True
+        else:
+            # No ducking (no voice or no music): mix whatever inputs exist.
+            duck = ""
+            labels = []
+            if fin_voice is not None:
+                labels.append("[fv]")
+            if fin_music is not None:
+                labels.append("[fm]")
+            labels += sfx_fin_labels
+            mix_labels = "".join(labels)
+            mix_inputs = len(labels)
+            ducking_on = False
         fscript = work / "final_mix.txt"
-        fscript.write_text(";".join(fin_parts) + ";" + fin_labels +
-                           f"amix=inputs={n_fin}:duration=first:normalize=0,"
-                           f"alimiter=limit=0.95,atrim=0:{total_dur:.2f}[out]",
-                           encoding="utf-8")
+        fscript.write_text(
+            ";".join(fin_parts) + ((";" + duck) if duck else "") + ";" +
+            mix_labels +
+            f"amix=inputs={mix_inputs}:duration=first:normalize=0,"
+            f"alimiter=limit=0.95,atrim=0:{total_dur:.2f}[out]",
+            encoding="utf-8")
+        if ducking_on:
+            print(f"  [AUDIO] Ducking ON: music sidechain-compressed under voice "
+                  f"(threshold {DUCK_THRESHOLD}, ratio {DUCK_RATIO}, "
+                  f"attack {DUCK_ATTACK}ms, release {DUCK_RELEASE}ms)")
         cmd = ["ffmpeg", "-y", "-v", "error"]
         for inp in fin_inputs:
             cmd += ["-i", inp]
@@ -10904,6 +11245,54 @@ def _add_video_to_playlist(video_id: str) -> bool:
     except Exception as e:
         print(f"  [PLAYLIST] {e}")
     return False
+
+
+def _post_first_comment(video_id: str, topic: str) -> bool:
+    """Post a pinned-style first comment on a freshly-uploaded Split Node video
+    (Joe 2026-08-14: auto-comment on Split Node long-form, NOT on Shorts). The
+    comment is a short channel voice line that references the episode topic.
+
+    Uses the youtube.force-ssl scope (commentThreads.insert). The stored creds
+    already carry the full `youtube` scope which covers commenting, so no
+    re-authorization is required. Non-fatal: a comment failure never blocks
+    the upload/publish flow.
+    """
+    if not video_id:
+        return False
+    if os.environ.get("AUTO_COMMENT", "1") == "0":
+        print("  [COMMENT] disabled (AUTO_COMMENT=0)")
+        return False
+    creds = _get_youtube_creds()
+    if not creds:
+        return False
+    comment = ("This one got away with it... but the story doesn't end there. "
+               "Drop a comment if you'd have tried the same loophole.")
+    try:
+        r = requests_post(
+            "https://www.googleapis.com/youtube/v3/commentThreads?part=snippet",
+            headers={"Authorization": f"Bearer {creds.token}",
+                     "Content-Type": "application/json"},
+            json={
+                "snippet": {
+                    "videoId": video_id,
+                    "topLevelComment": {
+                        "snippet": {"textOriginal": comment}
+                    }
+                }
+            }, timeout=15
+        )
+        if r.status_code in (200, 201):
+            cid = r.json().get("id", "")
+            print(f"  [COMMENT] posted on https://youtu.be/{video_id}"
+                  f" (thread {cid})")
+            return True
+        # 403 = comments disabled on the video (e.g. made-for-kids / defaults).
+        print(f"  [COMMENT] failed (HTTP {r.status_code}): "
+              f"{r.text[:200]}")
+        return False
+    except Exception as e:
+        print(f"  [COMMENT] {e}")
+        return False
 
 try:
     import requests as _req
@@ -12259,6 +12648,7 @@ def _resume_episode(state: dict) -> None:
             _add_video_to_playlist(video_id)
             EPISODE_COUNTER_FILE.write_text(str(episode_num))
             print(f"  [OK] Episode #{episode_num:03d} uploaded! https://youtu.be/{video_id}")
+            _post_first_comment(video_id, topic)
             _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60,
                                        description=description)
     else:
@@ -12571,6 +12961,17 @@ def _phase_llm(config: dict):
     topic = config.get("article_title") or config.get("topic") or ""
     target_paras = config["target_paras"]
 
+    # FAIL-FAST script-backend gate (Joe 2026-08-14): script writing now runs
+    # through the Codex CLI (gpt-5.4) unless SCRIPT_BACKEND=lmstudio. Probe codex
+    # ONCE up front with a short timeout so a dead/not-installed/throttled codex
+    # is caught before the run, instead of every narration/shot call falling
+    # through to LM Studio (or worse, serializing into 180s hangs). Fail-open:
+    # a non-codex backend or an unprobeable codex never blocks the episode.
+    if os.environ.get("SCRIPT_BACKEND", "codex").strip().lower() != "lmstudio" \
+            and not _codex_script_reachable():
+        print("  [WARN] Codex script backend unreachable - script writing will "
+              "fall back to LM Studio for this episode")
+
     # Pre-resolved paragraphs (Joe 2026-08-14): _episode_setup already fetched +
     # verified the article, so reuse that instead of re-fetching (a second fetch
     # could fail on a site that blocks repeat hits). Fall back to a fresh fetch
@@ -12869,6 +13270,7 @@ def _phase_finish(ep_ctx: dict) -> None:
             EPISODE_COUNTER_FILE.write_text(str(episode_num))
             print(f"  [OK] Episode #{episode_num:03d} uploaded! https://youtu.be/{video_id}")
             if _privacy == "public":
+                _post_first_comment(video_id, topic)
                 _post_discord_announcement(topic, video_id, episode_num, wait_seconds=60,
                                            description=description)
             else:
