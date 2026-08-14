@@ -2,6 +2,30 @@
 
 All notable changes to Split Node.
 
+## [1.53.0] - 2026-08-14
+
+### Fix: narration pacing crash on short paragraphs
+
+`_pace_narration` indexed its per-paragraph sentence cap with `caps[i]`, but `i`
+only gets assigned inside the inner `for i in range(2, len(sents))` rhythm loop.
+For any paragraph with 2 or fewer sentences that loop never runs, so `i` was
+unbound and the pipeline died with `UnboundLocalError: cannot access local
+variable 'i'`. Switched the outer loop to `enumerate(paras)` and index `caps`
+by the paragraph index. Any paragraph length now caps correctly.
+
+### New: resumable batches
+
+A batch no longer vanishes when it crashes. A manifest (`.batch_state.json`)
+persists the full list of queued episode configs + a per-episode `pending` /
+`done` status. `run_fresh_batch` saves it up front and updates it as each
+episode finishes (a finish failure stays resumable instead of being marked
+done). On startup `main()` checks for a leftover manifest and offers to resume
+the batch: already-finished episodes are skipped, episodes with a saved
+per-episode resume state pick up where they left off, and the rest run fresh
+from the saved config without re-entering interactive setup. The manifest is
+re-saved after every episode so a second crash still resumes cleanly, and is
+dropped once the whole batch completes.
+
 ## [1.52.3] - 2026-08-14
 
 ### Fix: broken byline regex crashed every article fetch

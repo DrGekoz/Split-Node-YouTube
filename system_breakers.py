@@ -72,6 +72,9 @@ EPISODES_DIR = PROJECT_DIR / "episodes"
 SFX_DIR = PROJECT_DIR / "cinematic_sounds"
 USED_ARTICLES_FILE = PROJECT_DIR / ".used_articles.json"
 EPISODE_COUNTER_FILE = PROJECT_DIR / ".episode_counter"
+# Batch manifest (Joe 2026-08-14): persists the list of queued episode configs
+# + per-episode done status so a batch that crashes can be resumed as a batch.
+BATCH_FILE = PROJECT_DIR / ".batch_state.json"
 # Per-episode resume state: when EPISODE_RESUME=<n> is set, use a dedicated
 # .resume_state.ep{n}.json so multiple episodes can run in parallel in the
 # same folder without clobbering each other's state. Unset/0 -> the legacy
@@ -2785,7 +2788,7 @@ def _pace_narration(paras: list[str], bible: Optional[dict] = None,
     if not paras:
         return paras
     out = []
-    for para in paras:
+    for _pi, para in enumerate(paras):
         para = re.sub(r"\s+", " ", para).strip()
         # 1. split into sentences (keep ? ! . boundaries)
         sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", para) if s.strip()]
@@ -2812,7 +2815,7 @@ def _pace_narration(paras: list[str], bible: Optional[dict] = None,
         #    prompt's paragraph count assumes short paragraphs, so trim any
         #    paragraph that ran longer back to its per-paragraph cap (min of the
         #    global cap and the caller's 2-sentences-per-article-sentence cap).
-        cap = caps[i] if caps and i < len(caps) else SENTENCES_PER_PARAGRAPH
+        cap = caps[_pi] if caps and _pi < len(caps) else SENTENCES_PER_PARAGRAPH
         if len(sents) > cap:
             sents = sents[:cap]
         # 5. rebuild the paragraph (join with single spaces; keep sentence caps)
@@ -12844,6 +12847,24 @@ def main():
         else:
             print("  [RESUME] Skipping all saved episodes - starting fresh\n")
 
+    # 1b. Resume a previously-set BATCH (configs persisted in .batch_state.json).
+    manifest = _load_batch_manifest()
+    if manifest:
+        pending = [c for c in manifest["configs"]
+                   if not _batch_done(manifest.get("status"), c["episode_num"])]
+        if pending:
+            print(f"\n  [BATCH] A batch of {len(manifest['configs'])} videos was set "
+                  f"({len(pending)} not yet complete).")
+            if _yn("    Resume that batch? [Y/n]: ", default=True):
+                run_batch_resume(list(manifest["configs"]),
+                                 dict(manifest.get("status") or {}))
+                if not _yn("    Start a FRESH batch of new videos too? [y/N]: ",
+                           default=False):
+                    _pause()
+                    return
+        # Batch fully done or declined -> drop the stale manifest, continue fresh.
+        _clear_batch_manifest()
+
     # 2. Ask how many videos for the fresh batch.
     resp = input(f"\n  How many videos to generate in this batch? (1 for a single video) [1]: ").strip()
     try:
@@ -13366,6 +13387,76 @@ def run_resume_all(states: list) -> None:
             continue
 
 
+def run_batch_resume(configs: list, statuses: dict) -> None:
+    """Resume a previously-set batch (Joe 2026-08-14).
+
+    Skips episodes already finished, resumes episodes that have a saved
+    per-episode resume state (stage 'story'/'tts'/'images'/...), and runs the
+    remaining episodes fresh from their persisted config. The manifest is
+    re-saved after every episode so a second crash still resumes cleanly.
+    """
+    print(f"\n{'='*60}\n  RESUME BATCH: {len(configs)} videos\n{'='*60}")
+    for cfg in configs:
+        ep = cfg["episode_num"]
+        if _batch_done(statuses, ep):
+            print(f"\n--- Episode #{ep:03d}: already complete - skipping ---")
+            continue
+        _set_resume_ep(ep)
+        st = _load_resume_state()
+        try:
+            if st:
+                print(f"\n--- Episode #{ep:03d}: resuming from stage "
+                      f"'{st.get('stage', '?')}' ---")
+                _resume_episode(st)
+            else:
+                print(f"\n--- Episode #{ep:03d}: fresh (from saved batch config) ---")
+                run_episode(cfg)
+            statuses[str(ep)] = "done"
+            print(f"  [BATCH] Episode #{ep:03d} complete")
+        except Exception as e:
+            print(f"  [BATCH] Episode #{ep:03d} FAILED ({e}) - "
+                  f"will retry on the next batch resume")
+        _save_batch_manifest(configs, statuses)
+    _clear_batch_manifest()
+    print(f"\n{'='*60}\n  BATCH RESUME COMPLETE\n{'='*60}")
+
+
+def _load_batch_manifest() -> Optional[dict]:
+    """Load the batch manifest (configs + per-episode done status), or None."""
+    try:
+        if BATCH_FILE.exists():
+            d = json.loads(BATCH_FILE.read_text())
+            if isinstance(d, dict) and isinstance(d.get("configs"), list):
+                return d
+    except Exception:
+        pass
+    return None
+
+
+def _save_batch_manifest(configs: list, statuses: dict) -> None:
+    """Persist the batch manifest so a crash mid-batch can be resumed."""
+    try:
+        tmp = BATCH_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(
+            {"configs": configs, "status": statuses or {}},
+            indent=2, default=str))
+        tmp.replace(BATCH_FILE)
+    except Exception as e:
+        print(f"  [BATCH] manifest save failed: {e}")
+
+
+def _clear_batch_manifest() -> None:
+    try:
+        if BATCH_FILE.exists():
+            BATCH_FILE.unlink()
+    except Exception:
+        pass
+
+
+def _batch_done(statuses: Optional[dict], episode_num) -> bool:
+    return bool(statuses and statuses.get(str(episode_num)) == "done")
+
+
 def run_fresh_batch(configs: list) -> None:
     """Batch pipeline for N fresh videos.
 
@@ -13373,8 +13464,18 @@ def run_fresh_batch(configs: list) -> None:
     Phase 2: image gen for all.
       - local Krea 2 selected -> image gen for all AFTER all TTS is done (GPU).
       - codex/API (thumbnail + image) -> image gen runs SIMULTANEOUSLY with TTS.
-    Phase 3: render/metadata/thumbnail/upload each."""
+    Phase 3: render/metadata/thumbnail/upload each.
+
+    The batch manifest (.batch_state.json) is persisted up front (all pending)
+    and updated as each episode finishes, so a crash mid-batch can be resumed
+    via main()'s batch-resume prompt (skip done / resume in-progress / fresh
+    for the rest).
+    """
     print(f"\n{'='*60}\n  BATCH: generating {len(configs)} videos\n{'='*60}")
+
+    # Persist the batch manifest up front (Joe 2026-08-14: batch resume).
+    statuses = {str(c["episode_num"]): "pending" for c in configs}
+    _save_batch_manifest(configs, statuses)
 
     # Phase 1: LLM + start TTS for ALL
     ctxs = []
@@ -13383,8 +13484,14 @@ def run_fresh_batch(configs: list) -> None:
         ctx = _phase_llm(cfg)
         if ctx:
             ctxs.append(ctx)
+        else:
+            # Couldn't prepare this episode (no story / HALT). Mark it done so a
+            # batch resume doesn't loop retrying it forever.
+            statuses[str(cfg["episode_num"])] = "done"
+            _save_batch_manifest(configs, statuses)
     if not ctxs:
         print("  [HALT] No episodes could be prepared.")
+        _clear_batch_manifest()
         return
 
     local = all(c.get("img_backend") == "local" for c in configs)
@@ -13411,7 +13518,18 @@ def run_fresh_batch(configs: list) -> None:
     # Phase 3: finish each (whisper titles -> render -> metadata -> thumb -> upload)
     for ctx in ctxs:
         print(f"\n--- Episode #{ctx['episode_num']:03d}: finish (render/upload) ---")
-        _phase_finish(ctx)
+        try:
+            _phase_finish(ctx)
+            statuses[str(ctx["episode_num"])] = "done"
+            print(f"  [BATCH] Episode #{ctx['episode_num']:03d} complete")
+        except Exception as e:
+            print(f"  [BATCH] Episode #{ctx['episode_num']:03d} finish FAILED ({e}) - "
+                  f"will resume from its saved state on the next batch resume")
+        _save_batch_manifest(configs, statuses)
+
+    # All finished -> drop the manifest so the next run starts fresh.
+    if all(v == "done" for v in statuses.values()):
+        _clear_batch_manifest()
 
     print(f"\n{'='*60}\n  BATCH COMPLETE ({len(ctxs)} videos)\n{'='*60}")
 

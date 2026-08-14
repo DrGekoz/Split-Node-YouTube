@@ -1,10 +1,12 @@
 {
   "brands": {
-    "Happy Valley Racecourse": "building",
-    "Mascot Treasure": "screen",
-    "Bobo Duck": "screen",
-    "Frat Rat": "screen",
-    "Global Betting & Gaming Consultants": "screen",
-    "Bloomberg Businessweek": "screen"
+    "Microsoft": "screen",
+    "Symantec": "screen",
+    "Carbon Black": "screen",
+    "Broadcom": "screen",
+    "Trend Micro": "screen",
+    "Palo Alto Networks": "screen",
+    "Check Point Research": "screen",
+    "Google": "screen"
   }
 }
