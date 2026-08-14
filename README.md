@@ -76,7 +76,7 @@ Here's the part that separates Split Node from the other "content machine" tools
 - **Images are 100% free and local.** Krea 2 Turbo (or Z-Image) runs in ComfyUI on a **single RTX 3070 8GB** card — no per-image cloud bill. Every shot, character panel, location and prop is generated on your own GPU. The only cloud cost in the whole image pipeline is **SerpAPI at ~$0.01/query** for real-photo references (and it's cached — logos from Wikimedia cost nothing, and real-photo refs are reused).
 - **The LLM is free and local.** LM Studio + a 7.5B model on 12K context writes the entire script. No tokens, no API key, no rate limits.
 - **Voice is free and local.** PocketTTS voice-clones the narrator on your own GPU (or use a built-in catalog voice).
-- **Music, SFX and rendering are free and local.** One continuous music bed, 130+ hit-aligned SFX, and FFmpeg `hevc_nvenc` output to 1080p/4K — all on your machine.
+- **Music, SFX and rendering are free and local.** A story-adaptive Stable Audio 3 music bed, 130+ hit-aligned SFX, and FFmpeg `hevc_nvenc` output to 1080p/4K — all on your machine.
 
 So a full episode costs **basically nothing** — just the handful of SerpAPI queries for real-photo references (a few dollars worst case, often less).
 
@@ -136,8 +136,9 @@ RSS / URL story
     ▼
 ┌──────────────────────────────────────────────────────────┐
 │  6. VOICE, MUSIC & SFX                                   │
-│     PocketTTS cloned narration (parallel) · one music bed │
-│     (suspense→triumphant) · 130+ hit-aligned SFX          │
+│     PocketTTS cloned narration (parallel) · story-adaptive│
+│     Stable Audio 3 music bed (resident model, suspense→  │
+│     triumphant, ducked) · 130+ hit-aligned SFX            │
 │     · action-driven FOLEY (typing, driving, footsteps)    │
 └──────────────────────────────────────────────────────────┘
     │
@@ -282,9 +283,12 @@ python providers.py --list-videos   # show every video backend/model
 
 | Provider | Capability |
 |---|---|
-| **Local** | One continuous music bed (suspense crossfading into triumphant, -18dB) composed to fit the exact video length |
+| **Stable Audio 3** *(local, via Pinokio)* | **Story-adaptive** music bed — the resident medium model (loaded once in the SA3 Gradio UI) generates both bed sections (suspense → triumphant) through its `/generate` endpoint, so there's no per-episode model reload. Any section over 380s (6:20) is chunked into 6:20 segments + remainder, and the story/narration text is split proportionally across the chunks so each chunk's prompt reflects that story window. Music base `-10dB`, ducked to `-19.5dB` under the voice via sidechain compression (`MUSIC_BACKEND=sa3`, default). Falls back to the static pool if SA3 is unavailable |
+| **Local** | One continuous music bed (suspense crossfading into triumphant) composed to fit the exact video length — fallback when SA3 isn't available |
 | **SFX library** | 130+ cinematic sounds (Nikko Hunt) with pre-analyzed build/hit/decay times, hit-aligned at -14dB; camera shutter at -4dB |
 | **Foley pipeline** | Auto-detects the **action** in each shot's scene text and beds the matching sound for the whole clip — typing → typewriter, driving → engine/traffic, walking → footsteps, rain → downpour, fire → crackle, boat → engine, and more |
+
+> **SA3 startup port prompt (NEW):** SA3's Pinokio launcher opens on a **different localhost port each run** (7860, 7861, …), so before doing any pipeline work the script auto-scans ports 7860–7890 for a live SA3 Gradio UI (`detect_sa3_port`, socket probe + `/config` signature check). It then **asks you to confirm the port it found** (or type it manually; blank to skip music), and uses that URL for the story-adaptive music bed. Set `SA3_GRADIO_URL` to skip the prompt, or `MUSIC_BACKEND=pool` to force the static-pool fallback.
 
 ### Video
 
@@ -303,7 +307,7 @@ python providers.py --list-videos   # show every video backend/model
 | Story + Scripts + Shot List | LM Studio (local) | Free |
 | Images (panels, shots, upscale) | ComfyUI Krea 2 (local) | Free — GPU time only |
 | Narration TTS | PocketTTS (local, CUDA) | Free |
-| Music & SFX | Local | Free |
+| Music & SFX | Stable Audio 3 (local) + static-pool fallback | Free |
 | Real-photo references + trend scoring | SerpAPI | ~$0.01/query (a few dollars per episode worst case) |
 | Upload | YouTube Data API | Free quota |
 
@@ -320,6 +324,7 @@ python providers.py --list-videos   # show every video backend/model
 - **ComfyUI** with **Krea 2 Turbo** (default local backend — `comfy_manager.py` auto-starts it + downloads models)
 - **PocketTTS** server on `127.0.0.1:8769`
 - **FFmpeg** with `hevc_nvenc` (NVIDIA)
+- *(optional, story-adaptive music)* **Stable Audio 3** via Pinokio at `F:/pinokio/api/stable-audio-3-small.pinokio.git` — the resident medium model powers the story-adaptive music bed. If unavailable, the pipeline falls back to the static music pool (`MUSIC_BACKEND=sa3` default)
 - A **SerpAPI** key for real-photo references + trend scoring
 - *(optional, cloud backends)* **RunPod** and/or **fal.ai** API keys for `IMAGE_BACKEND` / `VIDEO_BACKEND`
 
@@ -513,7 +518,7 @@ split-node/
 - **Director's bible** — before any image is made: deeper problem, transformation arc, chapter moods, hero paragraphs for ECU magnification
 - **Episode world** — works for any topic / environment / location
 - **Scene board** — one storyboard card per narration beat, saved to the episode folder for human review
-- **Stage 1 — narration script** — you pick the **video length in minutes**, and the pipeline works backwards (at ~14.3s per paragraph) to the target narration-paragraph count; each article paragraph is then expanded into multiple narration paragraphs, with covered-beat dedupe and a strict OUTPUT CONTRACT. A **deterministic pacing pass** then splits overlong sentences at clause boundaries and breaks monotone length-runs so the voice reads with natural rhythm
+- **Stage 1 — narration script** — you pick the **video length in minutes**, and the pipeline works backwards (at ~14.3s per paragraph) to the target narration-paragraph count; each article paragraph is written into narration with covered-beat dedupe and a strict OUTPUT CONTRACT. A **deterministic pacing pass** then splits overlong sentences at clause boundaries and breaks monotone length-runs so the voice reads with natural rhythm. **Length cap (NEW):** the script now writes at most **1 narration paragraph per source article paragraph** (no expansion blowup), and each paragraph is capped at **2 sentences per article sentence** (and never more than the global 4-sentence cap) — so the narration stays tight and never repeats beats or balloons past the requested length
 - **Deterministic pacing gaps** — per-shot silence pauses computed in code (chapter 1.6s, question 1.2s, reveal 1.0s, hero 0.9s, place anchor 0.7s, default 0.4s) are applied to the audio mix so the narration breathes where the story needs it — no LLM involved
 - **Stage 2 — shot list** — every narration paragraph gets a shot entry: character archetype, camera logic (EWS/WS/MS/CU/ECU), angle, action, facing, SFX category
 - **10 chapter breaks** — duration-aligned from word counts, LLM-written titles
@@ -544,7 +549,7 @@ split-node/
 - **Local Krea 2 Turbo** (RTX 3070, `--lowvram`) with in-graph 4x-FaceUpDAT upscale
 - **1080p or 4K output** — `RESOLUTION` env var or startup prompt; drives both image upscale and video output, persisted to resume state
 - **Chapter cards + typewriter titles** — Bahnschrift glow-pop chapter cards, Consolas typewriter location/person cards, pinned to faster-whisper word timings
-- **Music & SFX** — one continuous music bed (suspense → triumphant, -18dB), 130+ hit-aligned SFX
+- **Music & SFX** — **story-adaptive Stable Audio 3 music bed** (resident medium model, suspense → triumphant, base -10dB ducked to -19.5dB under the voice), 130+ hit-aligned SFX
 
 ### 🥚 Easter Eggs
 - **One hidden element in exactly one shot** per episode — subtle, easy to miss. Pick from the list or write your own (`--add-easter-egg`)
@@ -558,7 +563,7 @@ split-node/
 
 ### 📦 YouTube metadata & publishing
 - **Chapterizing** — the ~10 chapter breaks are written by the LLM, pinned to **faster-whisper word timings**, and burned into the video as **Bahnschrift** chapter cards on a solid black backdrop that lasts only as long as the narrator reads the chapter title. On upload they're also written into the description as **YouTube chapter timestamps** (`00:00 …`, `02:15 …`) so viewers get an auto chaptered playback bar
-- **Title generation** — 3 clickbait titles scored against Google Trends + YouTube competition; each starts with `#XXX -` (episode number), under 70 chars, curiosity-gap driven
+- **Title generation** — 3 clickbait titles scored against Google Trends + YouTube competition; each under 70 chars, curiosity-gap driven (the public YouTube titles no longer carry the `#NNN -` episode-number prefix — the number stays internal to folders, filenames, resume state and descriptions)
 - **Description generation** — the LLM writes a full SEO description, then the chapter timestamps are appended; the Discord invite pitch is stripped for the in-app announcement
 - **Tag generation** — 12 LLM-generated topic tags merged with the channel's persistent base tags
 - **Thumbnail generation** — a clickbait headline + "SPLIT NODE" branding rendered by your chosen provider (default fal.ai GPT Image 2 for crisp text; local ComfyUI or RunPod selectable). The pipeline **asks which thumbnail provider** at startup, and the prompt now explicitly forbids rendering stray channel names/logos/watermarks (so 'FERN' never gets baked into the image)

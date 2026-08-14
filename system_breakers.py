@@ -12800,6 +12800,14 @@ def main():
     print_banner()
     _preflight()
 
+    # Ask which port Stable Audio 3 is running on BEFORE anything else
+    # (SA3's Pinokio launcher opens on a different port each run).
+    try:
+        import sa3_music
+        sa3_music.resolve_sa3_port(project="Split Node")
+    except Exception as e:
+        print(f"  [SA3] port check skipped ({e}) - will fall back if music is needed")
+
     # 1. Offer to resume EVERY existing resume state (legacy + per-episode).
     states = _scan_resume_states()
     to_resume = []

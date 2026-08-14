@@ -18,6 +18,8 @@ episodes/
 .rejected_articles.json
 .resume_state.json
 .resume_state.json.bak
+.resume_state.ep*.json
+.resume_state.ep*.json.bak
 narration_plan.json
 
 # Test / debug artifacts
@@ -30,6 +32,16 @@ test_output/
 test_*.py
 mini_test.py
 reconstruct_*.py
+_music_pipeline_test.py
+
+# Logs + ad-hoc local audio
+*.log
+song_*.wav
+
+# Voice clone backup refs (large, local-only)
+voice_refs/_clone_src/
+voice_refs/*.bak_old
+voice_refs/*.bak_prev
 
 # Trend toolkit cache
 trend_scan_cache.json

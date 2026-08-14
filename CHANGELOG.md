@@ -2,6 +2,55 @@
 
 All notable changes to Split Node.
 
+## [1.52.0] - 2026-08-14
+
+### Story-adaptive Stable Audio 3 music beds via resident medium model
+
+Joe 2026-08-14. The continuous music bed is now generated as a real
+text-to-audio bed by **Stable Audio 3** instead of crossfading the static MP3
+pool. The SA3 **medium** model is loaded ONCE in the running Pinokio Gradio UI;
+generating through its `/generate` endpoint (`gradio_client`) reuses that
+resident copy, so there's **no second 5.7GB model reload per episode**. Wired in
+`sa3_music.py` (`generate_via_gradio` / `generate_bed_via_gradio`) and driven
+from the mix step in `system_breakers.py`.
+
+- **Chunked generation** — any bed section longer than **380s (6:20)** is split
+  into N x 380s segments plus a final remainder (e.g. a 20-min episode =
+  380s x 3 + 60s), generated separately, then concatenated.
+- **STORY-ADAPTIVE** — the story/narration text is split **proportionally**
+  across the audio chunks, so each chunk's music prompt reflects the part of
+  the story happening in that time window. The two bed sections stay
+  suspense (0–65%) → triumphant (65%–end), each prompt now reflecting its own
+  section's narration.
+- **Ducking** — music base level `-10dB`, ducked to `-19.5dB` under the voice
+  via `sidechaincompress` in the mix.
+- **Fallback** — if SA3 isn't installed/available or generation fails, the mix
+  falls back to the static pool (an episode never breaks). `MUSIC_BACKEND=sa3`
+  (default) / `=pool`.
+
+### SA3 startup port prompt (SA3 opens on a different port each run)
+
+Joe 2026-08-14. SA3's Pinokio launcher opens on a **different localhost port
+each run** (7860, 7861, …), so the hardcoded `SA3_GRADIO_URL` default was
+unreliable. `sa3_music.py` now exposes `resolve_sa3_port(project)`, called at
+the top of `main()` (after preflight, **before any pipeline work**). It
+socket-probes ports 7860–7890 for live Gradio listeners, fetches `/config` on
+the listening ones, and identifies SA3 by its `pingpong` + `Stable Audio`
+signature (`detect_sa3_port`). It then asks the user to **confirm the detected
+port** (or enter it manually; blank to skip music) and updates `SA3_GRADIO_URL`
+in place. Set `SA3_GRADIO_URL` to skip the prompt.
+
+### Narration length cap — max 1 paragraph per article paragraph
+
+Joe 2026-08-14 (ba8b352). The narration script is now capped to keep it tight
+and stop length blowup / beat repetition:
+- **Max 1 narration paragraph per source article paragraph** (no multi-
+  paragraph expansion of a single excerpt).
+- Each narration paragraph is capped at **2 sentences per article sentence**
+  (and never more than the global `SENTENCES_PER_PARAGRAPH = 4` cap), enforced
+  deterministically in code (`_cap_paragraph_sentences`) on top of the LLM's
+  requested output.
+
 ## [1.49.0] - 2026-08-14
 
 ### Story resolve-and-retry (don't quit / skip on a blocked article)

@@ -175,6 +175,94 @@ def generate_bed(prompt_suspense: str, prompt_triumphant: str,
 SA3_GRADIO_URL = os.environ.get("SA3_GRADIO_URL", "http://127.0.0.1:7861/")
 _SA3_GRADIO_DRIVER = "F:\\pinokio\\api\\stable-audio-3-small.pinokio.git\\app\\_sa3_gradio_gen.py"
 
+# ---------------------------------------------------------------------------
+# SA3 port resolution (Joe 2026-08-14)
+# ---------------------------------------------------------------------------
+# SA3's Pinokio launcher opens on a DIFFERENT port each run (7860, 7861, ...),
+# so the hardcoded default above is unreliable. resolve_sa3_port() scans the
+# local Gradio /config endpoint for the SA3 signature and asks the user to
+# confirm/enter the port, then updates SA3_GRADIO_URL in-place. Every pipeline
+# should call it at startup BEFORE doing any work.
+_SA3_PORT_SCAN_RANGE = (7860, 7890)  # inclusive start, exclusive end
+
+
+def _is_sa3_config(text: str) -> bool:
+    """True if a Gradio /config payload looks like Stable Audio 3."""
+    return ("pingpong" in text and "Stable Audio" in text)
+
+
+def detect_sa3_port() -> int | None:
+    """Return the localhost port where a live SA3 Gradio UI is listening, or
+    None if none / ambiguous. First socket-probes the range (instant on refused
+    ports), then fetches /config only on ports that are actually listening."""
+    import socket
+    import urllib.request
+    listening = []
+    for port in range(*_SA3_PORT_SCAN_RANGE):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.1)
+        try:
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                listening.append(port)
+        except OSError:
+            pass
+        finally:
+            s.close()
+    found = []
+    for port in listening:
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/config", timeout=2) as r:
+                text = r.read(200000).decode("utf-8", "ignore")
+            if _is_sa3_config(text):
+                found.append(port)
+        except Exception:
+            continue
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        # Multiple SA3 UIs - ambiguous, fall through to manual entry.
+        print(f"  [SA3] Multiple SA3 UIs detected on ports {found} - please enter the active one.")
+        return None
+    return None
+
+
+def resolve_sa3_port(project: str = "pipeline") -> int | None:
+    """Ask the user which port SA3 is running on and update SA3_GRADIO_URL.
+
+    Auto-detects a single live SA3 UI and proposes it (default = accept). If
+    none/ambiguous, prompts for the port. Returns the resolved port or None if
+    the user chose to skip (music generation will fall back to the static pool).
+    """
+    global SA3_GRADIO_URL
+    detected = detect_sa3_port()
+    if detected is not None:
+        try:
+            ans = input(f"\n  [{project}] Stable Audio 3 detected on port "
+                        f"{detected} - use it? [Y/n]: ").strip().lower()
+        except EOFError:
+            ans = ""
+        if ans not in ("n", "no"):
+            SA3_GRADIO_URL = f"http://127.0.0.1:{detected}/"
+            print(f"  [SA3] using http://127.0.0.1:{detected}/")
+            return detected
+    # Manual entry (or skipped auto-detect).
+    try:
+        raw = input(f"  [{project}] Enter SA3 port (or blank to skip music): ").strip()
+    except EOFError:
+        raw = ""
+    if not raw:
+        print("  [SA3] skipping music (fallback to static pool)")
+        return None
+    try:
+        port = int(raw)
+    except ValueError:
+        print(f"  [SA3] invalid port '{raw}' - skipping music")
+        return None
+    SA3_GRADIO_URL = f"http://127.0.0.1:{port}/"
+    print(f"  [SA3] using http://127.0.0.1:{port}/")
+    return port
+
 
 def generate_via_gradio(prompt: str, duration_sec: float, out_path: str,
                         timeout: int = 3600, story_context: str = "") -> bool:
