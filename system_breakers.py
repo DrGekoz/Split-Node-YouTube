@@ -6150,12 +6150,14 @@ def _ask_thumbnail_backend() -> tuple[str, str]:
                 return b, m or "flux-schnell"
     print("\n  Thumbnail image-gen provider (for the YouTube thumbnail):")
     print("    1. local     - ComfyUI (free, your GPU)")
-    print("    2. fal       - fal.ai GPT Image 2 (default, best text rendering)")
+    print("    2. fal       - fal.ai GPT Image 2 (best text rendering)")
     print("    3. runpod    - RunPod z-image-turbo")
-    print("    4. codex     - Codex CLI /imagegen (local GPT Image 2, if installed)")
+    print("    4. codex     - Codex CLI /imagegen GPT Image 2 (default, if installed)")
     while True:
-        resp = input("  Pick 1-4 [2]: ").strip().lower()
-        if resp in ("", "2", "fal"):
+        resp = input("  Pick 1-4 [4]: ").strip().lower()
+        if resp in ("", "4", "codex"):
+            return "codex", "gpt-image-2"
+        if resp in ("2", "fal"):
             return "fal", "gpt-image-2"
         if resp in ("1", "local"):
             return "local", "krea2-turbo"
@@ -12850,7 +12852,7 @@ def main():
 
 def _apply_config_env(config: dict) -> None:
     os.environ["RESOLUTION"] = str(config.get("resolution", "1080p"))
-    os.environ["THUMBNAIL_BACKEND"] = str(config.get("thumb_backend", "fal"))
+    os.environ["THUMBNAIL_BACKEND"] = str(config.get("thumb_backend", "codex"))
     if config.get("thumb_model"):
         os.environ["THUMBNAIL_MODEL"] = str(config["thumb_model"])
     os.environ["IMAGE_BACKEND"] = str(config.get("img_backend", "local"))
