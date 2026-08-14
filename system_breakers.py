@@ -2701,7 +2701,8 @@ def _cap_paragraph_sentences(para: str, max_sents: int = SENTENCES_PER_PARAGRAPH
 
 
 def _write_narration_block(sys_prompt: str, section: str, ctx: str, dedup: str,
-                           per_para: int, max_attempts: int = 3) -> list[str]:
+                           per_para: int, max_attempts: int = 3,
+                           n_sents: int = SENTENCES_PER_PARAGRAPH) -> list[str]:
     """Generate ALL the narration paragraphs for ONE article paragraph in a
     SINGLE LLM call, then split them by logic.
 
@@ -2709,25 +2710,30 @@ def _write_narration_block(sys_prompt: str, section: str, ctx: str, dedup: str,
     drift and repeat beats (especially near the end of a long video), and makes
     the paragraph count ~meaningless for length because each returned 'paragraph'
     is really several sentences. Instead we ask the model to write EXACTLY
-    per_para paragraphs of EXACTLY SENTENCES_PER_PARAGRAPH sentences each,
-    separated by blank lines, in one call; we split on blank lines and enforce
-    the sentence cap in code. Returns the cleaned paragraphs (already capped)."""
-    n_sents = SENTENCES_PER_PARAGRAPH
+    per_para paragraphs of AT MOST n_sents sentences each, separated by blank
+    lines, in one call; we split on blank lines and enforce the sentence cap in
+    code. Returns the cleaned paragraphs (already capped). n_sents defaults to
+    SENTENCES_PER_PARAGRAPH and is per-article-para bounded by the caller."""
     user = (
         f"{section}\n\n"
         f"STORY CONTEXT (article excerpt):\n{ctx}\n\n"
         f"ALREADY WRITTEN in the episode (do NOT repeat these beats - advance to "
         f"NEW ones):\n{dedup}\n\n"
-        f"Write EXACTLY {per_para} narration paragraphs expanding THIS excerpt, "
-        f"separated by a BLANK LINE. Each paragraph must be EXACTLY {n_sents} "
-        f"sentences long (no more, no fewer).\n"
-        f"- Paragraph 1 covers the first beat/fact/angle of the excerpt.\n"
-        f"- Each subsequent paragraph advances to a DIFFERENT beat, fact, angle or "
-        f"cause-and-effect step - never restate, rephrase or echo paragraph 1 or "
-        f"anything in ALREADY WRITTEN.\n"
-        f"- Vary each paragraph's sentence length; end each paragraph on a complete "
+        f"Write EXACTLY {per_para} narration paragraph{'s' if per_para != 1 else ''} expanding THIS excerpt, "
+        f"separated by a BLANK LINE. Each paragraph must be AT MOST {n_sents} "
+        f"sentence{'s' if n_sents != 1 else ''} long (no more than {n_sents}, fewer is fine).\n"
+        f"- {'Paragraph 1' if per_para != 1 else 'The paragraph'} covers the first beat/fact/angle of the excerpt.\n"
+    )
+    if per_para != 1:
+        user += (
+            f"- Each subsequent paragraph advances to a DIFFERENT beat, fact, angle or "
+            f"cause-and-effect step - never restate, rephrase or echo paragraph 1 or "
+            f"anything in ALREADY WRITTEN.\n"
+        )
+    user += (
+        f"- Vary the sentence length; end each paragraph on a complete "
         f"sentence with terminal punctuation (never cut off or dangling).\n"
-        f"Output ONLY the {per_para} paragraphs separated by blank lines - nothing else."
+        f"Output ONLY the {per_para} paragraph{'s' if per_para != 1 else ''} separated by blank lines - nothing else."
     )
     for attempt in range(max_attempts):
         raw = _script_chat([{"role": "system", "content": sys_prompt},
@@ -2737,7 +2743,7 @@ def _write_narration_block(sys_prompt: str, section: str, ctx: str, dedup: str,
                   if b and b.strip()]
         out = []
         for b in blocks:
-            b = _cap_paragraph_sentences(b)
+            b = _cap_paragraph_sentences(b, n_sents)
             if b and not _paragraph_is_truncated(b):
                 out.append(b)
         if len(out) >= per_para:
@@ -2750,7 +2756,8 @@ def _write_narration_block(sys_prompt: str, section: str, ctx: str, dedup: str,
     return out
 
 
-def _pace_narration(paras: list[str], bible: Optional[dict] = None) -> list[str]:
+def _pace_narration(paras: list[str], bible: Optional[dict] = None,
+                    caps: Optional[list] = None) -> list[str]:
     """Deterministic pacing + rhythm pass on the narration.
 
     The LLM tends to write uniform, overlong sentences with no dramatic beats.
@@ -2790,12 +2797,13 @@ def _pace_narration(paras: list[str], bible: Optional[dict] = None) -> list[str]
                     bands = ["short" if _sentence_words(x) < _MID_LEN_LO else
                              ("long" if _sentence_words(x) > _MID_LEN_HI else "mid")
                              for x in sents]
-        # 4. enforce the deterministic SENTENCE CAP (Joe 2026-08-13): the length
-        #    prompt's paragraph count assumes ~2-4 sentence paragraphs, so trim
-        #    any paragraph that ran longer back to SENTENCES_PER_PARAGRAPH to
-        #    stop the video ballooning past the requested minutes.
-        if len(sents) > SENTENCES_PER_PARAGRAPH:
-            sents = sents[:SENTENCES_PER_PARAGRAPH]
+        # 4. enforce the deterministic SENTENCE CAP (Joe 2026-08-13/14): the length
+        #    prompt's paragraph count assumes short paragraphs, so trim any
+        #    paragraph that ran longer back to its per-paragraph cap (min of the
+        #    global cap and the caller's 2-sentences-per-article-sentence cap).
+        cap = caps[i] if caps and i < len(caps) else SENTENCES_PER_PARAGRAPH
+        if len(sents) > cap:
+            sents = sents[:cap]
         # 5. rebuild the paragraph (join with single spaces; keep sentence caps)
         out.append(" ".join(sents))
     return out
@@ -2913,9 +2921,12 @@ def _build_narration_script(paragraphs: list[str],
     target = target_paras or TARGET_NARRATION_PARAS
     print("\n[LLM] Stage 1: writing documentary narration script...")
     n_art = max(len(paragraphs), 1)
-    per_para = max(2, round(target / n_art))
-    print(f"  [LLM] Target {target} narration paragraphs "
-          f"({per_para} per article paragraph x {n_art} article paragraphs)")
+    # Joe 2026-08-14: max 1 narration paragraph per article paragraph (no
+    # expansion) so the script stays tight and never repeats beats. Each
+    # paragraph is further capped at min(4, 2 x article sentences).
+    per_para = 1
+    print(f"  [LLM] Narration = 1 paragraph per article paragraph "
+          f"({n_art} article paragraphs -> {min(n_art, len(paragraphs))} narration paragraphs)")
 
     # Build the bible-injected system prompt (structure the whole script follows)
     sys_prompt = NARRATION_SYSTEM_PROMPT
@@ -2923,6 +2934,7 @@ def _build_narration_script(paragraphs: list[str],
         sys_prompt = _narration_prompt_with_bible(NARRATION_SYSTEM_PROMPT, bible)
 
     narration_paras = []
+    _caps = []  # per-paragraph sentence caps (aligned with narration_paras)
     # Rolling dedupe context (Joe 2026-08-12): we store the ACTUAL text of the
     # most recent narration paragraphs (not a label) and feed them back so the
     # model can see exactly what it already wrote and must NOT repeat it. This
@@ -2965,10 +2977,15 @@ def _build_narration_script(paragraphs: list[str],
         # sentences each and splits them on blank lines in code.
         cross = [f"- {p[:160]}" for p in covered[-3:]]
         dedup = "\n".join(cross) if cross else "None yet."
-        block = _write_narration_block(sys_prompt, section, ctx, dedup, per_para)
+        # Cap this narration paragraph to at most 2 sentences per article
+        # sentence (Joe 2026-08-14), never exceeding the global cap.
+        art_sents = len(_split_sentences(re.sub(r"\s+", " ", _para or "").strip()))
+        cap = min(SENTENCES_PER_PARAGRAPH, max(1, 2 * art_sents))
+        block = _write_narration_block(sys_prompt, section, ctx, dedup, per_para, n_sents=cap)
         for k, p_clean in enumerate(block):
             if p_clean:
                 narration_paras.append(p_clean)
+                _caps.append(cap)
                 print(f"  [LLM] ({i+1}/{n_art}.{k+1}/{per_para}) {p_clean[:60]}...")
         # Roll the actual text into the cross-article dedupe tail.
         covered.extend([p for p in block if p])
@@ -2981,7 +2998,7 @@ def _build_narration_script(paragraphs: list[str],
                            for p in paragraphs[:target]]
 
     # Deterministic pacing pass: enforce sentence-rhythm + tighten the script
-    narration_paras = _pace_narration(narration_paras, bible)
+    narration_paras = _pace_narration(narration_paras, bible, caps=_caps)
 
     # FACT VERIFICATION (Joe 2026-08-14): a documentary that narrates specific
     # figures is only as good as those figures. Cross-check every specific
