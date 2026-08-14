@@ -2,6 +2,19 @@
 
 All notable changes to Split Node.
 
+## [1.52.3] - 2026-08-14
+
+### Fix: broken byline regex crashed every article fetch
+
+Joe 2026-08-14. `_is_junk_paragraph`'s author-byline regex had an escaped
+`\]` inside its character class, producing an unterminated character set that
+threw `re.error` on EVERY `fetch_article_paragraphs` call. That made every RSS
+candidate report "did not resolve" and get auto-skipped (even though the links
+were fine). Rewrote the byline pattern (handles "By John Smith", "By J.R.R.
+Tolkien", "by Mary-Kate Jones", initials; case-flexible "By"; no false
+positives on story sentences). Verified: fetches that previously failed now
+return paragraphs.
+
 ## [1.52.2] - 2026-08-14
 
 ### Parse links before presenting them
