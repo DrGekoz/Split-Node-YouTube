@@ -2,6 +2,17 @@
 
 All notable changes to Split Node.
 
+## [1.52.2] - 2026-08-14
+
+### Parse links before presenting them
+
+Joe 2026-08-14. `_pick_story` now **fetches + extracts every candidate article
+before it's shown to you**. A link that fails to resolve (blocked, dead,
+paywalled, empty) is **auto-skipped** with no prompt — you only ever see links
+that actually parse, and the next working story is offered instead. The
+resolved paragraphs are returned with the accepted story (no double fetch);
+custom-URL input is also verified up front.
+
 ## [1.52.1] - 2026-08-14
 
 ### SA3 startup port prompt: type a port to override

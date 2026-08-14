@@ -1634,9 +1634,15 @@ def _fetch_page_title(url: str) -> str:
     return label[:200] or url
 
 
-def _pick_story() -> tuple[str, str]:
+def _pick_story() -> tuple[str, str, list]:
     """Pick a story with user confirmation. Asks Y/n per candidate;
     re-polls RSS when the candidate pool runs out.
+
+    Joe 2026-08-14: each candidate is PARSED (article fetched + extracted)
+    BEFORE it is presented to the user. A link that fails to resolve (blocked,
+    dead, paywalled, empty) is auto-skipped to the next candidate with no
+    prompt - only working links are offered. Returns (url, title, paragraphs)
+    on accept, or ("", "", []) on abort.
 
     Optionally accepts a CUSTOM article URL instead of the RSS feed: type
     'u' (or paste a URL) at the prompt and the pipeline fetches that article
@@ -1664,8 +1670,12 @@ def _pick_story() -> tuple[str, str]:
             title = _fetch_page_title(src)
             print(f"  [URL] Using custom article: {title}")
             print(f"        {src}")
+            paras = fetch_article_paragraphs(src)
+            if not paras:
+                print(f"  [RESOLVE] custom article did not resolve - aborting")
+                return ("", "", [])
             _save_used_article(src)
-            return (src, title)
+            return (src, title, paras)
         print(f"  [WARN] '{src[:40]}' is not a valid http(s) URL - falling back to RSS")
 
     print("\n[RSS] Scraping feeds for a 'beat the system' story...")
@@ -1674,7 +1684,7 @@ def _pick_story() -> tuple[str, str]:
     pool = _collect_candidate_stories(used, rejected_set, trend_topics)
     if not pool:
         print("  [FAIL] No articles found at all")
-        return ("", "")
+        return ("", "", [])
     print(f"  [RSS] {len(pool)} candidate stories found\n")
 
     while True:
@@ -1683,21 +1693,31 @@ def _pick_story() -> tuple[str, str]:
             rounds += 1
             if rounds >= 6:
                 print("  [FAIL] Ran out of stories after 6 re-polls. Try again later.")
-                return ("", "")
+                return ("", "", [])
             print(f"\n  [RSS] Pool exhausted ({len(pool)} candidates). Re-polling feeds...")
             time.sleep(2)
             pool = _collect_candidate_stories(used, rejected_set, trend_topics)
             pool_idx = 0
             if not pool:
                 print("  [FAIL] No fresh articles found on re-poll")
-                return ("", "")
+                return ("", "", [])
 
         chosen = pool[pool_idx]
         pool_idx += 1
+        # PARSE BEFORE PRESENTING (Joe 2026-08-14): auto-skip links that don't
+        # resolve, only offer the user working stories.
+        paras = fetch_article_paragraphs(chosen["link"])
+        if not paras:
+            print(f"  [AUTO-SKIP] article did not resolve (blocked/no content): "
+                  f"{chosen['link'][:70]}")
+            _save_rejected_article(chosen["link"])
+            rejected_set.add(chosen["link"])
+            continue
         print(f"  {'='*60}")
         print(f"  CANDIDATE STORY:")
         print(f"    {chosen['title']}")
         print(f"    {chosen['link']}")
+        print(f"    [resolved: {len(paras)} paragraphs]")
         # Score line: niche + rising (Google Trends) + under-served (YouTube)
         fs = chosen.get("final_score")
         tr = chosen.get("trend_rel", 0)
@@ -1710,11 +1730,11 @@ def _pick_story() -> tuple[str, str]:
         resp = input("  Use this topic? (Y/n/q): ").strip().lower()
         if resp in ("q", "quit"):
             print("  [SKIP] Aborted by user")
-            return ("", "")
+            return ("", "", [])
         if resp in ("", "y", "yes"):
             _save_used_article(chosen["link"])
             print(f"  [OK] Story selected: {chosen['title'][:70]}")
-            return (chosen["link"], chosen["title"])
+            return (chosen["link"], chosen["title"], paras)
         # User said no - persist it so it isn't re-presented for ~1 week
         _save_rejected_article(chosen["link"])
         rejected_set.add(chosen["link"])
@@ -1722,26 +1742,17 @@ def _pick_story() -> tuple[str, str]:
 
 
 def _pick_resolvable_story() -> tuple[str, str, list]:
-    """Pick a story AND confirm its article actually resolves before committing.
-
-    Joe 2026-08-14: previously the URL was chosen here but fetched later in
-    _phase_llm, so a blocked / dead / empty article aborted the whole episode
-    (or silently skipped a batch video) after all the setup prompts. Now we
-    fetch the article immediately: if it returns nothing usable (blocked,
-    paywalled, dead link, redirect-to-empty), reject it and loop back to
-    picking a different story instead of quitting. Works for BOTH single and
-    batch pipelines because _episode_setup runs this once per video, so a
-    batch can't move on to the next video until the current one resolves.
-
-    Returns (url, title, paragraphs) on success, or ("", "", []) on abort /
-    total failure after STORY_RESOLVE_ATTEMPTS tries.
+    """Pick a story that resolves. _pick_story now PARSES each candidate before
+    presenting it and auto-skips failures, so the returned article is already
+    fetched; this wrapper only enforces an overall attempt budget so a run of
+    user-rejections can't spin forever. Returns (url, title, paragraphs) on
+    success, or ("", "", []) on abort / total failure.
     """
     max_attempts = int(os.environ.get("STORY_RESOLVE_ATTEMPTS", "5"))
     for _attempt in range(1, max_attempts + 1):
-        url, title = _pick_story()
+        url, title, paras = _pick_story()
         if not url:
             return ("", "", [])
-        paras = fetch_article_paragraphs(url)
         if paras:
             print(f"  [RESOLVE] article OK ({len(paras)} paragraphs) -> {url[:70]}")
             return (url, title, paras)
