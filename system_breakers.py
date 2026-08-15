@@ -4432,9 +4432,9 @@ def _gate(label: str) -> bool:
 # -- Stage 2: Shot list ----------------------------------------------
 
 SHOT_SYSTEM_PROMPT = (
-    "You are a shot-list director for SPLIT NODE, a 3D documentary channel "
-    "(3D characters with perfect anatomy and detailed faces). "
-    "Every person in the story is a 3D character with perfect anatomy, detailed skin, "
+    "You are a shot-list director for SPLIT NODE, a documentary channel "
+    "(characters with detailed faces). "
+    "Every person in the story is a character with detailed skin, "
     "styled hair, and clothing appropriate to the scene. "
     "The visual style is applied separately - do not describe it here."
     "Each character must be identified by NAME (use the real name from the story, or "
@@ -4715,7 +4715,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 angle = angle or "eye-level"
                 character = character or "NONE"
                 character_role = character_role or "character in the story"
-                scene = (f"3D animated character in the described scene, {RENDER_STYLE}")
+                scene = (f"character in the described scene, {RENDER_STYLE}")
                 sfx = "NONE"
                 tone = "neutral"
                 parsed = {}
@@ -4791,7 +4791,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 "angle": ["eye-level", "low-angle", "high-angle", "over-the-shoulder", "from-behind"][i % 5],
                 "character": "NONE" if i % 4 == 0 else f"Character{i}",
                 "character_role": "protagonist",
-                "scene": f"3D animated character in the described scene, {RENDER_STYLE}",
+                "scene": f"character in the described scene, {RENDER_STYLE}",
                 "sfx": "NONE",
                 "tone": "suspense" if i < len(narration_paras) - 2 else "triumphant",
             })
@@ -5016,8 +5016,8 @@ def _character_canonical_map(shots: list[dict]) -> dict[str, str]:
 # -- Stage 2b: Character sheets --------------------------------------
 
 CHARACTER_SHEET_SYSTEM_PROMPT = (
-    "You are a character designer for SPLIT NODE, a 3D documentary channel "
-    "(3D characters, perfect anatomy, detailed skin). You create PRECISE, REPEATABLE text character "
+    "You are a character designer for SPLIT NODE, a documentary channel "
+    "(characters, detailed skin). You create PRECISE, REPEATABLE text character "
     "sheets so an AI image generator renders the exact same character every time. "
     "I will give you a character's name, their role in the story, and story context. "
     "\n\n"
@@ -8578,7 +8578,7 @@ def _generate_character_sheet(char_name: str, sheet: dict, seed: int,
             p = view_desc + " " + _style_inject()
         else:
             # Kontext fallback (no real photo): full descriptive prompt.
-            p = (f"{RENDER_STYLE}. {char_block}. {view_desc}. 3D character "
+            p = (f"{RENDER_STYLE}. {char_block}. {view_desc}. character "
                  f"reference panel - 1280x1280 portrait frame. {_style_inject()}")
         if use_identity:
             # Face panel: [real_photo] ONLY (ONE tight identity ref) - style
