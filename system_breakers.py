@@ -4459,7 +4459,7 @@ SHOT_SYSTEM_PROMPT = (
     "<character NAME or NONE, or comma-separated names for multiple people> | <character role> | "
     "<full scene description: setting, what the character is DOING, which way each faces, props, lighting, camera framing. 2-4 sentences, action-focused> | "
     "<SFX filename or NONE> | <suspense | neutral | triumphant> | "
-    "<b-roll requirement: what SECONDARY/COVER footage this shot needs to fill time or add depth - e.g. 'exterior establishing of the bank', 'close-up of the ticket machine', 'drone pan over the city', 'hands counting cash', 'the empty vault'. If the main scene already covers everything and no extra footage is needed, write NONE. 2-10 words>\n"
+    "<b-roll requirement: what SECONDARY/COVER footage this shot needs to fill time or add depth - e.g. 'exterior establishing of the bank', 'close-up of the ticket booth', 'drone pan over the city', 'hands counting cash', 'the empty vault'. If the main scene already covers everything and no extra footage is needed, write NONE. 2-10 words>\n"
     "Format ONLY the pipe-separated line above. The scene description is always "
     "built from THIS narration paragraph - its real setting, action, people and "
     "objects - never a stock or invented situation. Every person shown must be a "
