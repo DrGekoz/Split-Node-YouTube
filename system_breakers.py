@@ -158,8 +158,8 @@ YOUTUBE_UPLOAD_ENABLED = True
 # 12 persistent AI-documentary-niche tags (topic tags are LLM-generated per video)
 YOUTUBE_BASE_TAGS = [
     "split node", "ai documentary", "3d documentary", "ai generated documentary",
-    "true stories", "true crime documentary", "documentary", "unreal engine",
-    "3d animation", "metahuman", "people who beat the system", "incredible true stories",
+    "true stories", "true crime documentary", "documentary", "3d animation",
+    "metahuman", "people who beat the system", "incredible true stories",
 ]
 
 # RSS feeds for the niche (fallback pool - primary source is HN Algolia search).
@@ -357,26 +357,43 @@ def _fetch_hn_algolia(query: str) -> list[dict]:
         print(f"  [RSS] HN algolia failed ({query}): {str(e)[:50]}")
         return []
 
-# Render style base - 3D animation / Unreal Engine / Metahuman with real faces
+# Render subject base - describes WHAT to render (subject/scene/framing) with
+# NO visual style wording. The style (photorealistic, arcane, etc.) is supplied
+# ONLY by _style_inject() (the selected STYLE_PROFILES descriptor) so the look is
+# fully controlled by the style injection, never hardcoded here (Joe 2026-08-15).
 RENDER_STYLE = (
-    "Realistic 3D render style, photorealistic human character with perfect anatomy, "
-    "realistic body proportions, detailed natural skin with visible pores and "
-    "subsurface scattering, lifelike expressive eyes, realistic hair, high-fidelity "
-    "Unreal Engine 5 Metahuman-quality 3D render, cinematic lighting, moody atmosphere, "
-    "dark color grade, film grain, high detail, 8k, dramatic documentary recreation"
+    "A human subject from the story, full body, engaged in the action and "
+    "setting described."
 )
 
-# Scene-only style for shots with NO character (establishing/landscape/object shots).
-# Deliberately contains zero human/anatomy language so the image generator never
-# adds a person - previously no-character shots reused RENDER_STYLE and the
-# "human character with perfect anatomy" text made RunPod render a topless man.
+# Scene-only base for shots with NO character (establishing/landscape/object).
+# Neutral content + a hard negative prompt so the image generator never adds a
+# person. No style wording - style comes only from _style_inject().
 SCENE_STYLE = (
-    "Realistic 3D render style, Unreal Engine 5 Metahuman-quality environment and "
-    "prop render, cinematic lighting, moody atmosphere, dark color grade, film grain, "
-    "high detail, 8k, dramatic documentary recreation. EMPTY SCENE - no people, no "
+    "The environment and setting from the story, with the objects and detail "
+    "described. EMPTY SCENE - no people, no "
     "humans, no characters, no figures, no silhouettes, no faces, no bodies, no hands, "
     "no clothing, no anatomy, absolutely no persons in the frame"
 )
+
+# Banned words stripped from EVERY image prompt before it reaches the image
+# model (Joe 2026-08-15): 'unreal engine' and 'machine'/'machinery'. These can
+# leak in from scene/narration text (e.g. "the machine" in lore) and must never
+# reach the generator. Applied in _krea_generate (the single image entry point).
+_IMG_BAN_RE = re.compile(
+    r"\b(unreal\s+engine(?:\s*5)?|machin(?:e|es|ery))\b", re.IGNORECASE)
+
+
+def _sanitize_image_prompt(prompt: str) -> str:
+    """Strip banned words ('unreal engine', 'machine') from an image prompt and
+    tidy the spacing left behind. Returns the cleaned prompt."""
+    if not prompt:
+        return prompt
+    p = _IMG_BAN_RE.sub("", prompt)
+    p = re.sub(r"\s{2,}", " ", p)
+    p = re.sub(r"\s+([,.;:!?])", r"\1", p)
+    p = re.sub(r"([,.;:!?])\s*,", r"\1", p)
+    return p.strip()
 
 # Style PROMPT injection (Joe 2026-08-04): b-roll shots, location sheets and
 # prop sheets generate as pure txt2img with the channel style injected as
@@ -1221,6 +1238,14 @@ CHAPTER_DB = -4.0
 FOLEY_DB = -15.0
 # Key-word whoosh highlight - a quick pointer, kept subtle (not specified by Joe).
 KEYWORD_DB = -8.0
+
+# MINIMAL_AUDIO (Joe 2026-08-15): strict whitelist for ALL channel audio - ONLY
+# the intro sound (start of video), the custom music bed (with static fallback),
+# chapter sounds, and title typewriter + glitch sounds. NO foley, NO per-shot
+# LLM SFX, NO key-word whoosh, NO camera shutter / establishing sweep. This is
+# the audio signature for Crayon Lore and is shared by Split Node + SN Shorts.
+# Set MINIMAL_AUDIO=0 to restore the old foley/SFX layers.
+MINIMAL_AUDIO = os.environ.get("MINIMAL_AUDIO", "1").strip().lower() in ("1", "true", "yes")
 
 # Discord announcement bot
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "")
@@ -4056,12 +4081,12 @@ def _ensure_card_prompt_relevant(prompt: str, title: str, n: int,
         bg = _llm_chapter_bg_prompt(title, n, topic)
         if not bg:
             break
-        prompt = (f"{_style_inject()}. {bg}. A clean cinematic documentary "
-                  f"chapter card background with NO text, NO words, NO letters, "
+        prompt = (f"{_style_inject()}. {bg}. A clean chapter card "
+                  f"background with NO text, NO words, NO letters, "
                   f"NO titles, no watermark. The composition is a striking themed "
                   f"backdrop with plenty of open negative space in the centre for "
-                  f"text to be overlaid later. Dark vignette, moody atmosphere, "
-                  f"minimal clutter. 16:9 widescreen cinematic documentary "
+                  f"text to be overlaid later. "
+                  f"minimal clutter. 16:9 widescreen "
                   f"background.")
     return prompt
 
@@ -4408,10 +4433,10 @@ def _gate(label: str) -> bool:
 
 SHOT_SYSTEM_PROMPT = (
     "You are a shot-list director for SPLIT NODE, a 3D documentary channel "
-    "(Unreal Engine 5 / Metahuman style, photorealistic 3D render characters with "
-    "perfect anatomy and realistic detailed faces). "
-    "The visual style: every person in the story is a photorealistic 3D character with "
-    "perfect anatomy, realistic detailed skin, styled hair, and clothing appropriate to the scene. "
+    "(3D characters with perfect anatomy and detailed faces). "
+    "Every person in the story is a 3D character with perfect anatomy, detailed skin, "
+    "styled hair, and clothing appropriate to the scene. "
+    "The visual style is applied separately - do not describe it here."
     "Each character must be identified by NAME (use the real name from the story, or "
     "a clearly consistent invented name if the story doesn't give one - and reuse the "
     "exact same name every time that person appears). "
@@ -4594,8 +4619,8 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 name = name.split(",")[0].strip()
             if is_loc:
                 scene = ("An establishing extreme wide shot of the location, "
-                         "the whole place in frame, no people, cinematic atmosphere, "
-                         f"highly detailed, {SCENE_STYLE}")
+                         "the whole place in frame, no people, "
+                         f"{SCENE_STYLE}")
             else:
                 # Clean the name so a polluted 'X, role, role' establishing name
                 # becomes just the person's real name (Joe 2026-08-13).
@@ -4690,8 +4715,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 angle = angle or "eye-level"
                 character = character or "NONE"
                 character_role = character_role or "character in the story"
-                scene = (f"3D animated character in a dark cinematic documentary "
-                         f"scene, dramatic lighting, {RENDER_STYLE}")
+                scene = (f"3D animated character in the described scene, {RENDER_STYLE}")
                 sfx = "NONE"
                 tone = "neutral"
                 parsed = {}
@@ -4767,7 +4791,7 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 "angle": ["eye-level", "low-angle", "high-angle", "over-the-shoulder", "from-behind"][i % 5],
                 "character": "NONE" if i % 4 == 0 else f"Character{i}",
                 "character_role": "protagonist",
-                "scene": f"3D animated character in a dark cinematic documentary scene, dramatic lighting, {RENDER_STYLE}",
+                "scene": f"3D animated character in the described scene, {RENDER_STYLE}",
                 "sfx": "NONE",
                 "tone": "suspense" if i < len(narration_paras) - 2 else "triumphant",
             })
@@ -4993,8 +5017,7 @@ def _character_canonical_map(shots: list[dict]) -> dict[str, str]:
 
 CHARACTER_SHEET_SYSTEM_PROMPT = (
     "You are a character designer for SPLIT NODE, a 3D documentary channel "
-    "(Unreal Engine 5 / Metahuman photorealistic 3D render style, perfect anatomy, "
-    "realistic skin). You create PRECISE, REPEATABLE text character "
+    "(3D characters, perfect anatomy, detailed skin). You create PRECISE, REPEATABLE text character "
     "sheets so an AI image generator renders the exact same character every time. "
     "I will give you a character's name, their role in the story, and story context. "
     "\n\n"
@@ -5649,25 +5672,11 @@ def _shot_expression_gaze(narration: str, scene: str) -> tuple:
 
 
 def _active_render_style() -> str:
-    """Style-aware RENDER_STYLE (Bug 3 rec).
-
-    RENDER_STYLE (photoreal skin, perfect anatomy, subsurface scattering) is
-    correct for photoreal profiles but FIGHTS the stylized profiles (arcane,
-    bold-outline, artsy, noir, synthwave, editorial, watercolor). The
-    contradiction drives gpt-image-2 to hallucinate hands/anatomy. For stylized
-    profiles return a matching stylized render style WITHOUT the photoreal
-    anatomy language so the model isn't torn between two directives.
-    """
-    name = _active_style_name().lower()
-    _stylized = {"arcane", "bold-outline", "artsy", "noir", "synthwave",
-                 "editorial", "watercolor"}
-    if name in _stylized:
-        return (
-            "Stylized 3D render style, consistent character proportions, natural "
-            "well-proportioned hands with five fingers, clean anatomy, detailed "
-            "finish, cinematic lighting, moody atmosphere, dark color grade, film "
-            "grain, high detail, dramatic documentary recreation"
-        )
+    """Neutral subject base (Joe 2026-08-15): returns the content-only
+    RENDER_STYLE. The visual style is supplied ONLY by _style_inject() - no
+    hardcoded style wording here, so the selected style profile (arcane,
+    photoreal, etc.) fully controls the look without any conflicting art
+    direction."""
     return RENDER_STYLE
 
 
@@ -6022,7 +6031,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
         return (
             f"{SCENE_STYLE}. {scene}{cam_desc}.{narr_ctx}{prop_clause} "
             f"{_business_building_clause(shot)}"
-            f"16:9 widescreen cinematic documentary frame, high detail "
+            f"16:9 widescreen frame, "
             f"illustration,{DOF_CLAUSE} EXACTLY ONE "
             f"continuous scene, one location, no collage, no split panels, "
             f"no duplicated scenes{no_text_clause}"
@@ -6063,7 +6072,7 @@ def _build_shot_prompt(shot: dict, character_sheets: Optional[dict] = None) -> s
     return (
         f"{render_style}. {char_part}. {scene}{cam_desc}{codex_hard}.{narr_ctx}{prop_clause} "
         f"{_business_building_clause(shot)}"
-        f"16:9 widescreen cinematic documentary frame, high detail "
+        f"16:9 widescreen frame, "
         f"illustration,{DOF_CLAUSE} EXACTLY ONE continuous "
         f"scene, no collage, no duplicated figures{hands_clause}{no_text_clause}"
     )
@@ -6445,27 +6454,27 @@ def _generate_chapter_card(shot: dict, episode_num: int,
         # channel style + logo/brand injections AFTER (Joe 2026-08-09). The
         # title is the anchor; style/brand are finishing touches, never the lead.
         prompt = (
-            f"{bg}.{card_prop_clause} A clean cinematic documentary chapter card background with "
+            f"{bg}.{card_prop_clause} A clean chapter card background with "
             f"{_no_text} The "
             f"composition is a striking themed backdrop with plenty of open "
-            f"negative space in the CENTRE for text to be overlaid later. Dark "
-            f"vignette, moody atmosphere, minimal clutter, no people as the "
-            f"main subject. 16:9 widescreen cinematic documentary background, "
-            f"high detail illustration,{DOF_CLAUSE}."
+            f"negative space in the CENTRE for text to be overlaid later. "
+            f"minimal clutter, no people as the "
+            f"main subject. 16:9 widescreen background, "
+            f"{DOF_CLAUSE}."
             f" {_style_inject(allow_logo=bool(card_refs))}.{brand_clause}"
         )
         print(f"  [CARD] chapter {n:02d} LLM background prompt generated")
     else:
         prompt = (
-            "A cinematic documentary chapter card background. Solid near-black "
-            "background with subtle dark atmosphere and a faint moody glow in "
-            "the centre."
+            "A chapter card background. Solid near-black "
+            "background with a subtle central glow "
+            "in the centre."
             f"{card_prop_clause}"
             f" {_style_inject()}.{brand_clause} {_no_text} "
-            "Clean, minimal, high contrast, "
+            "Clean, minimal, "
             "professional broadcast background plate, no photos, no people, no "
             "objects, open negative space in the centre. 16:9 widescreen, "
-            f"high detail illustration,{DOF_CLAUSE}."
+            f"{DOF_CLAUSE}."
         )
     # LLM relevance gate: cross-check the card background against the article
     # topic so it matches the STORY, not an off-topic scene (Joe 2026-08-09).
@@ -6505,6 +6514,7 @@ def _krea_generate(prompt: str, seed: int, out_path: str,
     honoured by local AND codex (which attaches refs via `-i`); runpod/fal
     are text-to-image.
     """
+    prompt = _sanitize_image_prompt(prompt)
     backend = _active_image_backend()
     # Codex (and cloud) outputs can come out smaller than requested - when the
     # caller left the 1280x720 default, aim the upscale at the OUTPUT res so a
@@ -6535,6 +6545,7 @@ def _generate_motion_clip(prompt: str, out_path: str,
     workflow must be installed. Returns True on success.
 
     Wired via env vars: VIDEO_BACKEND (default runpod), VIDEO_MODEL."""
+    prompt = _sanitize_image_prompt(prompt)
     try:
         import providers
     except Exception as e:
@@ -9755,94 +9766,96 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
             ks = [k for k in SFX_LIBRARY
                   if k.startswith(prefix) and _sfx_path(k)]
             return rng.choice(ks) if ks else None
-        # 2) Per-shot LLM SFX (hit at shot start + 0.2s). Long ambience capped.
-        for shot, start in zip(valid, clip_starts):
-            name = shot.get("sfx", "NONE")
-            if name == "NONE" or name not in SFX_LIBRARY:
-                continue
-            src = _sfx_path(name)
-            if src:
-                cap = min(SFX_LIBRARY.get(name, {}).get("dur", 8.0), 10.0)
-                placements.append((str(src), start + 0.2, cap, SFX_DB))
-        # 2b) KEY-WORD whoosh (Joe 2026-08-12): on the 1 key sentence per
-        #     paragraph, play the whoosh with its hit EXACTLY on the key word's
-        #     spoken time (whisper-resolved). The words are ALSO shown on screen
-        #     via the keyword ASS events built in _render_video.
-        kw_whoosh = "soundreality-whoosh-pointer-243108.mp3"
-        kw_meta = SFX_LIBRARY.get(kw_whoosh, {})
-        if _sfx_path(kw_whoosh):
+        if not MINIMAL_AUDIO:
+            # 2) Per-shot LLM SFX (hit at shot start + 0.2s). Long ambience capped.
+            for shot, start in zip(valid, clip_starts):
+                name = shot.get("sfx", "NONE")
+                if name == "NONE" or name not in SFX_LIBRARY:
+                    continue
+                src = _sfx_path(name)
+                if src:
+                    cap = min(SFX_LIBRARY.get(name, {}).get("dur", 8.0), 10.0)
+                    placements.append((str(src), start + 0.2, cap, SFX_DB))
+            # 2b) KEY-WORD whoosh (Joe 2026-08-12): on the 1 key sentence per
+            #     paragraph, play the whoosh with its hit EXACTLY on the key word's
+            #     spoken time (whisper-resolved). The words are ALSO shown on screen
+            #     via the keyword ASS events built in _render_video.
+            kw_whoosh = "soundreality-whoosh-pointer-243108.mp3"
+            kw_meta = SFX_LIBRARY.get(kw_whoosh, {})
+            if _sfx_path(kw_whoosh):
+                for pos, (shot, start) in enumerate(zip(valid, clip_starts)):
+                    if not shot.get("is_key") or not shot.get("key_words"):
+                        continue
+                    cs = start
+                    ce = (clip_starts[pos + 1] if pos + 1 < len(clip_starts)
+                          else cs + _get_audio_duration(shot["tts_path"]))
+                    anchor = shot["key_words"][0]
+                    t = _resolve_substring_time(shot.get("narration", ""), anchor,
+                                                words, cs, ce)
+                    if t <= cs + 0.3 and len(shot["key_words"]) > 1:
+                        t = _resolve_substring_time(shot.get("narration", ""),
+                                                    " ".join(shot["key_words"]),
+                                                    words, cs, ce)
+                    placements.append((str(_sfx_path(kw_whoosh)), t,
+                                       kw_meta.get("max_dur", 2.0), KEYWORD_DB))
+                    print(f"  [AUDIO] KEYWORD whoosh '{' '.join(shot['key_words'])}' "
+                          f"@{t:.2f}s (-{abs(KEYWORD_DB):.0f}dB)")
+            # 2c) FOLEY (Joe 2026-08-12): the LLM foley ledger (shot['foley']) plays
+            #     at the trigger's whisper time; scene-keyword fallback otherwise.
+            #     ALL foley plays at FOLEY_DB (-5dB).
             for pos, (shot, start) in enumerate(zip(valid, clip_starts)):
-                if not shot.get("is_key") or not shot.get("key_words"):
+                if shot.get("is_chapter"):
                     continue
                 cs = start
                 ce = (clip_starts[pos + 1] if pos + 1 < len(clip_starts)
                       else cs + _get_audio_duration(shot["tts_path"]))
-                anchor = shot["key_words"][0]
-                t = _resolve_substring_time(shot.get("narration", ""), anchor,
-                                            words, cs, ce)
-                if t <= cs + 0.3 and len(shot["key_words"]) > 1:
-                    t = _resolve_substring_time(shot.get("narration", ""),
-                                                " ".join(shot["key_words"]),
-                                                words, cs, ce)
-                placements.append((str(_sfx_path(kw_whoosh)), t,
-                                   kw_meta.get("max_dur", 2.0), KEYWORD_DB))
-                print(f"  [AUDIO] KEYWORD whoosh '{' '.join(shot['key_words'])}' "
-                      f"@{t:.2f}s (-{abs(KEYWORD_DB):.0f}dB)")
-        # 2c) FOLEY (Joe 2026-08-12): the LLM foley ledger (shot['foley']) plays
-        #     at the trigger's whisper time; scene-keyword fallback otherwise.
-        #     ALL foley plays at FOLEY_DB (-5dB).
-        for pos, (shot, start) in enumerate(zip(valid, clip_starts)):
-            if shot.get("is_chapter"):
-                continue
-            cs = start
-            ce = (clip_starts[pos + 1] if pos + 1 < len(clip_starts)
-                  else cs + _get_audio_duration(shot["tts_path"]))
-            planned = shot.get("foley") or []
-            if planned:
-                for f in planned:
-                    fsrc = _sfx_path(f.get("sfx", ""))
-                    if not fsrc:
-                        continue
-                    ft = _resolve_substring_time(shot.get("narration", ""),
-                                                 f.get("trigger", ""), words,
-                                                 cs, ce)
-                    bed = max(1.5, min(ce - ft - 0.2, 8.0))
-                    placements.append((str(fsrc), ft, bed, FOLEY_DB))
-                    print(f"  [AUDIO] FOLEY '{f.get('sfx')}' @{ft:.2f}s "
-                          f"(-{abs(FOLEY_DB):.0f}dB) {shot.get('narration','')[:36]}")
-            elif shot.get("sfx", "NONE") == "NONE":
-                foley = _foley_for_scene(shot.get("scene", ""))
-                if foley:
-                    fsrc = _sfx_path(foley)
-                    if fsrc:
-                        bed = max(1.5, min(ce - cs - 0.2, 8.0))
-                        placements.append((str(fsrc), cs + 0.2, bed, FOLEY_DB))
-                        print(f"  [AUDIO] FOLEY '{foley}' @{cs + 0.2:.1f}s "
-                              f"(-{abs(FOLEY_DB):.0f}dB, scene fallback)")
-        # 3) Camera shutter ONLY on the FIRST establishing shot of a person OR
-        #    of a location (Joe 2026-08-12), at -4dB - NOT every establishing
-        #    frame and NOT every new-char/location switch.
-        shutter = SFX_DIR / TITLE_SFX["shutter"]
-        shutter_kinds_seen = set()
-        for shot, start in zip(valid, clip_starts):
-            if not shot.get("is_establishing"):
-                continue
-            kind = shot.get("establishing_kind") or "person"
-            if kind in shutter_kinds_seen:
-                continue
-            if shutter.is_file():
-                placements.append((str(shutter), start + 0.1, None, SHUTTER_DB))
-                shutter_kinds_seen.add(kind)
-                print(f"  [AUDIO] Camera shutter @{start + 0.1:.1f}s "
-                      f"(FIRST establishing {kind}, -{abs(SHUTTER_DB):.0f}dB)")
-            # VCR/static sweep on establishing frames (Joe 2026-08-09, kept)
-            if shot.get("sfx", "NONE") == "NONE":
-                wkey = _pick_sfx("sweep-")
-                if wkey:
-                    wm = SFX_LIBRARY[wkey]
-                    placements.append((str(_sfx_path(wkey)), start + 0.15,
-                                       wm.get("hit", 0.5) + 1.0, SFX_DB))
-                    print(f"  [AUDIO] Sweep '{wkey}' @{start + 0.15:.1f}s")
+                planned = shot.get("foley") or []
+                if planned:
+                    for f in planned:
+                        fsrc = _sfx_path(f.get("sfx", ""))
+                        if not fsrc:
+                            continue
+                        ft = _resolve_substring_time(shot.get("narration", ""),
+                                                     f.get("trigger", ""), words,
+                                                     cs, ce)
+                        bed = max(1.5, min(ce - ft - 0.2, 8.0))
+                        placements.append((str(fsrc), ft, bed, FOLEY_DB))
+                        print(f"  [AUDIO] FOLEY '{f.get('sfx')}' @{ft:.2f}s "
+                              f"(-{abs(FOLEY_DB):.0f}dB) {shot.get('narration','')[:36]}")
+                elif shot.get("sfx", "NONE") == "NONE":
+                    foley = _foley_for_scene(shot.get("scene", ""))
+                    if foley:
+                        fsrc = _sfx_path(foley)
+                        if fsrc:
+                            bed = max(1.5, min(ce - cs - 0.2, 8.0))
+                            placements.append((str(fsrc), cs + 0.2, bed, FOLEY_DB))
+                            print(f"  [AUDIO] FOLEY '{foley}' @{cs + 0.2:.1f}s "
+                                  f"(-{abs(FOLEY_DB):.0f}dB, scene fallback)")
+        if not MINIMAL_AUDIO:
+            # 3) Camera shutter ONLY on the FIRST establishing shot of a person OR
+            #    of a location (Joe 2026-08-12), at -4dB - NOT every establishing
+            #    frame and NOT every new-char/location switch.
+            shutter = SFX_DIR / TITLE_SFX["shutter"]
+            shutter_kinds_seen = set()
+            for shot, start in zip(valid, clip_starts):
+                if not shot.get("is_establishing"):
+                    continue
+                kind = shot.get("establishing_kind") or "person"
+                if kind in shutter_kinds_seen:
+                    continue
+                if shutter.is_file():
+                    placements.append((str(shutter), start + 0.1, None, SHUTTER_DB))
+                    shutter_kinds_seen.add(kind)
+                    print(f"  [AUDIO] Camera shutter @{start + 0.1:.1f}s "
+                          f"(FIRST establishing {kind}, -{abs(SHUTTER_DB):.0f}dB)")
+                # VCR/static sweep on establishing frames (Joe 2026-08-09, kept)
+                if shot.get("sfx", "NONE") == "NONE":
+                    wkey = _pick_sfx("sweep-")
+                    if wkey:
+                        wm = SFX_LIBRARY[wkey]
+                        placements.append((str(_sfx_path(wkey)), start + 0.15,
+                                           wm.get("hit", 0.5) + 1.0, SFX_DB))
+                        print(f"  [AUDIO] Sweep '{wkey}' @{start + 0.15:.1f}s")
         # 3b) Chapter-card whoosh (Joe 2026-08-12): the Sub Bass whoosh REPLACES
         #     the old boom. Its hit lands exactly on the card transition
         #     (chapter TTS start); the whoosh BUILD plays in the gap BEFORE the
@@ -10834,7 +10847,7 @@ def _generate_thumbnail(topic: str, output_path: str) -> bool:
     # the thumbnail matches the episode's look exactly - no generic hardcoded
     # style that drifts from the actual video.
     style = _style_inject().strip()
-    prompt = (
+    prompt = _sanitize_image_prompt(
         f"YouTube documentary thumbnail, {style}, "
         f"dramatic cinematic scene related to: {topic[:120]}. Moody lighting, "
         "dark color grade, high contrast, bold and clickable composition, "
@@ -10919,8 +10932,8 @@ def _generate_titles(topic: str, episode_num: int,
     return result
 
 DESCRIPTION_SYSTEM_PROMPT = (
-    "You write YouTube video descriptions for SPLIT NODE, a 3D animated documentary "
-    "channel (Unreal Engine / Metahuman style) telling true stories of ordinary people "
+    "You write YouTube video descriptions for SPLIT NODE, a cinematic 3D animated "
+    "documentary channel telling true stories of ordinary people "
     "who beat the system - hackers, lottery mathematicians, card counters, loophole "
     "finders, scam-baiters. "
     "\n\n"
@@ -11080,46 +11093,11 @@ def _ensure_youtube_secret() -> Optional[str]:
 
 
 def _get_youtube_creds():
-    if not YOUTUBE_CREDENTIALS.is_file():
-        return None
-    try:
-        data = json.loads(YOUTUBE_CREDENTIALS.read_text())
-        # Parse the stored expiry so google.auth can detect an expired token.
-        # Without it, refresh never fires and the stale token gets 401s.
-        expiry_raw = data.get("token_expiry") or data.get("expiry")
-        expiry = None
-        if expiry_raw:
-            try:
-                if isinstance(expiry_raw, str):
-                    expiry_raw = expiry_raw.replace("Z", "+00:00")
-                expiry = datetime.fromisoformat(expiry_raw)
-                if expiry.tzinfo is not None:
-                    # google.auth compares against naive UTC - strip the tz
-                    expiry = expiry.astimezone(timezone.utc).replace(tzinfo=None)
-            except Exception:
-                expiry = None
-        creds = GoogleCreds(
-            token=data.get("access_token", data.get("token", "")),
-            refresh_token=data.get("refresh_token"),
-            client_id=data.get("client_id"),
-            client_secret=data.get("client_secret"),
-            token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
-            scopes=data.get("scopes", ["https://www.googleapis.com/auth/youtube.upload"]),
-            expiry=expiry,
-        )
-        if not creds.valid:
-            creds.refresh(AuthRefresh())
-            data["access_token"] = creds.token
-            data["token"] = creds.token
-            data["token_expiry"] = creds.expiry.isoformat() if creds.expiry else None
-            data["expiry"] = data["token_expiry"]
-            YOUTUBE_CREDENTIALS.write_text(json.dumps(data, indent=2))
-            print("  [OK] YouTube token refreshed")
-        return creds
-    except Exception as e:
-        print(f"  [WARN] Credential load failed: {e}")
-        print("  [WARN] Re-authorize Split Node: python oauth_split_node.py")
-        return None
+    """Load + refresh YouTube creds; if auth fails, re-authorize inline via
+    youtube_reauth (prints a link, waits for you to paste the code back)."""
+    import youtube_reauth
+    return youtube_reauth.ensure_youtube_creds(
+        YOUTUBE_CREDENTIALS, PROJECT_DIR, "Split Node")
 
 def _upload_video_with_progress(video_path: str, title: str, description: str,
                                 tags_str: str, privacy: str = "public") -> Optional[str]:
@@ -11157,6 +11135,7 @@ def _upload_video_with_progress(video_path: str, title: str, description: str,
             "X-Upload-Content-Length": str(file_size),
             "X-Upload-Content-Type": "video/mp4",
         }
+        upload_url = None
         r = requests_post(
             "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
             headers=headers_init, json=body, timeout=30
@@ -11164,9 +11143,19 @@ def _upload_video_with_progress(video_path: str, title: str, description: str,
         if r.status_code != 200:
             print(f"  [WARN] Upload init failed (HTTP {r.status_code})")
             if r.status_code in (401, 403):
-                print("  [WARN] Token invalid - re-run: python oauth_split_node.py")
-            return None
-        upload_url = r.headers.get("Location")
+                print("  [WARN] Token invalid - re-authorizing and retrying...")
+                creds = _get_youtube_creds()  # re-auths inline if needed
+                if creds:
+                    headers_init["Authorization"] = f"Bearer {creds.token}"
+                    r = requests_post(
+                        "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+                        headers=headers_init, json=body, timeout=30)
+                    if r.status_code == 200:
+                        upload_url = r.headers.get("Location")
+            if not upload_url:
+                return None
+        else:
+            upload_url = r.headers.get("Location")
         if not upload_url:
             return None
         chunk_size = 256 * 1024
