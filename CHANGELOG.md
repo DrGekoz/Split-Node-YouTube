@@ -2,6 +2,14 @@
 
 All notable changes to Split Node.
 
+## [1.66.0] - 2026-08-16
+
+### Key-word titles: contiguous phrase + per-word spoken-time animation
+
+- The key words on a key sentence are now a 2-3 word phrase that is a CONTIGUOUS, in-order substring of the sentence itself (`_sanitize_key_words`), not 3 words picked at random. It prefers the contiguous span covering the LLM's flagged words and falls back to the most informative contiguous content-word n-gram — always in the exact order they appear.
+- Each keyword word is now timed individually with faster-whisper on the voice track. New `_resolve_phrase_word_times` matches the contiguous phrase in-order against whisper word timings and returns a start/end per word; `_build_keyword_events` attaches them to the event as `words`.
+- The title engine (`split_node_titles._keyword_events`) now animates each word separately: each word pops in CENTRED on the 0.62H row the instant it is spoken (like the Crayon Diet word-level subtitles) and stays until the phrase ends, positioned contiguously with PIL-measured widths so they never overlap. Offsets are exact — the voice track is the timeline base at 0dB, so whisper times are already absolute video seconds. Joe 2026-08-16.
+
 ## [1.65.0] - 2026-08-16
 
 ### Fix: resume actually picks up pre-existing shots (style change no longer nukes them)

@@ -3273,37 +3273,37 @@ _KEYWORD_STOP = {
 
 
 def _sanitize_key_words(key_sentence: str, raw) -> list[str]:
-    """Return 2-3 REAL key words/phrases for an on-screen highlight.
+    """Return a 2-3 word phrase that is a CONTIGUOUS, in-order substring of the
+    key sentence (Joe 2026-08-16: the key words must be words that actually
+    appear NEXT TO EACH OTHER in the original sentence - not 3 words picked at
+    random - so per-word whisper timing can align each one to the narration).
 
-    The 4B LLM frequently returns single CHARACTERS ('c','o','l') or fragments
-    instead of words (Joe 2026-08-13: key-word titles were showing only 3 chars).
-    This keeps only items that are WHOLE-WORD substrings of the key sentence
-    (rejecting 1-char tokens), and if nothing survives falls back to the 2-3 most
-    distinctive (longest) content words of the sentence.
+    Prefers the contiguous span of the sentence that covers the LLM's raw key
+    words; falls back to the most informative contiguous content-word n-gram.
+    Always returns the words in the exact order they appear in the sentence.
     """
     s = _norm_text(key_sentence)
-    out: list[str] = []
+    toks = re.findall(r"[a-z0-9']+", s)
+    if len(toks) < 2:
+        return toks[:1] if toks else []
+    # Distinct raw key tokens the model flagged (stop words dropped, set).
+    raw_set = set()
     for w in (raw or []):
-        nw = _norm_text(w)
-        if not nw:
-            continue
-        if len(nw.split()) == 1 and len(nw) < 2:   # single char is never a word
-            continue
-        # must be a whole-word substring (not mid-word)
-        if not re.search(r"(?<![a-z0-9'])"
-                         + re.escape(nw) + r"(?![a-z0-9'])", s):
-            continue
-        out.append(str(w).strip())
-        if len(out) >= 3:
-            break
-    if not out:
-        toks = re.findall(r"[A-Za-z]{3,}", key_sentence)
-        content = [t for t in toks if t.lower() not in _KEYWORD_STOP]
-        if not content:
-            content = toks
-        content.sort(key=lambda t: (-len(t), t.lower()))
-        out = content[:3]
-    return out[:3]
+        for t in re.findall(r"[a-z0-9']+", _norm_text(w)):
+            if t and t.lower() not in _KEYWORD_STOP:
+                raw_set.add(t.lower())
+    n = len(toks)
+    best, best_sc = None, (-1.0, -1, -1)
+    for size in (2, 3):
+        for i in range(n - size + 1):
+            win = toks[i:i + size]
+            cov = sum(1 for t in win if t.lower() in raw_set) / size
+            content = sum(1 for t in win if t.lower() not in _KEYWORD_STOP)
+            sc = (cov, content, size)
+            if sc > best_sc:
+                best_sc, best = sc, win
+    return best[:3]
+
 
 
 def _summarize_paragraphs(paragraphs: list[str]) -> list[str]:
@@ -3542,11 +3542,74 @@ def _resolve_substring_time(narration: str, substring: str, words: list,
     return hit if hit is not None else clip_start + 0.2
 
 
+def _resolve_phrase_word_times(narration: str, phrase_words: list, words: list,
+                               clip_start: float, clip_end: float):
+    """Per-word (start,end) for a CONTIGUOUS phrase, matched in-order against
+    faster-whisper word timings within the shot's clip window. Returns a list of
+    {text, start, end} (absolute video seconds) or None if the phrase can't be
+    found. Each word's times align to WHEN it is actually spoken (Joe 2026-08-16).
+    """
+    if not phrase_words or not words:
+        return None
+    win = [w for w in words
+           if (w.get("start") or 0) >= clip_start - 0.3
+           and (w.get("start") or 0) <= clip_end + 0.3]
+    if not win:
+        return None
+    joined, starts = "", []
+    for w in win:
+        tok = _norm_text(w.get("word", ""))
+        if not tok:
+            continue
+        if joined:
+            joined += " "
+        starts.append((len(joined), len(joined) + len(tok),
+                       float(w.get("start") or clip_start),
+                       float(w.get("end") or 0.0)))
+        joined += tok
+    phrase = _norm_text(" ".join(phrase_words))
+    if not phrase or not joined:
+        return None
+    idx = joined.find(phrase)
+    if idx < 0:
+        return None
+    end_idx = idx + len(phrase)
+    span = [(lo, hi, st, en) for (lo, hi, st, en) in starts
+            if lo < end_idx and hi > idx]
+    if not span:
+        return None
+    s_lo, s_hi = span[0][0], span[-1][1]
+    s_len = max(s_hi - s_lo, 1)
+    # Cumulative character offsets of the phrase words (with single spaces).
+    p_offsets, acc = [], 0
+    for pw in phrase_words:
+        nw = _norm_text(pw)
+        p_offsets.append((acc, acc + len(nw)))
+        acc += len(nw) + 1
+    p_len = max(acc - 1, 1)
+    out = []
+    for j, (po0, po1) in enumerate(p_offsets):
+        mid = s_lo + s_len * ((po0 + po1) / 2.0) / p_len
+        chosen = None
+        for (lo, hi, st, en) in span:
+            if lo <= mid <= hi:
+                chosen = (st, en)
+                break
+        if chosen is None:
+            chosen = (span[0][2], span[0][3])
+        st = chosen[0]
+        en = chosen[1] if chosen[1] and chosen[1] > 0 else st + 0.4
+        out.append({"text": str(phrase_words[j]), "start": round(st, 3),
+                    "end": round(en, 3)})
+    return out
+
+
 def _build_keyword_events(shots: list[dict], words: list, clip_starts: list) -> list[dict]:
     """Build on-screen KEY-WORD highlight events (kind='keyword') for every key
-    sentence. The 2-3 key words are burned at their whisper-resolved spoken time,
-    held ~1.2s. Only the 1 key sentence per paragraph gets a highlight (Joe
-    2026-08-12)."""
+    sentence. The key words are a CONTIGUOUS in-order phrase from the sentence;
+    per-word whisper times are attached so the title engine animates each word
+    exactly as it is spoken (Joe 2026-08-16). Only 1 key sentence per paragraph
+    gets a highlight."""
     events = []
     for i, shot in enumerate(shots):
         if not shot.get("is_key") or not shot.get("key_words"):
@@ -3554,14 +3617,19 @@ def _build_keyword_events(shots: list[dict], words: list, clip_starts: list) -> 
         cs = clip_starts[i] if i < len(clip_starts) else 0.0
         ce = (clip_starts[i + 1] if i + 1 < len(clip_starts)
               else cs + _get_audio_duration(shot["tts_path"]))
-        anchor = shot["key_words"][0]
-        t = _resolve_substring_time(shot.get("narration", ""), anchor, words, cs, ce)
-        if t <= cs + 0.3 and len(shot["key_words"]) > 1:
+        phrase_words = [w for w in (shot.get("key_words") or []) if w]
+        wtimes = _resolve_phrase_word_times(shot.get("narration", ""),
+                                            phrase_words, words, cs, ce)
+        if not wtimes:
+            # Fall back to whole-phrase start for every word.
             t = _resolve_substring_time(shot.get("narration", ""),
-                                        " ".join(shot["key_words"]), words, cs, ce)
-        events.append({"kind": "keyword", "start": round(t, 3),
-                       "end": round(t + 1.2, 3),
-                       "text": " ".join(shot["key_words"])})
+                                        " ".join(phrase_words), words, cs, ce)
+            wtimes = [{"text": w, "start": t, "end": t + 0.4} for w in phrase_words]
+        text = " ".join(phrase_words)
+        events.append({"kind": "keyword",
+                       "start": round(min(w["start"] for w in wtimes), 3),
+                       "end": round(max(w["end"] for w in wtimes) + 0.9, 3),
+                       "text": text, "words": wtimes})
     return events
 
 

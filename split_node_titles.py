@@ -280,30 +280,68 @@ def _typewriter_events(ev, W, H, fps) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Key-word highlights (Joe 2026-08-12)
+# Key-word highlights (Joe 2026-08-12, per-word 2026-08-16)
 # ---------------------------------------------------------------------------
 
-def _keyword_events(ev, W, H, fps) -> list[str]:
-    """ev: {kind:'keyword', text (the 2-3 key words), start, end}
+def _escape_kw(t: str) -> str:
+    return t.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
 
-    The key words pop in at the instant they are spoken, hold ~1.2s, then fade.
-    Centered at 0.62H, Bahnschrift, white core + cyan glow so they read as the
-    words the viewer should remember without clashing with the chapter cards
-    (centre, larger) or typewriter row (bottom-left)."""
-    dur = max(ev.get("end", ev["start"] + 1.2) - ev["start"], 1.0)
-    text = ev["text"].upper()
-    text = text.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
-    cx, cy = W // 2, int(H * 0.62)
-    pop = min(0.28, dur * 0.4)
-    glow = (f"{{\\an5\\pos({cx},{cy})\\blur(12)\\bord(2)\\1c&H0000D7FF&\\alpha&H70&"
-            f"\\fscx(70)\\fscy(70)\\t(0,{int(pop*1000)},\\fscx(100)\\fscy(100)\\alpha&H55&)"
-            f"\\t({int(pop*1000)},{int(dur*1000)},\\alpha&H80&)}}{text}")
-    core = (f"{{\\an5\\pos({cx},{cy})\\1c&HFFFFFF&\\bord(3)\\3c&H000000&\\shad(0)"
-            f"\\fscx(60)\\fscy(60)\\alpha&HFF&"
-            f"\\t(0,{int(pop*1000)},\\fscx(110)\\fscy(110)\\alpha&H00&)"
-            f"\\t({int(pop*1000)},{int(pop*1000)+250},\\fscx(100)\\fscy(100))}}{text}")
-    return [_dialog(ev["start"], ev["end"], "KwGlow", glow, layer=5),
-            _dialog(ev["start"], ev["end"], "KwCore", core, layer=7)]
+
+def _keyword_events(ev, W, H, fps) -> list[str]:
+    """ev: {kind:'keyword', text (the 2-3 key words), start, end, words?}
+
+    words = [{text, start, end}, ...] per-word faster-whisper times (absolute
+    video seconds). Each word pops in CENTRED on the row at 0.62H the instant it
+    is SPOKEN and stays until the phrase ends, so the words light up one-by-one
+    exactly as the narrator says them (Joe 2026-08-16, per-word animation like
+    the Crayon Diet subtitles). Words are positioned contiguously (PIL-measured
+    widths) so they never overlap, Bahnschrift white core + cyan glow."""
+    words = ev.get("words")
+    if not words:
+        base = float(ev.get("start", 0.0))
+        words = [{"text": w, "start": base,
+                  "end": float(ev.get("end", base + 1.2))}
+                 for w in str(ev.get("text", "")).split()]
+    if not words:
+        return []
+    fontsize = int(H * 0.05)
+    cy = int(H * 0.62)
+    entries = []
+    for wd in words:
+        t = _escape_kw(str(wd.get("text", "")).upper())
+        wpx = _text_width("Bahnschrift", fontsize, t)
+        entries.append((t, max(int(wpx), int(fontsize * 0.55)),
+                        float(wd.get("start") or 0.0),
+                        float(wd.get("end") or 0.0)))
+    if not entries:
+        return []
+    gap = int(fontsize * 0.18)
+    total = sum(w for _, w, _, _ in entries) + gap * (len(entries) - 1)
+    x0 = W / 2.0 - total / 2.0
+    starts = [st for _, _, st, _ in entries]
+    ends = [en for _, _, _, en in entries]
+    g_start = min(starts)
+    g_end = (max(max(starts), max(e for e in ends if e > 0)) + 0.9
+             if any(e > 0 for e in ends) else g_start + 1.2)
+    if g_end <= g_start + 0.5:
+        g_end = g_start + 1.2
+    pop = min(0.28, (g_end - g_start) * 0.4)
+    pop_ms = int(pop * 1000)
+    lines = []
+    x = x0
+    for text, width, wst, _wen in entries:
+        cx = int(x + width / 2.0)
+        glow = (f"{{\\an5\\pos({cx},{cy})\\blur(12)\\bord(2)\\1c&H0000D7FF&\\alpha&H70&"
+                f"\\fscx(70)\\fscy(70)\\t(0,{pop_ms},\\fscx(100)\\fscy(100)\\alpha&H55&)"
+                f"\\t({pop_ms},{int((g_end - wst) * 1000)},\\alpha&H80&)}}{text}")
+        core = (f"{{\\an5\\pos({cx},{cy})\\1c&HFFFFFF&\\bord(3)\\3c&H000000&\\shad(0)"
+                f"\\fscx(60)\\fscy(60)\\alpha&HFF&"
+                f"\\t(0,{pop_ms},\\fscx(110)\\fscy(110)\\alpha&H00&)"
+                f"\\t({pop_ms},{pop_ms + 250},\\fscx(100)\\fscy(100))}}{text}")
+        lines.append(_dialog(wst, g_end, "KwGlow", glow, layer=5))
+        lines.append(_dialog(wst, g_end, "KwCore", core, layer=7))
+        x += width + gap
+    return lines
 
 
 # ---------------------------------------------------------------------------
