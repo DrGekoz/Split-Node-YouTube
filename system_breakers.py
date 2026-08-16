@@ -10911,6 +10911,7 @@ def _run_render_progress(cmd: list, cwd: str, total: float,
                     bar_format="{desc}: {percentage:3.0f}%|{bar}| "
                                "{n:.0f}/{total_fmt}s [{elapsed}<{remaining}]")
     last_sec = 0.0
+    noted_finalize = False
     try:
         for line in proc.stdout:
             if pbar is None or not line:
@@ -10927,13 +10928,23 @@ def _run_render_progress(cmd: list, cwd: str, total: float,
                     continue
             else:
                 continue
-            pbar.update(max(0.0, min(sec - last_sec, total - pbar.n)))
+            if pbar is not None:
+                pbar.update(max(0.0, min(sec - last_sec, total - pbar.n)))
+                # out_time hit the target but ffmpeg is still running (the
+                # -movflags +faststart moov rewrite has no out_time), so the bar
+                # would sit frozen at 100% and look stuck. Label it finalizing.
+                if pbar.n >= total and not noted_finalize:
+                    noted_finalize = True
+                    pbar.set_postfix_str("finalizing (moov/faststart)...",
+                                         refresh=True)
             last_sec = sec
     except Exception:
         pass
     proc.wait()
     th.join(timeout=5)
     if pbar:
+        if not noted_finalize and pbar.n < total:
+            pbar.update(total - pbar.n)
         pbar.close()
         print()
     return proc.returncode, "".join(err_buf)

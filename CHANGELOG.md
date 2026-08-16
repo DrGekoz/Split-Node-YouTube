@@ -2,6 +2,12 @@
 
 All notable changes to Split Node.
 
+## [1.68.0] - 2026-08-16
+
+### Fix: render progress bar no longer freezes at 100% during the faststart moov rewrite
+
+- After ffmpeg finishes encoding (out_time reaches the target), the `-movflags +faststart` pass rewrites the file to move the moov atom to the front. That pass emits no `out_time`, so the tqdm bar sat frozen at 100% looking stuck even though work was still happening. Now, once out_time hits the target while ffmpeg is still running, the bar's postfix switches to "finalizing (moov/faststart)..." so it's clear the encode is done but the file is still being finalized. The bar is also force-completed if the process exits before reaching the target. Joe 2026-08-16.
+
 ## [1.67.0] - 2026-08-16
 
 ### Fix: SA3 startup stall + silent single-pass render + resume key-word regen
