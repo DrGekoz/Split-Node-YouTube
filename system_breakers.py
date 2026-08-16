@@ -2036,7 +2036,7 @@ def _strip_narration_meta(text: str) -> str:
 def _llm_score_batch(messages: list[dict], max_tokens: int = 300) -> str:
     """Minimal LM Studio call for relevance scoring (no stop tokens, low temp)."""
     data = json.dumps({
-        "model": "gemma-4-e4b-uncensored-hauhaucs-aggressive",
+        "model": LLM_MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0.2,
@@ -2166,7 +2166,7 @@ def fetch_article_paragraphs(url: str) -> list[str]:
 
 def _llm_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -> str:
     data = json.dumps({
-        "model": "gemma-4-e4b-uncensored-hauhaucs-aggressive",
+        "model": LLM_MODEL,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": temp,
@@ -2198,6 +2198,109 @@ def _llm_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -
 # force the old local path, or CODEX_SCRIPT_MODEL to override the model.
 CODEX_SCRIPT_MODEL = os.environ.get("CODEX_SCRIPT_MODEL", "gpt-5.4")
 CODEX_SCRIPT_EFFORT = os.environ.get("CODEX_SCRIPT_EFFORT", "low")
+
+# ---- LLM backend selection (Joe 2026-08-16) ------------------------------
+# Chosen at startup via _select_llm(): either LM Studio (a loaded local model)
+# or Codex (a cloud OpenAI model, listed cheapest-first). LLM_PROVIDER + the
+# model drive the narration writer (_script_chat); LLM_MODEL is always a valid
+# LOCAL model so the aux LM Studio calls (relevance scoring, chapter titles,
+# reachability probe) keep working even when the narrative uses Codex.
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "").strip().lower()
+LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()
+NARRATIVE_MODEL = LLM_MODEL or CODEX_SCRIPT_MODEL
+
+# Approx USD per 1M input tokens for the Codex/OpenAI models that actually work
+# on a ChatGPT account (see the script-backend comment below). Used ONLY to
+# sort the Codex picker cheapest-first; real billing varies.
+CODEX_MODEL_CATALOG = {
+    "gpt-5.4": 1.25,   # tested default
+    "gpt-5.3": 1.25,
+    "gpt-5.2": 1.25,
+    "gpt-5":   1.25,
+    "gpt-5.5": 2.50,   # pricier
+}
+
+
+def _lmstudio_loaded_models() -> list:
+    """IDs of the models currently loaded in LM Studio (/v1/models)."""
+    try:
+        req = urllib.request.Request(
+            "http://localhost:1234/v1/models",
+            headers={"User-Agent": "splitnode/1.1"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            data = json.loads(r.read().decode())
+        return [m.get("id", "") for m in data.get("data", []) if m.get("id")]
+    except Exception:
+        return []
+
+
+def _select_llm() -> None:
+    """Startup prompt: pick the LLM backend + model.
+      1 = LM Studio (lists currently-loaded models, you pick)
+      2 = Codex     (lists models sorted cheapest-first, you pick)
+    LLM_PROVIDER + LLM_MODEL env vars skip the prompt (headless/cron runs)."""
+    global LLM_PROVIDER, LLM_MODEL, NARRATIVE_MODEL, CODEX_SCRIPT_MODEL
+    if LLM_PROVIDER and LLM_MODEL:
+        if LLM_PROVIDER == "codex":
+            NARRATIVE_MODEL = LLM_MODEL
+            CODEX_SCRIPT_MODEL = LLM_MODEL
+        else:
+            NARRATIVE_MODEL = LLM_MODEL
+        print(f"  [LLM] backend={LLM_PROVIDER} model={NARRATIVE_MODEL} (env)")
+        return
+    print("\n  Select the LLM backend for this run:")
+    print("    1) LM Studio  (local - shows loaded models, you pick)")
+    print("    2) Codex      (cloud OpenAI - models sorted by cheapest)")
+    choice = input("  LLM backend [1/2, Enter=LM Studio]: ").strip().lower()
+    if choice in ("2", "codex"):
+        _select_llm_codex()
+    else:
+        _select_llm_lmstudio()
+
+
+def _select_llm_lmstudio() -> None:
+    global LLM_PROVIDER, LLM_MODEL, NARRATIVE_MODEL
+    models = _lmstudio_loaded_models()
+    if not models:
+        print("  [LLM] LM Studio not reachable / nothing loaded on :1234")
+        LLM_PROVIDER = "lmstudio"
+        LLM_MODEL = LLM_MODEL or "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+        NARRATIVE_MODEL = LLM_MODEL
+        print(f"  [LLM] defaulting to LM Studio / {LLM_MODEL}")
+        return
+    print("  Loaded LM Studio models:")
+    for i, m in enumerate(models, 1):
+        print(f"    {i}) {m}")
+    idx = input(f"  Pick model [1-{len(models)}, Enter={models[0]}]: ").strip()
+    try:
+        LLM_MODEL = models[int(idx) - 1]
+    except (ValueError, IndexError):
+        LLM_MODEL = models[0]
+    LLM_PROVIDER = "lmstudio"
+    NARRATIVE_MODEL = LLM_MODEL
+    print(f"  [LLM] LM Studio -> {LLM_MODEL}")
+
+
+def _select_llm_codex() -> None:
+    global LLM_PROVIDER, LLM_MODEL, NARRATIVE_MODEL, CODEX_SCRIPT_MODEL
+    cat = sorted(CODEX_MODEL_CATALOG.items(), key=lambda kv: (kv[1], kv[0]))
+    print("  Codex models (cheapest first):")
+    for i, (m, price) in enumerate(cat, 1):
+        star = "  (default)" if m == "gpt-5.4" else ""
+        print(f"    {i}) {m:<10} ~${price:.2f}/1M in{star}")
+    idx = input(f"  Pick model [1-{len(cat)}, Enter={cat[0][0]}]: ").strip()
+    try:
+        NARRATIVE_MODEL = cat[int(idx) - 1][0]
+    except (ValueError, IndexError):
+        NARRATIVE_MODEL = cat[0][0]
+    LLM_PROVIDER = "codex"
+    CODEX_SCRIPT_MODEL = NARRATIVE_MODEL
+    # Keep a valid LOCAL model for the aux LM Studio calls (relevance, titles).
+    if not LLM_MODEL:
+        locals_ = _lmstudio_loaded_models()
+        LLM_MODEL = (locals_[0] if locals_
+                     else "gemma-4-e4b-uncensored-hauhaucs-aggressive")
+    print(f"  [LLM] Codex -> {NARRATIVE_MODEL} (aux LM Studio -> {LLM_MODEL})")
 
 
 def _codex_available() -> bool:
@@ -2265,11 +2368,13 @@ def _codex_script_chat(messages: list[dict], max_tokens: int = 2000, temp: float
 
 
 def _script_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -> str:
-    """Script-writing LLM dispatcher. Uses Codex (gpt-5.4) unless
-    SCRIPT_BACKEND=lmstudio; falls back to LM Studio on any codex failure so a
-    broken/throttled codex can never stall an episode. The caller's logic is
-    identical either way."""
-    if os.environ.get("SCRIPT_BACKEND", "codex").strip().lower() != "lmstudio":
+    """Script-writing LLM dispatcher. Uses the startup-selected backend
+    (LLM_PROVIDER): codex -> codex exec with NARRATIVE_MODEL; lmstudio ->
+    _llm_chat with LLM_MODEL. Falls back to LM Studio on any codex failure so
+    a broken/throttled codex can never stall an episode."""
+    global CODEX_SCRIPT_MODEL
+    if LLM_PROVIDER == "codex":
+        CODEX_SCRIPT_MODEL = NARRATIVE_MODEL
         t = _codex_script_chat(messages, max_tokens=max_tokens, temp=temp)
         if t:
             return t
@@ -3946,7 +4051,7 @@ def _llm_fast_reachable() -> bool:
     # Probe the CHAT endpoint (NOT /v1/models) with a short timeout: /v1/models
     # can still respond while inference is dead/hung, which would let the gate
     # block on a 180s per-call timeout. A tiny chat call is the real liveness test.
-    _model = "gemma-4-e4b-uncensored-hauhaucs-aggressive"
+    _model = LLM_MODEL
     _payload = {"model": _model,
                 "messages": [{"role": "user", "content": "hi"}],
                 "max_tokens": 2, "temperature": 0.1}
@@ -11534,7 +11639,7 @@ def _preflight() -> bool:
         print(f"  [WARN] PocketTTS not reachable: {e}")
     try:
         req = urllib.request.Request(LM_STUDIO_URL, data=json.dumps({
-            "model": "gemma-4-e4b-uncensored-hauhaucs-aggressive",
+            "model": LLM_MODEL,
             "messages": [{"role": "user", "content": "ping"}],
             "max_tokens": 1,
         }).encode(), headers={"Content-Type": "application/json"})
@@ -12910,6 +13015,9 @@ def main():
     print_banner()
     _preflight()
 
+    # Pick the LLM backend + model (LM Studio loaded models, or Codex cheapest).
+    _select_llm()
+
     # Ask which port Stable Audio 3 is running on BEFORE anything else
     # (SA3's Pinokio launcher opens on a different port each run).
     try:
@@ -13122,8 +13230,7 @@ def _phase_llm(config: dict):
     # is caught before the run, instead of every narration/shot call falling
     # through to LM Studio (or worse, serializing into 180s hangs). Fail-open:
     # a non-codex backend or an unprobeable codex never blocks the episode.
-    if os.environ.get("SCRIPT_BACKEND", "codex").strip().lower() != "lmstudio" \
-            and not _codex_script_reachable():
+    if LLM_PROVIDER == "codex" and not _codex_script_reachable():
         print("  [WARN] Codex script backend unreachable - script writing will "
               "fall back to LM Studio for this episode")
 
