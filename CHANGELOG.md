@@ -2,6 +2,12 @@
 
 All notable changes to Split Node.
 
+## [1.65.0] - 2026-08-16
+
+### Fix: resume actually picks up pre-existing shots (style change no longer nukes them)
+
+- A style change on resume no longer force-regenerates existing shots. Previously picking a style different from the episode's current one set `REGEN_IMAGES=1` unconditionally, so a resume that should have reused already-generated images (reconciled against disk) instead re-rendered ALL of them — overriding your explicit "no" to image regen. Now a style change only forces full re-render if you ALSO opted into image regeneration (`_wants_img_regen`); otherwise resume keeps the existing shots and the new style applies only to genuinely-missing ones. `_reconcile_shot_image`/`_reconcile_chapter_card` were already correctly matching the on-disk files; this removes the override that bypassed them. Joe 2026-08-16.
+
 ## [1.64.0] - 2026-08-16
 
 ### Fix: no stall after the first image batch on resume / batch render

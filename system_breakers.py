@@ -12518,6 +12518,7 @@ def _resume_episode(state: dict) -> None:
     # Let the user decide what to rebuild on resume instead of silently only
     # filling the gaps. SKIP_RESUME_MENU=1 restores the old gap-fill-only flow.
     regen_tts = False
+    _wants_img_regen = False
     if not os.environ.get("SKIP_RESUME_MENU"):
         print("  [RESUME] What would you like to rebuild? (enter for No):")
         _regen_script = _yn("    Rebuild the narration SCRIPT from the article? [y/N]: ")
@@ -12559,6 +12560,7 @@ def _resume_episode(state: dict) -> None:
                 regen_tts = True
                 os.environ["REGEN_IMAGES"] = "1"
                 os.environ["REGEN_CLIPS"] = "1"
+                _wants_img_regen = True
                 # Titles/description/tags derive from the script - reset them.
                 titles, description, tags = [], "", []
                 print("  [RESUME] Script rebuilt -> forcing image + TTS regeneration")
@@ -12568,10 +12570,12 @@ def _resume_episode(state: dict) -> None:
             _ask_image_model_swap()
             os.environ["REGEN_IMAGES"] = "1"
             os.environ["REGEN_CLIPS"] = "1"  # clips embed the image - must re-render
+            _wants_img_regen = True
             print("  [RESUME] Model changed -> forcing image regeneration")
         if _regen_img:
             os.environ["REGEN_IMAGES"] = "1"
             os.environ["REGEN_CLIPS"] = "1"  # clips embed the image - must re-render
+            _wants_img_regen = True
         if _regen_chapters:
             os.environ["REGEN_CHAPTERS"] = "1"
             print("  [RESUME] Regenerating CHAPTER CARD images (REGEN_CHAPTERS=1)")
@@ -12614,16 +12618,24 @@ def _resume_episode(state: dict) -> None:
         global _RESUME_STYLE
         _RESUME_STYLE = state.get("style")
     # If the user didn't force a style via env, ask which style to use for the
-    # resumed images. Picking a style DIFFERENT from the resume style forces a
-    # full re-generate (overwrite) so the new look actually applies.
+    # resumed images. Picking a style DIFFERENT from the resume style only forces
+    # a full re-render of EXISTING shots if the user ALSO opted to regenerate
+    # images (_wants_img_regen) - a style change alone must NOT nuke already-made
+    # shots, or resume would never pick up pre-existing images (Joe 2026-08-16).
+    # If they kept images, the new style simply applies to any genuinely-missing
+    # shots that still need generating.
     if not (os.environ.get("STYLE") or os.environ.get("STYLE_PROFILE")):
         _cur = _active_style_name()
         _chosen = _ask_style_selection(_cur)
         if _chosen and _chosen.lower() != _cur.lower():
-            print(f"  [STYLE] changed {_cur or 'default'} -> {_chosen} - "
-                  f"forcing full re-generate so the new look applies")
-            os.environ["REGEN_IMAGES"] = "1"
-            os.environ["REGEN_CLIPS"] = "1"  # clips embed the image - must re-render
+            if _wants_img_regen:
+                print(f"  [STYLE] changed {_cur or 'default'} -> {_chosen} - "
+                      f"forcing full re-generate so the new look applies")
+                os.environ["REGEN_IMAGES"] = "1"
+                os.environ["REGEN_CLIPS"] = "1"  # clips embed the image - must re-render
+            else:
+                print(f"  [STYLE] changed {_cur or 'default'} -> {_chosen} - "
+                      f"keeping existing shots (new look applies to any missing ones)")
         if _chosen:
             os.environ["STYLE"] = _chosen
     # Ask the user for the output resolution on resume too (Joe 2026-08-09):
