@@ -2,6 +2,12 @@
 
 All notable changes to Split Node.
 
+## [1.60.0] - 2026-08-16
+
+### Arcane style simplified
+
+- Cut the default `arcane` style prompt from 12 lines of overlapping descriptors to a concise descriptor. New arcane = stylized painterly 3D animation, bold inked outlines, cel-shaded graphic-novel texture, gritty weathered surfaces, dramatic rim lighting, saturated slightly-dirty colors, cinematic video-game concept art finish, no text/logos.
+
 ## [1.59.0] - 2026-08-16
 
 ### Logo download validation

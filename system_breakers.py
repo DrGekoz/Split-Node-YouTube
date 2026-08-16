@@ -414,18 +414,10 @@ STYLE_PROMPT_FALLBACK = (
 # An unrecognised/custom value is used verbatim as a free-form style tag.
 STYLE_PROFILES = {
     "arcane": (
-        "Stylized hand-painted comic realism, cel-shaded 3D rendering, bold "
-        "inked outlines, graphic-novel linework, exaggerated edge definition, "
-        "painterly textures, distressed surfaces, gritty weathering, visible "
-        "scratches and imperfections, high-contrast lighting, dramatic rim "
-        "lighting, saturated but slightly dirty color palette, warm highlights "
-        "against cool shadows, strong ambient occlusion, sharp facial and "
-        "object definition, chunky simplified forms, slightly exaggerated "
-        "proportions, textured brush strokes, rough cross-hatching, poster-like "
-        "shading, cinematic depth of field, atmospheric bloom, punchy "
-        "highlights, deep shadows, stylized realism, rebellious retro-futuristic "
-        "aesthetic, polished video-game concept art finish, NO TEXT, no words, "
-        "no letters, no captions, no watermarks, no logos"),
+        "Stylized painterly 3D animation, bold inked outlines, cel-shaded "
+        "graphic-novel texture, gritty weathered surfaces, dramatic rim lighting, "
+        "saturated slightly-dirty colors, cinematic video-game concept art "
+        "finish, NO TEXT, no words, no letters, no captions, no watermarks, no logos"),
     "bold-outline": (
         "bold thick black outlines, flat cel-shaded color, comic book "
         "illustration, high contrast, clean graphic shapes, dynamic angles, "
