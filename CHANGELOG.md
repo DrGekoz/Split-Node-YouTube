@@ -2,6 +2,12 @@
 
 All notable changes to Split Node.
 
+## [1.59.0] - 2026-08-16
+
+### Logo download validation
+
+- A logo is only accepted when the downloaded source's filename contains the exact brand word (e.g. `spacex`, `mcdonalds`, `dixpord`), case-insensitive. Candidates whose filename doesn't name the brand are never downloaded; if nothing matches, a new logo is generated as the brand's own ref (`_generate_logo_ref`). Joe 2026-08-16.
+
 ## [1.58.0] - 2026-08-16
 
 ### LLM backend selector

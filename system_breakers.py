@@ -7325,10 +7325,26 @@ if _OFFICIAL_LOGOS_MANIFEST.is_file():
         print(f"  [LOGO] premap manifest load failed: {_e}")
 
 
+def _url_matches_brand(url: str, brand: str) -> bool:
+    """True if the URL's filename contains the exact brand word (case-insensitive).
+
+    Rejects a logo download that isn't actually the brand (e.g. a random CDN
+    image whose filename doesn't name the brand). Joe 2026-08-16: the exact
+    word (dixpord, mcdonalds, spacex...) must appear in the downloaded file's
+    name, else the logo is treated as not found and a new one is generated.
+    """
+    if not url or not brand:
+        return False
+    fn = url.rstrip("/").split("/")[-1]
+    fn = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", fn)  # strip extension
+    return brand.strip().lower() in fn.lower()
+
+
 def _commons_logo_bytes(brand: str) -> Optional[bytes]:
     """Official logo from Wikimedia Commons, rasterized to a 512px PNG thumb.
     Returns raw image bytes, or None if unavailable (caller falls back to
-    SerpAPI image search)."""
+    SerpAPI image search). Only accepts results whose filename contains the
+    exact brand word."""
     title = OFFICIAL_LOGOS.get(brand)
     if not title:
         return None
@@ -7349,6 +7365,10 @@ def _commons_logo_bytes(brand: str) -> Optional[bytes]:
             return None
         thumb = ii[0].get("thumburl") or ii[0].get("url")
         if not thumb:
+            return None
+        if not _url_matches_brand(thumb, brand):
+            print(f"  [LOGO] Wikimedia result for {brand} lacks '{brand}' in "
+                  f"filename - skipping")
             return None
         req2 = urllib.request.Request(
             thumb, headers={"User-Agent": "SplitNode/1.1 (ads.doctor.melbourne@gmail.com)"})
@@ -7673,6 +7693,11 @@ def _find_logo(brand: str) -> Optional[str]:
         urls = _openverse_candidates(query, "logo")
     for u in urls:
         if not u:
+            continue
+        # Joe 2026-08-16: never DOWNLOAD a candidate whose filename lacks the
+        # exact brand word - skip straight past it (generate a logo instead).
+        if not _url_matches_brand(u, brand):
+            print(f"  [LOGO] '{brand}': candidate filename lacks '{brand}' - skip {u[:60]}")
             continue
         for attempt in (1, 2):
             try:
