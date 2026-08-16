@@ -3468,7 +3468,7 @@ def _plan_narration(narration: list[str], episode_num: int) -> dict:
     for start in range(0, len(narration), PLAN_CHUNK):
         chunk = narration[start:start + PLAN_CHUNK]
         block = "\n\n".join(f"P{j+1}: {p}" for j, p in enumerate(chunk))
-        data = _llm_json(
+        data = _backend_json(
             [{"role": "system", "content": sys_prompt},
              {"role": "user", "content":
               f"PARAGRAPHS:\n{block}\n\nReturn the plan JSON for all {len(chunk)} "
@@ -4145,6 +4145,32 @@ def _llm_json(messages: list[dict], max_tokens: int = 1200, temp: float = 0.5) -
         except Exception:
             pass
     return {}
+
+def _script_json(messages: list[dict], max_tokens: int = 1200, temp: float = 0.5) -> dict:
+    """JSON LLM call routed through the selected SCRIPT backend (codex when
+    LLM_PROVIDER == 'codex', else LM Studio). Same tolerant extraction as
+    _llm_json. The narration-plan phase used to hard-wire _llm_json (LM
+    Studio only), which serialized the whole run into 420s timeouts when
+    LM Studio was busy during imagegen - routing it through the writer
+    backend keeps it on the same fast path as the shots."""
+    text = _script_chat(messages, max_tokens=max_tokens, temp=temp)
+    text = re.sub(r"```(?:json)?", "", text).strip()
+    m2 = re.search(r"\{.*\}", text, re.S)
+    if m2:
+        try:
+            return json.loads(m2.group(0))
+        except Exception:
+            pass
+    return {}
+
+
+def _backend_json(messages: list[dict], max_tokens: int = 1200, temp: float = 0.5) -> dict:
+    """JSON LLM call that follows the run's writer backend: codex when selected
+    (PLAN_BACKEND=lmstudio forces LM Studio), else LM Studio."""
+    if LLM_PROVIDER == "codex" and \
+            os.environ.get("PLAN_BACKEND", "auto").strip().lower() != "lmstudio":
+        return _script_json(messages, max_tokens=max_tokens, temp=temp)
+    return _llm_json(messages, max_tokens=max_tokens, temp=temp)
 
 
 # -- LLM prompt relevance gate (Joe 2026-08-09) -----------------------
@@ -12993,6 +13019,16 @@ def _resume_episode(state: dict) -> None:
                            location_sheets, prop_assets,
                            target_paras=target_paras)
 
+    # 0a. Rebuild character sheets if the crash-window checkpoint left them
+    #     empty (shot list saved, sheets not yet built) so image gen still
+    #     has identity refs for every character (Joe 2026-08-17).
+    if not character_sheets and shots and state.get("narration"):
+        character_sheets = _build_character_sheets(
+            shots, state.get("narration") or [], bible=state.get("bible") or None)
+        print(f"  [RESUME] rebuilt {len(character_sheets)} character sheet(s) "
+              f"from the checkpoint (they were not saved yet)")
+        _save("story")
+
     # 0. TTS GAP-FILL FIRST (Joe 2026-08-09): generate any missing narration
     #    clips BEFORE image generation, so images are never rendered against
     #    audio that doesn't exist yet. Reuses clips already on disk.
@@ -13778,6 +13814,28 @@ def _phase_llm(config: dict):
                              sentence_para_map=sentence_para_map)
     _apply_plan_to_shots(shots, sentence_para_map, plan)  # key words + foley onto shots
 
+    # CRASH-WINDOW CHECKPOINT (Joe 2026-08-17): the shot-list phase is the
+    # longest LLM stretch (one call per sentence, up to MAX_SHOTS) and a
+    # timeout/interrupt there used to lose EVERYTHING (the first resume save
+    # only happened at the end of this function). Persist shots immediately;
+    # the final save below overwrites with the complete state. On resume,
+    # _resume_episode rebuilds missing character sheets from saved narration.
+    _chk_intro_count = 0
+    if intro:
+        _chk_intro_count = len([_s for _s in
+                                re.split(r"(?<=[.!?])\s+", intro[0]) if _s.strip()])
+    _save_resume_state("story", episode_num, article_url, topic, shots,
+                       {}, chapter_events=chapter_events,
+                       anchor_events=anchor_events,
+                       location_sheets={}, prop_assets={},
+                       target_paras=target_paras,
+                       narration=narration, context=context, bible=bible,
+                       sentence_para_map=sentence_para_map,
+                       establishing_map=establishing_map,
+                       intro_count=_chk_intro_count)
+    print(f"  [CHECKPOINT] shots saved for resume ({len(shots)} shots) - "
+          f"crash-safe from here")
+
     easter_egg = _ask_easter_egg()
     if easter_egg:
         _inject_easter_egg(shots, easter_egg)
@@ -14072,13 +14130,26 @@ def run_batch_resume(configs: list, statuses: dict) -> None:
             else:
                 print(f"\n--- Episode #{ep:03d}: fresh (from saved batch config) ---")
                 run_episode(cfg)
-            statuses[str(ep)] = "done"
-            print(f"  [BATCH] Episode #{ep:03d} complete")
+            # Only mark DONE when a video actually exists in the resume state.
+            # run_episode / _resume_episode return EARLY on HALT (e.g. shot
+            # images still missing -> 'NOT rendering'), and marking those
+            # episodes done made the batch skip them forever (Joe 2026-08-17).
+            _st2 = _load_resume_state() or {}
+            if _st2.get("video_path") or _st2.get("video_id"):
+                statuses[str(ep)] = "done"
+                print(f"  [BATCH] Episode #{ep:03d} complete")
+            else:
+                print(f"  [BATCH] Episode #{ep:03d} HALTED (no video on disk) - "
+                      f"kept pending for the next batch resume")
         except Exception as e:
             print(f"  [BATCH] Episode #{ep:03d} FAILED ({e}) - "
                   f"will retry on the next batch resume")
         _save_batch_manifest(configs, statuses)
-    _clear_batch_manifest()
+    if all(_batch_done(statuses, c["episode_num"]) for c in configs):
+        _clear_batch_manifest()
+    else:
+        print("\n  [BATCH] Some episodes failed - manifest kept for a "
+              "future batch resume.")
     print(f"\n{'='*60}\n  BATCH RESUME COMPLETE\n{'='*60}")
 
 
