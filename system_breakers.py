@@ -5949,6 +5949,47 @@ def _chapter_filename(chapter_num: int, title: str) -> str:
     return f"chapter_{int(chapter_num):02d}_{slug}.png"
 
 
+def _reconcile_shot_image(shot, episode_num) -> Optional[str]:
+    """Return the shot's real on-disk image path, reconciling against the
+    episode folder's deterministic filename. If image_path is missing/stale but
+    a valid image exists under _shot_filename, adopt it so resume does NOT
+    regenerate a shot whose image was actually generated (Joe 2026-08-15)."""
+    p = (shot.get("image_path") or "").strip()
+    if p and os.path.isfile(p) and os.path.getsize(p) > 1000:
+        return p
+    try:
+        seq = int(shot.get("seq", 0) or (shot.get("narration_idx", 0) + 1))
+        cand = str(_episode_dir(episode_num) / _shot_filename(shot, seq))
+        if os.path.isfile(cand) and os.path.getsize(cand) > 1000:
+            shot["image_path"] = cand
+            return cand
+    except Exception:
+        pass
+    return None
+
+
+def _reconcile_chapter_card(shot, episode_num) -> Optional[str]:
+    """Return the chapter card's real on-disk path, reconciling against the
+    deterministic chapter_XX_slug.png filename (same idea as
+    _reconcile_shot_image but for chapter title cards). If the stored
+    image_path is stale/missing but a valid card exists on disk, adopt it so
+    resume does NOT regenerate an already-generated card (Joe 2026-08-16)."""
+    p = (shot.get("image_path") or "").strip()
+    if p and os.path.isfile(p) and os.path.getsize(p) > 1000 \
+            and "chapter_" in os.path.basename(p):
+        return p
+    try:
+        n = int(shot.get("chapter_num", 1))
+        title = str(shot.get("chapter_title", "")).strip() or "The Story"
+        cand = str(_episode_dir(episode_num) / _chapter_filename(n, title))
+        if os.path.isfile(cand) and os.path.getsize(cand) > 1000:
+            shot["image_path"] = cand
+            return cand
+    except Exception:
+        pass
+    return None
+
+
 # ---- Prop visual injection (Joe 2026-08-09) ----
 # ~200 named props (vaults, libraries, casinos, labs, servers, etc). When a
 # chapter title or a shot's narration/scene mentions a prop keyword, its visual
@@ -9361,20 +9402,36 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
     # Prime: verify chunk 0's todo up front so the first render has its prompts.
     _verify_todo_chunk(_chunks[0])
     _next_verify = None
+    _verify_futures = []
     for _ci, _chunk in enumerate(_chunks):
         _cstart = _ci * CHUNK
         # Kick off LLM verification of the NEXT chunk in a background thread so
         # it overlaps with the CURRENT chunk's codex generation.
         if _ci + 1 < len(_chunks):
-            _next_verify = _TPE(max_workers=1).submit(_verify_todo_chunk, _chunks[_ci + 1])
+            _nf = _TPE(max_workers=1).submit(_verify_todo_chunk, _chunks[_ci + 1])
         else:
-            _next_verify = None
+            _nf = None
         # Render the CURRENT chunk (its prompts are verified) in the main thread.
         _render_chunk(_cstart, _chunk)
-        # Block until the NEXT chunk's verification finishes so its prompts are
-        # ready for the next iteration's render.
-        if _next_verify is not None:
-            _next_verify.result()
+        # API backends (codex/fal/runpod): DON'T block generation on the next
+        # chunk's LLM verify. The async upscale queue already lets codex fire
+        # prompts back-to-back (upscale overlaps generation), so the only thing
+        # that can stall the next batch here is the LLM verify. Keep it running
+        # in the background; _render_one falls back to an inline relevance gate
+        # for any shot whose verified prompt isn't ready yet. Local (ComfyUI)
+        # stays sequential - its upscale runs in the workflow anyway - so it
+        # waits for the verified prompt (Joe 2026-08-16).
+        if _nf is not None:
+            _verify_futures.append(_nf)
+            if _active_image_backend() == "local":
+                _nf.result()
+    # Join any still-running background verifies so no thread is left dangling
+    # and their prompt-cache writes land before we drop the cache below.
+    for _f in _verify_futures:
+        try:
+            _f.result()
+        except Exception:
+            pass
     # Wait for the async upscale queue to drain so every shot is at the final
     # resolution before the render pass consumes them (Joe 2026-08-09). The
     # queue lets codex fire prompts back-to-back while the upscaler catches up.
@@ -12319,8 +12376,7 @@ def _regen_missing_images_before_render(episode_num: int, shots: list[dict],
     for s in shots:
         if not s.get("is_chapter"):
             continue
-        p = s.get("image_path") or ""
-        if p and os.path.isfile(p) and "chapter_" in os.path.basename(p):
+        if _reconcile_chapter_card(s, episode_num):
             continue
         print(f"  [PRE-RENDER] regenerating chapter card {s.get('chapter_num')}...")
         card = _generate_chapter_card(s, episode_num, topic, shots=shots,
@@ -12462,6 +12518,7 @@ def _resume_episode(state: dict) -> None:
         _regen_script = _yn("    Rebuild the narration SCRIPT from the article? [y/N]: ")
         regen_tts = _yn("    Regenerate ALL TTS clips (re-speak every line)? [y/N]: ")
         _regen_img = _yn("    Regenerate ALL images (overwrite)? [y/N]: ")
+        _regen_chapters = _yn("    Regenerate CHAPTER CARD images (overwrite)? [y/N]: ")
         _regen_clips = _yn("    Regenerate ALL video clips (re-render from images)? [y/N]: ")
         _swap_model = _yn("    Swap the image-gen model (backend/model)? [y/N]: ")
         _regen_shotlist = _yn("    Regenerate the SHOT LIST (re-run shot-list LLM to fill parse-failed/missing shots)? [y/N]: ")
@@ -12510,7 +12567,10 @@ def _resume_episode(state: dict) -> None:
         if _regen_img:
             os.environ["REGEN_IMAGES"] = "1"
             os.environ["REGEN_CLIPS"] = "1"  # clips embed the image - must re-render
-        if _regen_script or regen_tts or _regen_img or _swap_model:
+        if _regen_chapters:
+            os.environ["REGEN_CHAPTERS"] = "1"
+            print("  [RESUME] Regenerating CHAPTER CARD images (REGEN_CHAPTERS=1)")
+        if _regen_script or regen_tts or _regen_img or _regen_chapters or _swap_model:
             print("  [RESUME] Applying regeneration options...\n")
     else:
         print("  [RESUME] SKIP_RESUME_MENU=1 - gap-fill only\n")
@@ -12592,20 +12652,29 @@ def _resume_episode(state: dict) -> None:
         missing_img = [s for s in shots if not s.get("is_chapter")]
         print(f"\n[IMAGES] REGEN - re-generating ALL {len(missing_img)} shots (overwrite)")
     else:
-        missing_img = [s for s in shots
-                       if not (s.get("is_chapter") or
-                               (s.get("image_path") and os.path.isfile(s["image_path"])))]
+        # Check the episode folder PROPERLY (Joe 2026-08-16): reconcile each
+        # shot against its deterministic on-disk filename so a genuinely
+        # generated image is adopted (even if the stored path is stale/missing)
+        # and only shots with no valid image on disk are treated as missing.
+        missing_img = []
+        for _s in shots:
+            if _s.get("is_chapter"):
+                continue
+            if _reconcile_shot_image(_s, episode_num):
+                continue
+            missing_img.append(_s)
     # Chapter title cards (codex/fal): generate any missing card images on
     # resume too, so a mid-run crash doesn't leave a chapter on a black card.
     # Under REGEN_IMAGES=1 the stale cards are force-regenerated (they may be
     # corrupted - ep11 had character panels stretched onto the cards).
+    # The stored image_path is reconciled against the deterministic
+    # chapter_XX_slug.png on disk so an already-generated card is picked up
+    # (Joe 2026-08-16).
     _chap_missing = [s for s in shots
                      if s.get("is_chapter")
                      and _active_image_backend() in ("codex", "fal")
-                     and (not (s.get("image_path")
-                               and os.path.isfile(s["image_path"])
-                               and "chapter_" in os.path.basename(s["image_path"]))
-                          or _force_regen)]
+                     and not (not _force_regen
+                              and _reconcile_chapter_card(s, episode_num))]
     if _chap_missing:
         _cn2 = _image_concurrency()
         print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards "
@@ -12776,24 +12845,37 @@ def _resume_episode(state: dict) -> None:
         if _rw0:
             print(f"  [CHUNK 1] {_rw0} scene rewrites applied")
         _next_verify = None
+        _verify_futures = []
         for _ci, _chunk in enumerate(_chunks):
             _cstart = _ci * _RCHUNK
             # Kick off LLM verification of the NEXT chunk in a background thread
             # so it overlaps with the CURRENT chunk's codex generation (the LLM
             # never idles, and codex never waits on the LLM).
             if _ci + 1 < len(_chunks):
-                _next_verify = _TPE(max_workers=1).submit(_verify_chunk, _chunks[_ci + 1])
+                _nf = _TPE(max_workers=1).submit(_verify_chunk, _chunks[_ci + 1])
             else:
-                _next_verify = None
+                _nf = None
             # Render the CURRENT chunk (its prompts are verified) in the main
             # thread, in parallel with the background next-chunk verify.
             _render_chunk(_cstart, _chunk)
-            # Block until the NEXT chunk's verification finishes so its prompts
-            # are ready for the next loop iteration's render.
-            if _next_verify is not None:
-                _rw = _next_verify.result()
-                if _rw:
-                    print(f"  [CHUNK {_ci + 2}] {_rw} scene rewrites applied")
+            # API backends (codex/fal/runpod): DON'T block generation on the next
+            # chunk's LLM verify - the async upscale queue already lets codex fire
+            # back-to-back (upscale overlaps generation), so the only thing that
+            # can stall the next batch is the LLM verify. Let it finish in the
+            # background; _regen_one falls back to an inline relevance gate for
+            # any shot whose verified prompt isn't ready. Local (ComfyUI) stays
+            # sequential and waits (Joe 2026-08-16).
+            if _nf is not None:
+                _verify_futures.append(_nf)
+                if _active_image_backend() == "local":
+                    _nf.result()
+        # Join any still-running background verifies so no thread is left dangling
+        # and their prompt-cache writes land before we drop the cache below.
+        for _f in _verify_futures:
+            try:
+                _f.result()
+            except Exception:
+                pass
         # Drain the async upscale queue so every regen shot is at the final
         # resolution before the next stage consumes them (Joe 2026-08-09).
         try:

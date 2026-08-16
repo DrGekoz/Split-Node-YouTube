@@ -1089,9 +1089,16 @@ def generate_image(prompt: str, seed: int, out_path: str,
             return False
         try:
             endpoint = IMAGE_MODELS["runpod"][model]  # key -> runpod endpoint id
-            return rp.generate_image(endpoint, prompt, seed, out_path,
-                                     size=size, strength=strength,
-                                     image_url=image_url)
+            ok = rp.generate_image(endpoint, prompt, seed, out_path,
+                                   size=size, strength=strength,
+                                   image_url=image_url)
+            if ok and upscale:
+                # Async resolution enforcement, same as codex (Joe 2026-08-16):
+                # don't block the shot loop on the upscale - enqueue it so the
+                # next prompt fires immediately and the upscaler catches up in
+                # the background. flush_upscales() drains before the render pass.
+                enqueue_upscale(out_path, width, height)
+            return ok
         except Exception as e:
             print(f"  [RUNPOD] {str(e)[:140]}")
             return False
@@ -1123,9 +1130,16 @@ def generate_image(prompt: str, seed: int, out_path: str,
             return False
         try:
             endpoint = IMAGE_MODELS["fal"][model]  # key -> fal model id
-            return f.generate_image(endpoint, prompt, seed, out_path,
-                                    num_steps=steps, image_url=image_url,
-                                    image_size=image_size)
+            ok = f.generate_image(endpoint, prompt, seed, out_path,
+                                  num_steps=steps, image_url=image_url,
+                                  image_size=image_size)
+            if ok and upscale:
+                # Async resolution enforcement, same as codex (Joe 2026-08-16):
+                # don't block the shot loop on the upscale - enqueue it so the
+                # next prompt fires immediately and the upscaler catches up in
+                # the background. flush_upscales() drains before the render pass.
+                enqueue_upscale(out_path, width, height)
+            return ok
         except Exception as e:
             print(f"  [FAL] {str(e)[:140]}")
             return False

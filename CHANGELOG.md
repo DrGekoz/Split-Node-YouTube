@@ -2,6 +2,15 @@
 
 All notable changes to Split Node.
 
+## [1.62.0] - 2026-08-16
+
+### Fix: resume reconciles shots + chapter cards against disk + API-backend batch overlap
+
+- Resume now reconciles SHOT images AND chapter cards against their deterministic on-disk filenames (new `_reconcile_shot_image` + `_reconcile_chapter_card`). Previously the shot `missing_img` detection only checked the stored `image_path` (a stale/missing path caused a genuinely-generated image to be re-done), and the chapter-card checks did the same. Both the resume detection and the pre-render validation pass now adopt whatever's really on disk and only regenerate what's truly absent, so resume picks up char sheets, shots, and chapter cards and continues where it left off. Joe 2026-08-16.
+- API backends (codex/fal/runpod) no longer block the batch loop on the next chunk's LLM pre-verify. The async upscale queue already overlaps generation, so the only thing that was stalling the next batch was the verify; it now runs in the background and shots fall back to an inline relevance gate when their verified prompt isn't ready. Local (ComfyUI) still waits, since its upscale runs in the workflow anyway. Joe 2026-08-16.
+- runpod and fal now enqueue the same async upscale as codex (`enqueue_upscale` on success), so all three API backends enforce target resolution without blocking the shot loop. Joe 2026-08-16.
+- Resume menu gained a dedicated "Regenerate CHAPTER CARD images (overwrite)?" question (sets `REGEN_CHAPTERS=1`) separate from the all-shots regen, so you can rebuild just the cards. Joe 2026-08-16.
+
 ## [1.61.0] - 2026-08-16
 
 ### Fix: codex batch image grabbing under parallelism
