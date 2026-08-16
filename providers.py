@@ -346,7 +346,6 @@ class Codex:
     # multiple codex calls run concurrently without stealing each other's output.
     _scan_lock = None
     _claimed = set()
-
     @classmethod
     def _lock(cls):
         if cls._scan_lock is None:
@@ -364,7 +363,35 @@ class Codex:
         import shutil
         import subprocess
         import glob
-        generated = Path.home() / ".codex" / "generated_images"
+        import tempfile
+        import uuid
+        # Per-call CODEX_HOME isolation (Joe 2026-08-16): each parallel codex
+        # call runs in its OWN fresh CODEX_HOME so its output lands in a unique
+        # generated_images/ namespace. The images ARE generated but, under 5-way
+        # parallelism, the shared ~/.codex/generated_images gets several fresh
+        # uuid dirs at once and the grab can't tell which belongs to which call
+        # ('Saved at:' is unreliable on Windows). Isolation makes grabbing
+        # deterministic: each call's isolated dir holds exactly one new image.
+        _user_home = Path.home() / ".codex"
+        _home = None
+        _env = None
+        try:
+            _home = Path(tempfile.gettempdir()) / f"codex_home_{uuid.uuid4().hex[:12]}"
+            _home.mkdir(parents=True, exist_ok=True)
+            for _f in ("auth.json", "config.toml"):
+                _src = _user_home / _f
+                if _src.is_file():
+                    try:
+                        shutil.copy2(_src, _home / _f)
+                    except Exception:
+                        pass
+            _env = dict(os.environ)
+            _env["CODEX_HOME"] = str(_home)
+            generated = _home / "generated_images"
+        except Exception:
+            _home = None
+            _env = None
+            generated = _user_home / "generated_images"
         generated.mkdir(parents=True, exist_ok=True)
         # Codex 0.147+ names outputs call_*.png (older used ig_*.png) - match
         # both so a version bump never silently breaks detection.
@@ -440,6 +467,13 @@ class Codex:
                 except Exception:
                     pass
 
+        def _cleanup_home():
+            if _home and _home.is_dir():
+                try:
+                    shutil.rmtree(_home, ignore_errors=True)
+                except Exception:
+                    pass
+
         ps_cmd = (f"Get-Content -Raw '{_tmp}' | codex exec --skip-git-repo-check "
                   f"{ref_args}")
         cmd = ["powershell.exe", "-NoProfile", "-Command", ps_cmd]
@@ -447,10 +481,11 @@ class Codex:
               f"{' (' + str(len(ref_images)) + ' image refs)' if ref_images else ''}...")
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True,
-                                  timeout=timeout)
+                                  timeout=timeout, env=_env)
         except subprocess.TimeoutExpired:
             print("  [CODEX] timed out generating image")
             _del_tmp()
+            _cleanup_home()
             return False
 
         # Temp prompt file was consumed by Get-Content during the run - drop it
@@ -572,11 +607,13 @@ class Codex:
                                               timeout, before)
             print("  [CODEX] could not deterministically locate this call's "
                   "output ('Saved at:' path missing) - returning failure to retry")
+            _cleanup_home()
             return False
         try:
             shutil.copy2(src, out_path)
         except Exception as e:
             print(f"  [CODEX] failed to copy output: {e}")
+            _cleanup_home()
             return False
         # Clean up the source from ~/.codex/generated_images/ (Joe 2026-08-12):
         # codex leaves a copy of every generated PNG in its temp dir which never
@@ -594,6 +631,7 @@ class Codex:
                 pass
         except Exception as _cleanup_err:
             print(f"  [CODEX] could not remove temp source {os.path.basename(src)}: {_cleanup_err}")
+        _cleanup_home()
         print(f"  [CODEX] {os.path.basename(out_path)} ({os.path.getsize(out_path)//1024}KB)")
         return os.path.getsize(out_path) > 500
 
