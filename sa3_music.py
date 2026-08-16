@@ -26,6 +26,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 SA3_ROOT = os.environ.get(
@@ -227,40 +228,41 @@ def detect_sa3_port() -> int | None:
     return None
 
 
-def resolve_sa3_port(project: str = "pipeline") -> int | None:
-    """Ask the user which port SA3 is running on and update SA3_GRADIO_URL.
+def _interactive() -> bool:
+    """True only when there is a real console to read from.
 
-    Auto-detects a single live SA3 UI and proposes it. The detected-port prompt
-    accepts any of:
-      - Enter / y / yes  -> accept the detected port
-      - a port number    -> override and use that port (e.g. if detection is wrong)
-      - n / no           -> fall through to a manual port entry prompt
-    If nothing is detected it prompts for the port directly. Returns the
-    resolved port or None if the user chose to skip (music generation will
-    fall back to the static pool).
+    Headless/redirected runs (cron, a .bat with no console window, piped stdin)
+    return False so the SA3 port prompt can never block the pipeline (Joe
+    2026-08-16: a run stalled silently waiting for a port that was never
+    detected). Set SA3_HEADLESS=1 to force headless even from a console.
     """
+    if os.environ.get("SA3_HEADLESS") == "1":
+        return False
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def resolve_sa3_port(project: str = "pipeline") -> int | None:
+    """Resolve the SA3 Gradio port and update SA3_GRADIO_URL.
+
+    Auto-detects a single live SA3 UI and uses it SILENTLY (no prompt). Only if
+    NOTHING is detected AND stdin is a real console does it ask the user for a
+    manual port (some setups run SA3 on a non-standard port). Headless/redirected
+    runs never block: if SA3 isn't detected they skip straight to the static
+    music pool. Returns the resolved port or None (caller falls back)."""
     global SA3_GRADIO_URL
     detected = detect_sa3_port()
     if detected is not None:
-        try:
-            ans = input(f"\n  [{project}] Stable Audio 3 detected on port "
-                        f"{detected} - use it? [Y/n, or type a port]: ").strip()
-        except EOFError:
-            ans = ""
-        low = ans.lower()
-        if low in ("", "y", "yes"):
-            SA3_GRADIO_URL = f"http://127.0.0.1:{detected}/"
-            print(f"  [SA3] using http://127.0.0.1:{detected}/")
-            return detected
-        # A numeric answer overrides the detected port directly.
-        try:
-            port = int(low)
-            SA3_GRADIO_URL = f"http://127.0.0.1:{port}/"
-            print(f"  [SA3] using http://127.0.0.1:{port}/ (override)")
-            return port
-        except ValueError:
-            pass  # treat 'n'/'no' as "enter it manually"
-    # Manual entry (or rejected auto-detect).
+        SA3_GRADIO_URL = f"http://127.0.0.1:{detected}/"
+        print(f"  [SA3] using http://127.0.0.1:{detected}/")
+        return detected
+    if not _interactive():
+        print(f"  [SA3] no SA3 UI detected + non-interactive - "
+              f"skipping music (static pool)")
+        return None
+    # Interactive + nothing detected: ask once, then fall back on blank/invalid.
     try:
         raw = input(f"  [{project}] Enter SA3 port (or blank to skip music): ").strip()
     except EOFError:

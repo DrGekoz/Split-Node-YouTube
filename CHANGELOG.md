@@ -2,6 +2,14 @@
 
 All notable changes to Split Node.
 
+## [1.67.0] - 2026-08-16
+
+### Fix: SA3 startup stall + silent single-pass render + resume key-word regen
+
+- **SA3 port prompt no longer hangs startup.** `resolve_sa3_port` auto-detects a single live SA3 UI and uses it silently; if nothing is detected it no longer hard-blocks on a bare `input()` (a run stalled indefinitely waiting for a port that was never detected). Headless/redirected runs (cron, no console, piped stdin - or `SA3_HEADLESS=1`) skip straight to the static music pool; it only prompts when nothing is detected AND stdin is a real console. The startup call is also guarded by `MUSIC_BACKEND=sa3`, so static-pool runs never touch SA3.
+- **Single-pass render now shows live progress.** The render used `subprocess.run(..., capture_output=True)` with zero output, so for a multi-minute 10:50 video it looked like a stall right after the title-serialization line and got killed mid-encode (leaving a partial no-moov mp4 - ep001.mp4 was 4.3MB with "moov atom not found"). It now streams `-progress pipe:1 -nostats` to a tqdm bar (`[RENDER] % | ETA`); stderr is drained in a background thread so the pipe can never deadlock ffmpeg.
+- **New resume option: "Regenerate key-words from existing narration?"** Pressing `y` re-runs the contiguous key-word LLM extraction on the existing key sentences (`_regenerate_key_words`) and clears the video path so it re-renders to bake the new (contiguous, in-order) keyword highlights - audio mix + whisper cache are reused. Useful after the v1.66.0 contiguous-phrase change to refresh old episodes. Joe 2026-08-16.
+
 ## [1.66.0] - 2026-08-16
 
 ### Key-word titles: contiguous phrase + per-word spoken-time animation

@@ -10882,6 +10882,63 @@ def _safe_replace(src: str, dst: str, tries: int = 6) -> bool:
         return False
 
 
+def _run_render_progress(cmd: list, cwd: str, total: float,
+                         desc: str) -> tuple[int, str]:
+    """Run ffmpeg with a live progress bar (mirrors burn_titles).
+
+    Reads `-progress pipe:1 -nostats` stdout so the single-pass render shows
+    % + ETA instead of dead air. The previous silent capture_output run looked
+    like a stall after the title-serialization line and got killed, leaving a
+    partial no-moov mp4 (Joe 2026-08-16). Stderr is drained in a background
+    thread so the pipe can never fill and deadlock ffmpeg. Returns
+    (returncode, stderr_text)."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, cwd=cwd)
+    err_buf = []
+
+    def _drain():
+        try:
+            for line in proc.stderr:
+                err_buf.append(line)
+        except Exception:
+            pass
+
+    th = threading.Thread(target=_drain, daemon=True)
+    th.start()
+    pbar = None
+    if _HAS_PROGRESS and total > 0:
+        pbar = tqdm(total=total, unit="s", desc=desc,
+                    bar_format="{desc}: {percentage:3.0f}%|{bar}| "
+                               "{n:.0f}/{total_fmt}s [{elapsed}<{remaining}]")
+    last_sec = 0.0
+    try:
+        for line in proc.stdout:
+            if pbar is None or not line:
+                continue
+            if line.startswith("out_time_us="):
+                try:
+                    sec = int(line.split("=", 1)[1].strip()) / 1e6
+                except ValueError:
+                    continue
+            elif line.startswith("out_time_ms="):
+                try:
+                    sec = int(line.split("=", 1)[1].strip()) / 1e3
+                except ValueError:
+                    continue
+            else:
+                continue
+            pbar.update(max(0.0, min(sec - last_sec, total - pbar.n)))
+            last_sec = sec
+    except Exception:
+        pass
+    proc.wait()
+    th.join(timeout=5)
+    if pbar:
+        pbar.close()
+        print()
+    return proc.returncode, "".join(err_buf)
+
+
 def _render_video(shots: list[dict], episode_num: int,
                   title_events: Optional[list] = None) -> str:
     """Render all shots into one video with a SINGLE ffmpeg pass (Joe 2026-08-10).
@@ -11079,14 +11136,16 @@ def _render_video(shots: list[dict], episode_num: int,
                 "-b:v", "0", "-pix_fmt", "yuv420p"]
         if (mixed_audio and os.path.isfile(mixed_audio)):
             cmd += ["-c:a", "aac", "-b:a", "192k"]
-        cmd += ["-movflags", "+faststart", "-t", f"{total_vid:.3f}", "-y", output_path]
+        cmd += ["-movflags", "+faststart", "-t", f"{total_vid:.3f}",
+                "-progress", "pipe:1", "-nostats", "-y", output_path]
 
         # Run with cwd=the episode video dir so the subtitles filter's relative .ass
         # name (and fontsdir) resolve correctly (absolute -i paths still work).
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600,
-                           cwd=str(_ep_video_dir(episode_num)))
-        if r.returncode != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) < 1000:
-            print(f"  [RENDER] single-pass failed: {r.stderr[-1500:]}")
+        # Streamed with a live progress bar (Joe 2026-08-16).
+        r_code, r_err = _run_render_progress(cmd, str(_ep_video_dir(episode_num)),
+                                             total_vid, "  [RENDER]")
+        if r_code != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) < 1000:
+            print(f"  [RENDER] single-pass failed: {r_err[-1500:]}")
             return ""
 
         dur = _get_audio_duration(output_path)
@@ -12550,6 +12609,42 @@ def _regen_missing_images_before_render(episode_num: int, shots: list[dict],
     return regen, missing
 
 
+def _regenerate_key_words(shots: list[dict], episode_num: int) -> bool:
+    """Re-run the key-word LLM extraction on the EXISTING key sentences and
+    update each key shot's key_words (now a CONTIGUOUS in-order phrase). Does
+    NOT change which shots are key or their foley. Joe 2026-08-16."""
+    key_shots = [s for s in shots
+                 if s.get("is_key") and (s.get("narration") or "").strip()]
+    if not key_shots:
+        print("  [KEYWORDS] no key sentences to regenerate - skipping")
+        return False
+    sys_p = ("You pick the punch words for an on-screen highlight. I give you ONE "
+             "sentence. Return JSON {\"key_words\": [...]} with 2-3 words that form "
+             "a phrase that is an EXACT contiguous substring of the sentence - words "
+             "that appear NEXT TO EACH OTHER, IN ORDER (not 3 random words). They "
+             "are the words a viewer's eye should land on. Use the words exactly as "
+             "written, no stemming, no rephrasing.")
+    updated = 0
+    for shot in key_shots:
+        s = shot.get("narration") or ""
+        try:
+            data = _llm_json([{"role": "system", "content": sys_p},
+                              {"role": "user", "content":
+                               f"SENTENCE:\n{s}\n\nReturn the key_words JSON."}],
+                             max_tokens=120, temp=0.3)
+            raw = data.get("key_words") if isinstance(data, dict) else None
+            kw = _sanitize_key_words(s, raw)
+            if kw:
+                shot["key_words"] = kw
+                updated += 1
+        except Exception:
+            continue
+        time.sleep(0.1)
+    print(f"  [KEYWORDS] regenerated key-words for {updated}/{len(key_shots)} "
+          f"key sentences (contiguous, in order)")
+    return updated > 0
+
+
 def _resume_episode(state: dict) -> None:
     """Resume a partially-completed episode from saved state.
 
@@ -12596,6 +12691,7 @@ def _resume_episode(state: dict) -> None:
         _regen_clips = _yn("    Regenerate ALL video clips (re-render from images)? [y/N]: ")
         _swap_model = _yn("    Swap the image-gen model (backend/model)? [y/N]: ")
         _regen_shotlist = _yn("    Regenerate the SHOT LIST (re-run shot-list LLM to fill parse-failed/missing shots)? [y/N]: ")
+        _regen_keywords = _yn("    Regenerate key-words from existing narration? [y/N]: ")
         if _regen_clips:
             os.environ["REGEN_CLIPS"] = "1"
             print("  [RESUME] Regenerating ALL video clips (reuse disabled)")
@@ -12634,6 +12730,14 @@ def _resume_episode(state: dict) -> None:
                 print("  [RESUME] Script rebuilt -> forcing image + TTS regeneration")
             else:
                 print("  [RESUME] Script rebuild failed - continuing with existing script")
+        if _regen_keywords:
+            _regenerate_key_words(shots, episode_num)
+            # Keyword highlights are baked into the single-pass render, so clear
+            # the video path to force a re-render (audio mix/whisper are reused).
+            video_path = ""
+            os.environ["REGEN_CLIPS"] = "1"
+            print("  [RESUME] Key-words regenerated from existing narration -> "
+                  "video will re-render to bake the new highlights")
         if _swap_model:
             _ask_image_model_swap()
             os.environ["REGEN_IMAGES"] = "1"
@@ -13207,8 +13311,9 @@ def main():
     # Ask which port Stable Audio 3 is running on BEFORE anything else
     # (SA3's Pinokio launcher opens on a different port each run).
     try:
-        import sa3_music
-        sa3_music.resolve_sa3_port(project="Split Node")
+        if os.environ.get("MUSIC_BACKEND", "sa3").strip().lower() == "sa3":
+            import sa3_music
+            sa3_music.resolve_sa3_port(project="Split Node")
     except Exception as e:
         print(f"  [SA3] port check skipped ({e}) - will fall back if music is needed")
 
