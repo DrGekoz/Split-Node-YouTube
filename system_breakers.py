@@ -9906,6 +9906,119 @@ def _sa3_prompt_triumphant(topic: str) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Per-2-paragraph adaptive SA3 music (Joe 2026-08-16)
+#
+# Instead of a single suspense->triumphant bed, the music now matches the story
+# beat by beat: narration clips are grouped into consecutive PAIRS, each pair is
+# timed on the voice timeline (clip_starts - the same timeline faster-whisper
+# transcribes), its 2 paragraphs are sent to the local LLM for a Stable Audio 3
+# prompt (which ends with an explicit BPM), and a track is generated at exactly
+# that pair's duration. All segments are laid back-to-back to fill the episode.
+# ---------------------------------------------------------------------------
+MUSIC_DEFAULT_BPM = 85
+MUSIC_LLM_MAXWORDS = 40
+
+
+def _llm_music_prompt(story: str) -> str:
+    """Ask the local LLM to write a Stable Audio 3 music prompt for a
+    2-paragraph story beat. The prompt ends with an explicit BPM so the track's
+    tempo matches the scene. Falls back to a neutral underscore on LLM failure
+    (never blocks the music pass)."""
+    if not story or not story.strip():
+        return f"Dark cinematic documentary underscore, atmospheric, restrained, {MUSIC_DEFAULT_BPM} BPM"
+    try:
+        text = _llm_chat([
+            {"role": "system", "content": (
+                "You write music prompts for Stable Audio 3, a text-to-music model. "
+                "Given a short story beat (two narration paragraphs), write ONE "
+                "music prompt that matches the scene. Format: a short comma-separated "
+                "list of genre, mood, instruments and energy, ending with the tempo "
+                "as '<N> BPM' (pick a fitting tempo between 60 and 140). One sentence "
+                f"only, under ~{MUSIC_LLM_MAXWORDS} words. No labels, no quotes, no "
+                "intro - just the prompt.")},
+            {"role": "user", "content": story},
+        ], max_tokens=90, temp=0.7).strip().strip('"').strip()
+        if not text:
+            raise ValueError("empty")
+        if not re.search(r"\d+\s*BPM", text, re.I):
+            text = f"{text}, {MUSIC_DEFAULT_BPM} BPM"
+        return text
+    except Exception:
+        return (f"Dark cinematic documentary underscore, atmospheric, "
+                f"restrained, {MUSIC_DEFAULT_BPM} BPM")
+
+
+def _build_adaptive_music_bed(shots: list, clip_starts: list, total_dur: float,
+                              temp_dir: Path, episode_num: int) -> Optional[str]:
+    """Generate one SA3 music segment per 2 narration paragraphs and assemble
+    them into a single bed of total_dur, laid at their voice-timeline windows.
+
+    Returns the assembled bed WAV path (already at MUSIC_DB) or None if SA3 is
+    unavailable or every segment failed (caller falls back to the static pool)."""
+    import sa3_music
+    if not sa3_music.available():
+        print("  [SA3] not ready - using static music pool")
+        return None
+    # Group clips into consecutive pairs, timed on the voice timeline.
+    pairs = []
+    n = len(shots)
+    i = 0
+    while i < n:
+        j = min(i + 2, n)
+        start = clip_starts[i]
+        end = clip_starts[j] if j < n else total_dur
+        dur = max(end - start, 1.0)
+        story = " ".join((s.get("narration") or "").strip() for s in shots[i:j])
+        pairs.append((start, dur, story))
+        i = j
+    seg_paths = []
+    gen_ok = 0
+    total = len(pairs)
+    bar = tqdm(total=total, desc="SA3 music", unit="seg", leave=False) if _HAS_PROGRESS else None
+    for k, (start, dur, story) in enumerate(pairs):
+        prompt = _llm_music_prompt(story)
+        out = temp_dir / f"music_pair_{k:03d}.wav"
+        ok = sa3_music.generate_via_gradio(prompt, dur, str(out), story_context=story)
+        if ok and out.is_file() and out.stat().st_size > 1000:
+            seg_paths.append((str(out), start))
+            gen_ok += 1
+        if bar:
+            bar.update(1)
+            bar.set_postfix(bpm=re.search(r"(\d+)\s*BPM", prompt, re.I).group(1) if re.search(r"(\d+)\s*BPM", prompt, re.I) else "?")
+    if bar:
+        bar.close()
+    if not seg_paths:
+        print(f"  [AUDIO] SA3 adaptive bed: 0/{total} segments generated - using static pool")
+        return None
+    print(f"  [AUDIO] SA3 adaptive bed: {gen_ok}/{total} 2-paragraph segments generated")
+    # Assemble: place each segment at its start time (adelay) and mix at MUSIC_DB.
+    inputs, fparts, labels = [], [], []
+    for k, (path, start) in enumerate(seg_paths):
+        inputs += ["-i", path]
+        d = int(round(start * 1000))
+        fparts.append(f"[{k}:a]aresample=44100,adelay={d}|{d}[s{k}]")
+        labels.append(f"[s{k}]")
+    fscript = temp_dir / "music_adaptive_filter.txt"
+    fscript.write_text(
+        ";".join(fparts) + ";" + "".join(labels) +
+        f"amix=inputs={len(labels)}:duration=longest:normalize=0,"
+        f"atrim=0:{total_dur:.2f},"
+        f"afade=t=in:st=0:d=0.5,"
+        f"afade=t=out:st={max(total_dur - 0.6, 0):.2f}:d=0.5,"
+        f"volume={MUSIC_DB}dB[out]", encoding="utf-8")
+    music_raw = temp_dir / "music_adaptive.wav"
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-v", "error"] + inputs +
+        ["-filter_complex_script", str(fscript), "-map", "[out]",
+         "-c:a", "pcm_s16le", "-ar", "24000", "-ac", "1", str(music_raw)],
+        capture_output=True, text=True, timeout=300)
+    if r.returncode == 0 and music_raw.is_file() and music_raw.stat().st_size > 1000:
+        return str(music_raw)
+    print(f"  [AUDIO] SA3 adaptive bed assemble failed: {r.stderr[-200:]}")
+    return None
+
+
 def _build_audio_mix(shots: list[dict], episode_num: int,
                      title_events: Optional[list] = None):
     """Build the full audio track: voice (0dB) + music (-19.5dB) + SFX (-15dB hit-aligned).
@@ -10010,34 +10123,24 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                 if os.environ.get("MUSIC_BACKEND", "sa3").strip().lower() == "sa3":
                     import sa3_music
                     if sa3_music.available():
-                        # Adaptive music: build the story text for each section so
-                        # the prompts reflect what's happening on screen in that
-                        # part of the episode (Joe 2026-08-14).
-                        sus_story = " ".join(
-                            shot.get("narration", "") or ""
-                            for shot, st in zip(valid, clip_starts)
-                            if st < section_cut and shot.get("narration"))
-                        tri_story = " ".join(
-                            shot.get("narration", "") or ""
-                            for shot, st in zip(valid, clip_starts)
-                            if st >= section_cut and shot.get("narration"))
-                        sa3_ok = sa3_music.generate_bed_via_gradio(
-                            _sa3_prompt_suspense(topic),
-                            _sa3_prompt_triumphant(topic),
-                            section_cut, total_dur - section_cut,
-                            str(sus_raw), str(tri_raw),
-                            story_suspense=sus_story, story_triumphant=tri_story)
-                        if sa3_ok:
-                            print(f"  [AUDIO] Music: STABLE AUDIO 3 bed (resident model, "
-                                  f"story-adaptive) - "
-                                  f"suspense 0-{section_cut:.0f}s crossfade into "
-                                  f"triumphant to {total_dur:.0f}s")
+                        # Per-2-paragraph adaptive bed (Joe 2026-08-16): the music
+                        # matches the story beat by beat instead of one fixed
+                        # suspense->triumphant split.
+                        adap = _build_adaptive_music_bed(
+                            valid, clip_starts, total_dur, temp_dir, episode_num)
+                        if adap:
+                            music_path = adap
+                            sa3_ok = True
+                            print(f"  [AUDIO] Music: SA3 adaptive bed - one track per "
+                                  f"2 narration paragraphs, ducked under voice")
+                        else:
+                            print("  [AUDIO] SA3 adaptive bed failed - static pool fallback")
                     else:
                         print("  [SA3] not ready - using static music pool")
                 if not sa3_ok:
                     ok1 = _build_music_chain(suspense_pool, section_cut, sus_raw, xf)
                     ok2 = _build_music_chain(triumphant_pool, total_dur - section_cut, tri_raw, xf)
-                if (sa3_ok or (ok1 and ok2)) and sus_raw.is_file() and tri_raw.is_file():
+                if (not sa3_ok) and (ok1 and ok2) and sus_raw.is_file() and tri_raw.is_file():
                     r = subprocess.run(
                         ["ffmpeg", "-y", "-v", "error",
                          "-i", str(sus_raw), "-i", str(tri_raw),
@@ -10055,15 +10158,11 @@ def _build_audio_mix(shots: list[dict], episode_num: int,
                         capture_output=True, text=True, timeout=300)
                     if r.returncode == 0 and music_raw.is_file() and music_raw.stat().st_size > 1000:
                         music_path = str(music_raw)
-                        if sa3_ok:
-                            print(f"  [AUDIO] Music: SA3 bed ready "
-                                  f"(-{abs(MUSIC_DB):.0f}dB, ducked under voice)")
-                        else:
-                            print(f"  [AUDIO] Music: multi-track continuous bed - "
-                                  f"suspense 0-{section_cut:.0f}s, {xf:.0f}s crossfade into "
-                                  f"triumphant to {total_dur:.0f}s, "
-                                  f"x{len(suspense_pool)}/{len(triumphant_pool)} tracks, "
-                                  f"-{abs(MUSIC_DB):.0f}dB, no per-shot cuts")
+                        print(f"  [AUDIO] Music: multi-track continuous bed - "
+                              f"suspense 0-{section_cut:.0f}s, {xf:.0f}s crossfade into "
+                              f"triumphant to {total_dur:.0f}s, "
+                              f"x{len(suspense_pool)}/{len(triumphant_pool)} tracks, "
+                              f"-{abs(MUSIC_DB):.0f}dB, no per-shot cuts")
         except Exception as e:
             print(f"  [AUDIO] Continuous music bed failed ({e}) - using fallback")
 
