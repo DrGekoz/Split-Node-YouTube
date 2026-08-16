@@ -2,6 +2,24 @@
 
 All notable changes to Split Node.
 
+## [1.57.0] - 2026-08-16
+
+### Image-ref / logo hardening
+
+- `_find_logo` now validates cached logos with PIL and drops corrupt files (e.g. an SVG saved as a .png) so codex never receives an unprocessable ref. SVG logo downloads (Wikimedia/SerpAPI) are rasterized to a real PNG (`_coerce_raster_image`).
+- When no real logo exists for an entity, the pipeline generates a logo as its own ref through the configured image provider (`_generate_logo_ref`, "Generate a logo for <name>"), cached per brand.
+- `providers.py` adds `_ref_is_valid_image()`: every image ref is PIL-verified before it reaches codex; a bad ref is dropped (with a WARN) so the shot still generates txt2img instead of silently breaking codex claiming.
+
+### Style / prompt cleanup
+
+- Removed '3D character'/'perfect anatomy' from image prompts and LLM shot/character instructions; character look now comes only from style injection.
+- Removed hardcoded style from main image prompts; style only via style injection.
+- Removed 'machine' from the LLM shot-list b-roll example (was 'ticket machine'); the word only appears when it is part of the actual story/article.
+
+### Repo hygiene
+
+- `cast_refs/` and `episodes/` are no longer tracked in git (copyright/privacy-weighted + large; re-downloaded or generated at runtime). Joe 2026-08-16.
+
 ## [1.53.0] - 2026-08-14
 
 ### Fix: narration pacing crash on short paragraphs

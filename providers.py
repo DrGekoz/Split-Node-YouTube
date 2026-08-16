@@ -316,6 +316,28 @@ def _codex_available() -> bool:
         return False
 
 
+def _ref_is_valid_image(path: str) -> bool:
+    """Return True if `path` is a file PIL can actually decode as an image.
+
+    Guards codex reference attachments. A corrupt or misnamed ref (e.g. an SVG
+    saved with a .png extension) makes codex report "image content omitted
+    because it could not be processed", imagegen then emits no output, and the
+    deterministic claiming fails (retry -> fallback to black/reused images).
+    We detect it cheaply here and drop the ref so the call still generates
+    (txt2img) rather than silently breaking.
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return True  # PIL unavailable - don't block, let codex decide
+    try:
+        with Image.open(path) as im:
+            im.verify()
+        return True
+    except Exception:
+        return False
+
+
 class Codex:
     # Parallel-safe output detection: each call records the set of generated
     # images present before it runs, generates, then claims the NEWEST file
@@ -376,8 +398,18 @@ class Codex:
         # codex exec --skip-git-repo-check [-i <ref>]` (with OR without refs).
         ref_args = ""
         for ref in (ref_images or []):
-            if ref and os.path.isfile(ref):
-                ref_args += " -i " + _ps_quote(os.path.abspath(ref))
+            if not (ref and os.path.isfile(ref)):
+                continue
+            # Validate the ref is a REAL image before handing it to codex.
+            # A corrupt/misnamed file (e.g. an SVG saved as .png) makes codex
+            # print "image content omitted because it could not be processed",
+            # imagegen then produces NO output, and claiming fails + falls back
+            # to black/reused images for that shot. Drop bad refs here so the
+            # shot still generates (txt2img) instead of silently breaking.
+            if not _ref_is_valid_image(ref):
+                print(f"  [CODEX] WARN dropping unreadable image ref: {os.path.basename(ref)}")
+                continue
+            ref_args += " -i " + _ps_quote(os.path.abspath(ref))
         # Feed the prompt via a temp FILE, not the command line (Joe's ep014
         # fix): embedding a multi-KB prompt with double-quotes inside
         # `echo '<prompt>' | codex` pushes the powershell.exe -Command string

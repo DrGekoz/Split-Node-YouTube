@@ -46,9 +46,10 @@ voice_refs/*.bak_prev
 # Trend toolkit cache
 trend_scan_cache.json
 
-# Real-person likeness photos (privacy/copyright - never commit)
-cast_refs/real/
+# Cast reference images (character likenesses, brand logos, real-person photos).
+# Copyright/privacy weighted + large; never committed - re-downloaded or
+# generated at runtime (_find_logo / _generate_logo_ref). Joe 2026-08-16.
+cast_refs/
 
 # Generated brand assets (hacker screens / buildings - cached, re-downloaded)
-# NOTE: cast_refs/logos/ PNGs ARE committed (pre-mapped 1000+ brand logos).
 image-assets/

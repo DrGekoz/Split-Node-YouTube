@@ -7445,22 +7445,120 @@ def _brand_context(name: str, texts: list[str]) -> str:
     return "screen"
 
 
+def _logo_file_ok(path) -> bool:
+    """True if `path` is a file PIL can actually decode as an image."""
+    try:
+        from PIL import Image
+        with Image.open(str(path)) as im:
+            im.verify()
+        return True
+    except Exception:
+        return False
+
+
+def _coerce_raster_image(blob: bytes, brand: str) -> Optional[bytes]:
+    """If `blob` is an SVG (some logo sources serve vector files that codex /
+    the ref pipeline cannot process), rasterize it to a real PNG. Returns PNG
+    bytes, or the original blob if already raster, or None if undecodable."""
+    data = blob
+    if data[:3] == b"\xef\xbb\xbf":
+        data = data[3:]
+    head = data[:512].lstrip().lower()
+    if not (head.startswith(b"<?xml") or head.startswith(b"<svg")):
+        return blob  # already a raster image
+    import tempfile
+    tmp = None
+    try:
+        from svglib.svglib import svg2rlg
+        from reportlab.graphics import renderPM
+        import io
+        f = tempfile.NamedTemporaryFile(suffix=".svg", delete=False)
+        f.write(data)
+        f.close()
+        tmp = f.name
+        drawing = svg2rlg(tmp)
+        if drawing is None:
+            return None
+        drawing.width *= 2
+        drawing.height *= 2
+        drawing.scale(2, 2)
+        buf = io.BytesIO()
+        renderPM.drawToFile(drawing, buf, fmt="PNG")
+        return buf.getvalue()
+    except Exception as e:
+        print(f"  [LOGO] could not rasterize SVG for {brand}: {str(e)[:60]}")
+        return None
+    finally:
+        if tmp:
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+
+def _generate_logo_ref(brand: str, out) -> Optional[str]:
+    """No real logo exists for this (likely fictional) brand - generate a
+    stylized logo as its OWN ref (Joe 2026-08-16) so brand/shots still get a
+    valid logo image to attach instead of nothing. Cached per brand."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    print(f"  [LOGO] no real logo for '{brand}' - generating one as its own ref...")
+    seed = abs(hash(_brand_safe(brand))) % 1000000
+    try:
+        # Simple directive (Joe 2026-08-16): use the pipeline's chosen image
+        # provider and just ask for a logo. _krea_generate routes through
+        # IMAGE_BACKEND (codex GPT Image 2 / fal / runpod / local).
+        ok = _krea_generate(
+            f"Generate a logo for {brand}. Clean flat vector brand logo on a "
+            f"plain white background.",
+            seed, str(out), ref_images=None,
+            upscale=False, width=512, height=512)
+    except Exception as e:
+        print(f"  [LOGO] logo generation failed for {brand}: {str(e)[:60]}")
+        return None
+    if ok and _logo_file_ok(out):
+        print(f"  [LOGO] generated logo for '{brand}' cached -> {out.name}")
+        return str(out)
+    try:
+        if out.is_file():
+            out.unlink()
+    except Exception:
+        pass
+    return None
+
+
 def _find_logo(brand: str) -> Optional[str]:
     """Logo for a brand, cached to cast_refs/logos/. Cache-first, then the
     OFFICIAL Wikimedia Commons source, and ONLY then SerpAPI image search
-    (Openverse fallback) for brands not in the official registry."""
+    (Openverse fallback) for brands not in the official registry. If nothing
+    real matches (e.g. a fictional entity), GENERATE a logo as its own ref
+    (Joe 2026-08-16)."""
     safe = _brand_safe(brand)
     out = BRAND_LOGO_DIR / f"{safe}.png"
     if out.is_file():
-        return str(out)
+        if _logo_file_ok(out):
+            return str(out)
+        # corrupt/misnamed cached logo (e.g. an SVG saved as .png) - drop and
+        # regenerate/re-fetch so codex never gets an unprocessable ref.
+        print(f"  [LOGO] cached {safe}.png corrupt - regenerating")
+        try:
+            out.unlink()
+        except Exception:
+            pass
     # 1. Official source: Wikimedia Commons (rasterized PNG thumb)
     if brand in OFFICIAL_LOGOS:
         blob = _commons_logo_bytes(brand)
         if blob:
-            BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(blob)
-            print(f"  [LOGO] {brand} cached (official Wikimedia)")
-            return str(out)
+            blob = _coerce_raster_image(blob, brand)
+            if blob:
+                BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(blob)
+                if _logo_file_ok(out):
+                    print(f"  [LOGO] {brand} cached (official Wikimedia)")
+                    return str(out)
+                try:
+                    out.unlink()
+                except Exception:
+                    pass
         print(f"  [LOGO] {brand} unavailable on Wikimedia - falling back to "
               f"image search")
     # 2. Fallback: SerpAPI image search (Openverse fallback)
@@ -7478,14 +7576,23 @@ def _find_logo(brand: str) -> Optional[str]:
                     blob = r.read()
                 if len(blob) < 5000:
                     break
+                blob = _coerce_raster_image(blob, brand)
+                if not blob:
+                    break
                 BRAND_LOGO_DIR.mkdir(parents=True, exist_ok=True)
                 out.write_bytes(blob)
-                print(f"  [LOGO] {brand} cached <- {u[:70]}")
-                return str(out)
+                if _logo_file_ok(out):
+                    print(f"  [LOGO] {brand} cached <- {u[:70]}")
+                    return str(out)
+                try:
+                    out.unlink()
+                except Exception:
+                    pass
             except Exception as e:
                 if attempt == 2:
                     print(f"  [LOGO] download failed {u[:50]} ({str(e)[:50]})")
-    return None
+    # 3. No real logo found - generate one as this brand's own ref
+    return _generate_logo_ref(brand, out)
 
 
 def _logo_for_prop(prop: str, brands: Optional[dict] = None) -> Optional[str]:
