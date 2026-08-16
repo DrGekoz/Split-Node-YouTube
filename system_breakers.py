@@ -2165,13 +2165,22 @@ def _llm_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -
     }).encode()
     req = urllib.request.Request(LM_STUDIO_URL, data=data,
                                  headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            result = json.loads(r.read())
-        return result["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        print(f"  [LLM error] {e}")
-        return ""
+    # Bumped timeout 180s -> 420s + one retry (Joe 2026-08-16): when the codex
+    # imagegen pool / upscaler is running on the SAME GPU, LM Studio inference
+    # crawls and a 2000-token shot prompt can exceed 180s. A short timeout that
+    # aborts mid-generation makes every shot cascade into a slow retry/fallback.
+    last_err = ""
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=420) as r:
+                result = json.loads(r.read())
+            return result["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            last_err = str(e)
+            if attempt == 1:
+                print(f"  [LLM error] {e} - retrying once (GPU contention?)")
+    print(f"  [LLM error] {last_err}")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -2308,6 +2317,17 @@ def _codex_script_chat(messages: list[dict], max_tokens: int = 2000, temp: float
     on stdin via a temp file (the ep014 PowerShell arg-length fix), same as the
     image path in providers.py. We read ONLY stdout so codex's own chat framing
     never pollutes the narration/shot text.
+
+    Per-call CODEX_HOME isolation (Joe 2026-08-16): each script call runs in
+    its OWN fresh CODEX_HOME (auth.json + config.toml copied in), exactly like
+    providers.py Codex.generate_image. When the imagegen pool (isolated homes)
+    runs CONCURRENTLY with a script call on the SHARED ~/.codex, codex exec
+    instances contend on the same session/state and script calls fail rc=1 with
+    empty stdout -> they'd fall back to a GPU-starved LM Studio and time out.
+    Isolation gives the script call its own state namespace so it never contends
+    with the parallel imagegen calls. We also surface stderr on failure (was
+    swallowed) and retry once, so a transient blip doesn't cascade into a slow
+    LM Studio fallback.
     """
     if not _codex_available():
         print("  [CODEX] codex CLI not found on PATH - falling back to LM Studio")
@@ -2319,6 +2339,32 @@ def _codex_script_chat(messages: list[dict], max_tokens: int = 2000, temp: float
     prompt = f"{sys_p}\n\n{user_p}".strip() if sys_p else user_p
     if not prompt:
         return ""
+
+    # Per-call CODEX_HOME isolation (mirrors providers.py generate_image).
+    _user_home = Path.home() / ".codex"
+    _home = None
+    _env = dict(os.environ)
+    try:
+        _home = Path(tempfile.gettempdir()) / f"codex_script_home_{uuid.uuid4().hex[:12]}"
+        _home.mkdir(parents=True, exist_ok=True)
+        for _f in ("auth.json", "config.toml"):
+            _src = _user_home / _f
+            if _src.is_file():
+                try:
+                    shutil.copy2(_src, _home / _f)
+                except Exception:
+                    pass
+        _env["CODEX_HOME"] = str(_home)
+    except Exception:
+        _home = None
+
+    def _cleanup_home():
+        if _home and _home.is_dir():
+            try:
+                shutil.rmtree(_home, ignore_errors=True)
+            except Exception:
+                pass
+
     _tmp = None
     try:
         _tmp = os.path.join(tempfile.gettempdir(),
@@ -2327,36 +2373,47 @@ def _codex_script_chat(messages: list[dict], max_tokens: int = 2000, temp: float
             _f.write(prompt)
     except Exception as _e:
         print(f"  [CODEX] could not write prompt temp file: {_e}")
+        _cleanup_home()
         return ""
     ps_cmd = (f"Get-Content -Raw '{_tmp}' | codex exec --skip-git-repo-check "
               f"-c 'model=\"{CODEX_SCRIPT_MODEL}\"' "
               f"-c 'model_reasoning_effort=\"{CODEX_SCRIPT_EFFORT}\"'")
     cmd = ["powershell.exe", "-NoProfile", "-Command", ps_cmd]
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=300)
-    except subprocess.TimeoutExpired:
-        print(f"  [CODEX] timed out writing script ({CODEX_SCRIPT_MODEL})")
+
+    # One retry for a transient codex failure so we don't cascade into a slow
+    # LM Studio fallback on a single blip. Timeout bumped to 420s for long shots.
+    last_err = ""
+    for attempt in (1, 2):
         try:
-            os.remove(_tmp)
-        except Exception:
-            pass
-        return ""
-    try:
-        os.remove(_tmp)
-    except Exception:
-        pass
-    if proc.returncode != 0 and not proc.stdout.strip():
-        print(f"  [CODEX] script call failed (rc={proc.returncode}) - falling back to LM Studio")
-        return ""
-    out = (proc.stdout or "").strip()
-    # Strip any markdown code fences the model may wrap the answer in.
-    out = re.sub(r"^```[a-zA-Z]*\s*", "", out)
-    out = re.sub(r"\s*```$", "", out).strip()
-    if not out:
-        print("  [CODEX] empty script output - falling back to LM Studio")
-        return ""
-    return out
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=420, env=_env)
+        except subprocess.TimeoutExpired:
+            print(f"  [CODEX] timed out writing script ({CODEX_SCRIPT_MODEL}, "
+                  f"attempt {attempt}/2)")
+            last_err = "timeout"
+            continue
+        finally:
+            try:
+                os.remove(_tmp)
+            except Exception:
+                pass
+        out = (proc.stdout or "").strip()
+        if proc.returncode == 0 and out:
+            # Strip any markdown code fences the model may wrap the answer in.
+            out = re.sub(r"^```[a-zA-Z]*\s*", "", out)
+            out = re.sub(r"\s*```$", "", out).strip()
+            if out:
+                _cleanup_home()
+                return out
+            last_err = "empty output after fence strip"
+        else:
+            last_err = (f"rc={proc.returncode} "
+                        f"err={(proc.stderr or '').strip()[:200]!r}")
+        if attempt == 1:
+            print(f"  [CODEX] script call failed ({last_err}) - retrying once...")
+    _cleanup_home()
+    print(f"  [CODEX] script call failed ({last_err}) - falling back to LM Studio")
+    return ""
 
 
 def _script_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8) -> str:
