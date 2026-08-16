@@ -9403,33 +9403,36 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
 
     # Prime: verify chunk 0's todo up front so the first render has its prompts.
     _verify_todo_chunk(_chunks[0])
-    _next_verify = None
-    _verify_futures = []
+    # Pipeline: verify chunk 0 up front, then verify each LATER chunk in the
+    # background WHILE an earlier chunk renders (codex generation overlaps both
+    # the LLM verify AND the async upscale queue). We pre-submit chunks 1 and 2
+    # and at each iteration submit the chunk TWO ahead, so a chunk's verify has a
+    # full extra chunk-render to finish - it is ALWAYS ready before that chunk
+    # renders, so _render_one never falls back to inline LLM calls (which hammered
+    # LM Studio and looked like a stall). Joe 2026-08-16.
+    _pending: dict = {}
+    for _k in range(1, min(3, len(_chunks))):   # pre-submit chunks 1 and 2
+        _pending[_k] = _TPE(max_workers=1).submit(_verify_todo_chunk, _chunks[_k])
     for _ci, _chunk in enumerate(_chunks):
         _cstart = _ci * CHUNK
-        # Kick off LLM verification of the NEXT chunk in a background thread so
-        # it overlaps with the CURRENT chunk's codex generation.
-        if _ci + 1 < len(_chunks):
-            _nf = _TPE(max_workers=1).submit(_verify_todo_chunk, _chunks[_ci + 1])
-        else:
-            _nf = None
+        # Chunk 0 is verified (sync above); later chunks' verify was submitted
+        # 1-2 renders ago and is done - pop + surface rewrites.
+        if _ci in _pending:
+            _rw = _pending.pop(_ci).result()
+            if _rw:
+                print(f"  [CHUNK {_ci + 1}] {_rw} scene rewrites applied")
+        # Kick off verification of the chunk TWO ahead so it has this render plus
+        # the next to complete (overlap, never idles the LLM).
+        if _ci + 2 < len(_chunks) and (_ci + 2) not in _pending:
+            _pending[_ci + 2] = _TPE(max_workers=1).submit(
+                _verify_todo_chunk, _chunks[_ci + 2])
         # Render the CURRENT chunk (its prompts are verified) in the main thread.
+        # API backends enqueue upscales ASYNC (providers.enqueue_upscale), so
+        # codex fires back-to-back while the upscaler catches up in the background.
         _render_chunk(_cstart, _chunk)
-        # API backends (codex/fal/runpod): DON'T block generation on the next
-        # chunk's LLM verify. The async upscale queue already lets codex fire
-        # prompts back-to-back (upscale overlaps generation), so the only thing
-        # that can stall the next batch here is the LLM verify. Keep it running
-        # in the background; _render_one falls back to an inline relevance gate
-        # for any shot whose verified prompt isn't ready yet. Local (ComfyUI)
-        # stays sequential - its upscale runs in the workflow anyway - so it
-        # waits for the verified prompt (Joe 2026-08-16).
-        if _nf is not None:
-            _verify_futures.append(_nf)
-            if _active_image_backend() == "local":
-                _nf.result()
     # Join any still-running background verifies so no thread is left dangling
     # and their prompt-cache writes land before we drop the cache below.
-    for _f in _verify_futures:
+    for _f in _pending.values():
         try:
             _f.result()
         except Exception:
@@ -12839,40 +12842,43 @@ def _resume_episode(state: dict) -> None:
 
         from concurrent.futures import ThreadPoolExecutor as _TPE
         _chunks = [missing_img[i:i + _RCHUNK] for i in range(0, len(missing_img), _RCHUNK)]
-        # Prime the pipeline: verify chunk 0 up front so the first render has
-        # its prompts ready, then overlap each subsequent verify with the prior
-        # chunk's render.
+        # Pipeline: verify chunk 0 up front, then verify each LATER chunk in the
+        # background WHILE an earlier chunk renders (codex generation overlaps
+        # both the LLM verify AND the async upscale queue, so nothing serializes).
+        # We pre-submit chunk 1 and chunk 2, and at each iteration submit the
+        # chunk TWO ahead - so a chunk's verify has a full extra chunk-render to
+        # finish before that chunk renders. It is ALWAYS ready, so _regen_one
+        # never falls back to inline LLM calls (which hammered LM Studio and
+        # looked like a stall after the first batch). Joe 2026-08-16.
         _rw0 = _verify_chunk(_chunks[0])
         if _rw0:
             print(f"  [CHUNK 1] {_rw0} scene rewrites applied")
-        _next_verify = None
-        _verify_futures = []
+        _pending: dict = {}
+        for _k in range(1, min(3, len(_chunks))):   # pre-submit chunks 1 and 2
+            _pending[_k] = _TPE(max_workers=1).submit(_verify_chunk, _chunks[_k])
         for _ci, _chunk in enumerate(_chunks):
             _cstart = _ci * _RCHUNK
-            # Kick off LLM verification of the NEXT chunk in a background thread
-            # so it overlaps with the CURRENT chunk's codex generation (the LLM
-            # never idles, and codex never waits on the LLM).
-            if _ci + 1 < len(_chunks):
-                _nf = _TPE(max_workers=1).submit(_verify_chunk, _chunks[_ci + 1])
-            else:
-                _nf = None
+            # Chunk 0 is verified (sync above); later chunks' verify was
+            # submitted 1-2 renders ago and is done - pop + surface rewrites.
+            if _ci in _pending:
+                _rw = _pending.pop(_ci).result()
+                if _rw:
+                    print(f"  [CHUNK {_ci + 1}] {_rw} scene rewrites applied")
+            # Kick off verification of the chunk TWO ahead so it has this render
+            # plus the next to complete (overlap, never idles the LLM).
+            if _ci + 2 < len(_chunks) and (_ci + 2) not in _pending:
+                _pending[_ci + 2] = _TPE(max_workers=1).submit(
+                    _verify_chunk, _chunks[_ci + 2])
             # Render the CURRENT chunk (its prompts are verified) in the main
-            # thread, in parallel with the background next-chunk verify.
+            # thread, in parallel with the background next-verify. API backends
+            # enqueue upscales ASYNC (providers.enqueue_upscale), so codex fires
+            # back-to-back while the upscaler catches up in the background - the
+            # generation/upscale overlap Joe wanted. Local (ComfyUI) upscales
+            # inside the workflow, so it's naturally serial.
             _render_chunk(_cstart, _chunk)
-            # API backends (codex/fal/runpod): DON'T block generation on the next
-            # chunk's LLM verify - the async upscale queue already lets codex fire
-            # back-to-back (upscale overlaps generation), so the only thing that
-            # can stall the next batch is the LLM verify. Let it finish in the
-            # background; _regen_one falls back to an inline relevance gate for
-            # any shot whose verified prompt isn't ready. Local (ComfyUI) stays
-            # sequential and waits (Joe 2026-08-16).
-            if _nf is not None:
-                _verify_futures.append(_nf)
-                if _active_image_backend() == "local":
-                    _nf.result()
-        # Join any still-running background verifies so no thread is left dangling
+        # Join any still-running background verify so no thread is left dangling
         # and their prompt-cache writes land before we drop the cache below.
-        for _f in _verify_futures:
+        for _f in _pending.values():
             try:
                 _f.result()
             except Exception:
