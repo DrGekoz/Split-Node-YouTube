@@ -2210,6 +2210,53 @@ LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "").strip().lower()
 LLM_MODEL = os.environ.get("LLM_MODEL", "").strip()
 NARRATIVE_MODEL = LLM_MODEL or CODEX_SCRIPT_MODEL
 
+# Kill-switch (Joe 2026-08-17): if the active writer backend fails N
+# consecutive calls, auto-switch to the other one for the rest of the run
+# instead of grinding into N x 420s timeouts.
+_LLM_FAIL_STREAK = 0
+_LLM_KILL_SWITCHED = False
+_LLM_FAIL_LIMIT = int(os.environ.get("LLM_FAIL_LIMIT", "3"))
+_LLM_FAIL_DISABLE = os.environ.get("LLM_FAIL_DISABLE", "").strip().lower() in ("1", "true", "yes")
+
+def _llm_kill_switch_available() -> bool:
+    """True when the OTHER writer backend exists and can take over."""
+    if LLM_PROVIDER == "codex":
+        return _codex_available() and bool(_llmstudio_loaded_models())
+    return _codex_available()
+
+def _llm_note_failure() -> None:
+    global _LLM_FAIL_STREAK, _LLM_KILL_SWITCHED, LLM_PROVIDER, NARRATIVE_MODEL, CODEX_SCRIPT_MODEL
+    _LLM_FAIL_STREAK += 1
+    if _LLM_FAIL_DISABLE or _LLM_KILL_SWITCHED:
+        return
+    if _LLM_FAIL_STREAK >= _LLM_FAIL_LIMIT and _llm_kill_switch_available():
+        _LLM_KILL_SWITCHED = True
+        _LLM_FAIL_STREAK = 0
+        _old = LLM_PROVIDER
+        if LLM_PROVIDER == "codex":
+            LLM_PROVIDER = "lmstudio"
+            NARRATIVE_MODEL = LLM_MODEL or NARRATIVE_MODEL
+            print(f"  [KILL-SWITCH] codex failed {_LLM_FAIL_LIMIT}x consecutively - "
+                  f"switching the writer to LM Studio for the rest of the run"
+                  f" (was {_old})")
+        else:
+            LLM_PROVIDER = "codex"
+            NARRATIVE_MODEL = CODEX_SCRIPT_MODEL
+            CODEX_SCRIPT_MODEL = NARRATIVE_MODEL
+            print(f"  [KILL-SWITCH] LM Studio failed {_LLM_FAIL_LIMIT}x consecutively - "
+                  f"switching the writer to codex ({CODEX_SCRIPT_MODEL}) for the "
+                  f"rest of the run (was {_old})")
+
+def _llm_note_success() -> None:
+    global _LLM_FAIL_STREAK
+    _LLM_FAIL_STREAK = 0
+
+def _llm_fail_disable() -> bool:
+    return _LLM_FAIL_DISABLE
+
+def _llm_kill_switched() -> bool:
+    return _LLM_KILL_SWITCHED
+
 # Approx USD per 1M input tokens for the Codex/OpenAI models that actually work
 # on a ChatGPT account (see the script-backend comment below). Used ONLY to
 # sort the Codex picker cheapest-first; real billing varies.
@@ -2426,8 +2473,14 @@ def _script_chat(messages: list[dict], max_tokens: int = 2000, temp: float = 0.8
         CODEX_SCRIPT_MODEL = NARRATIVE_MODEL
         t = _codex_script_chat(messages, max_tokens=max_tokens, temp=temp)
         if t:
+            _llm_note_success()
             return t
-    return _llm_chat(messages, max_tokens=max_tokens, temp=temp)
+    t = _llm_chat(messages, max_tokens=max_tokens, temp=temp)
+    if t:
+        _llm_note_success()
+        return t
+    _llm_note_failure()
+    return ""
 
 
 _SCRIPT_REACH_CACHE = None
@@ -4582,7 +4635,7 @@ def _build_scene_board(narration_paras: list[str], topic: str,
     for i in range(0, len(narration_paras), 20):
         chunk = narration_paras[i:i + 20]
         chunk_txt = "\n".join(f"{j+1}. {p[:120]}" for j, p in enumerate(chunk))
-        res = _llm_json([
+        res = _backend_json([
             {"role": "system", "content":
                 "You are a storyboard artist. For each numbered narration beat "
                 "produce STRICT JSON only: "
@@ -4592,14 +4645,33 @@ def _build_scene_board(narration_paras: list[str], topic: str,
                 "Match idx to the input numbers exactly. Say NOTHING else."},
             {"role": "user", "content": f"TOPIC: {topic}\n{chunk_txt}"}
         ], max_tokens=1200, temp=0.3)
+        seen_idx = set()
         for c in res.get("cards", []):
             try:
+                cidx = int(c.get("idx", i + 1))
+                # The LLM occasionally hallucinates extra/duplicate/out-of-range
+                # idx. Only accept cards that belong to THIS chunk and have a
+                # unique idx, so the scene board never balloons past the narration.
+                if not (i + 1 <= cidx <= i + len(chunk)):
+                    continue
+                if cidx in seen_idx:
+                    continue
+                seen_idx.add(cidx)
+                chars = []
+                for x in (c.get("characters", []) or []):
+                    sx = str(x).strip().strip('"').strip()
+                    if sx.lower() in ("[]", "none", "n/a", "null", ""):
+                        continue
+                    if sx in ("[", "]", "\""):
+                        continue
+                    chars.append(sx[:40])
                 cards.append({
-                    "idx": int(c.get("idx", i + 1)),
+                    "idx": cidx,
                     "beat": str(c.get("beat", ""))[:160],
                     "location": str(c.get("location", ""))[:80],
-                    "characters": [str(x) for x in c.get("characters", [])][:4],
+                    "characters": chars[:4],
                     "mood": c.get("mood", "neutral"),
+                    "seed": (hash(str(cidx)) % 2 ** 31) ^ (hash(topic) % 2 ** 31),
                 })
             except Exception:
                 continue
@@ -4611,6 +4683,17 @@ def _build_scene_board(narration_paras: list[str], topic: str,
                 json.dumps(cards, indent=1), encoding="utf-8")
         except Exception:
             pass
+    # REVIEW + REGEN (Joe 2026-08-17): if the sanitized board collapsed to far
+    # fewer cards than the narration, offer to regenerate once before shots fire.
+    if cards and len(cards) < len(narration_paras) * 0.6:
+        print(f"  [BOARD] WARNING: {len(cards)} cards vs {len(narration_paras)} "
+              f"paragraphs - beats may be merged/repeated.")
+        if os.environ.get("REGEN_SCENE_BOARD", "").strip().lower() in ("1", "y", "yes", "true"):
+            print("  [BOARD] REGEN_SCENE_BOARD=1 - forcing one rebuild")
+        else:
+            resp = _input_timeout("  Rebuild the scene board once? [Y/n]: ", 10.0, "y").lower()
+            if resp not in ("n", "no"):
+                return _build_scene_board(narration_paras, topic, episode_num)
     print(f"  [BOARD] {len(cards)} scene cards -> episodes/ep{episode_num:03d}/scene_board.json")
     return cards
 
@@ -4803,7 +4886,8 @@ def _parse_shot_response(text: str) -> dict:
 def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                      context: Optional[dict] = None,
                      establishing_map: Optional[dict] = None,
-                     sentence_para_map: Optional[dict] = None) -> list[dict]:
+                     sentence_para_map: Optional[dict] = None,
+                     checkpoint_cb=None, checkpoint_every: int = 25) -> list[dict]:
     """Stage 2: for each narration sentence, generate a shot entry.
 
     Each shot = ONE spoken sentence with its OWN image (Joe 2026-08-10). The
@@ -4850,19 +4934,17 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
             "\nREAL CHARACTERS (ONLY these people exist in the story - every "
             "shot with a person must use one of these EXACT names, never invent "
             "or import names):\n" + "\n".join(f"  - {r}" for r in roster) + "\n")
-    shots = []
-    for i, para in enumerate(narration_paras):
-        if len(shots) >= MAX_SHOTS:
-            break
+    import concurrent.futures as _cf
+    _max_workers = int(os.environ.get("SHOT_CONCURRENCY", "6" if LLM_PROVIDER == "codex" else "3"))
+    _max_workers = max(1, min(_max_workers, 24))
+    _total = min(len(narration_paras), MAX_SHOTS)
+
+    def _gen_one(_i, _para):
         # ESTABLISHING SHOT: injected line -> wide/full establishing frame.
-        if i in establishing_map:
-            em = establishing_map[i]
+        if _i in establishing_map:
+            em = establishing_map[_i]
             is_loc = em.get("kind") == "location"
             name = em.get("name", "")
-            # Character establishing shots introduce exactly ONE person (Joe
-            # 2026-08-12): if the establishing name somehow carries multiple
-            # comma-separated people, keep only the primary so the intro frame
-            # is a single clean subject (the others get their own shots).
             if not is_loc:
                 name = name.split(",")[0].strip()
             if is_loc:
@@ -4870,21 +4952,15 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                          "the whole place in frame, no people, "
                          f"{SCENE_STYLE}")
             else:
-                # Clean the name so a polluted 'X, role, role' establishing name
-                # becomes just the person's real name (Joe 2026-08-13).
                 name = _clean_character_field(name)
                 scene = ("An establishing wide full-body shot of the character, "
                          "whole person in frame from head to toe, "
                          f"highly detailed, {RENDER_STYLE}")
-            # Establishing labels are NOT baked into the image (Joe 2026-08-09):
-            # shots render clean and FFmpeg burns a '/// NAME' typewriter title
-            # (Myriad Pro Bold) over the frame at render time, so the text is
-            # always crisp and never in the source art.
-            shots.append({
-                "narration": para,
-                "paragraph_context": sentence_para_map.get(i, para),
-                "narration_idx": i,
-                "shot_type": "EWS" if is_loc else "WS",  # establishing wide/full
+            return {
+                "narration": _para,
+                "paragraph_context": sentence_para_map.get(_i, _para),
+                "narration_idx": _i,
+                "shot_type": "EWS" if is_loc else "WS",
                 "angle": "eye-level",
                 "character": "NONE" if is_loc else name,
                 "character_role": "establishing" if not is_loc else "",
@@ -4894,15 +4970,13 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 "is_establishing": True,
                 "establishing_kind": em.get("kind"),
                 "establishing_name": name,
-            })
-            print(f"  [LLM] Shot {len(shots)}: [ESTABLISHING {em.get('kind')}] {name}")
-            continue
-        m_chap = CHAPTER_RE.match(para)
+            }
+        m_chap = CHAPTER_RE.match(_para)
         if m_chap:
-            shots.append({
-                "narration": para,
-                "paragraph_context": sentence_para_map.get(i, para),
-                "narration_idx": i,
+            return {
+                "narration": _para,
+                "paragraph_context": sentence_para_map.get(_i, _para),
+                "narration_idx": _i,
                 "shot_type": "CU",
                 "angle": "eye-level",
                 "character": "NONE",
@@ -4913,17 +4987,14 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 "is_chapter": True,
                 "chapter_num": int(m_chap.group(1)),
                 "chapter_title": m_chap.group(2).strip(),
-            })
-            print(f"  [LLM] Shot {len(shots)}: [CHAPTER {m_chap.group(1)}] '{m_chap.group(2).strip()}'")
-            continue
+            }
         text = _script_chat([
             {"role": "system", "content": SHOT_SYSTEM_PROMPT},
             {"role": "user", "content": (
-                f"{ctx_line}NARRATION PARAGRAPH {i+1} of {len(narration_paras)}:\n{para[:1200]}\n\n"
+                f"{ctx_line}NARRATION PARAGRAPH {_i+1} of {_total}:\n{_para[:1200]}\n\n"
                 f"Create the shot for this paragraph."
             )}
         ], max_tokens=400, temp=0.8)
-
         parsed = _parse_shot_response(text)
         shot_type = parsed.get("shot_type", "")
         angle = parsed.get("angle", "")
@@ -4932,19 +5003,15 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
         scene = parsed.get("scene", "")
         sfx = parsed.get("sfx", "NONE")
         tone = parsed.get("tone", "neutral")
-        # RETRY parse failures (Joe 2026-08-12): a transient LLM timeout/truncation
-        # used to DROP the sentence entirely (no shot -> no image/TTS -> a missing
-        # beat in the video). Retry the LLM once, then fall back to a generic shot
-        # so NO sentence is ever lost.
         if not scene:
             for _r in range(2):
-                print(f"  [LLM] Shot {i+1}: parse failed, retrying ({_r+1}/2)...")
+                print(f"  [LLM] Shot {_i+1}: parse failed, retrying ({_r+1}/2)...")
                 time.sleep(0.5)
                 _txt = _script_chat([
                     {"role": "system", "content": SHOT_SYSTEM_PROMPT},
                     {"role": "user", "content": (
-                        f"{ctx_line}NARRATION PARAGRAPH {i+1} of {len(narration_paras)}:\n"
-                        f"{para[:1200]}\n\nCreate the shot for this paragraph.")}
+                        f"{ctx_line}NARRATION PARAGRAPH {_i+1} of {_total}:\n"
+                        f"{_para[:1200]}\n\nCreate the shot for this paragraph.")}
                 ], max_tokens=400, temp=0.8)
                 _p = _parse_shot_response(_txt)
                 scene = _p.get("scene", "").strip()
@@ -4958,7 +5025,6 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                     parsed = _p
                     break
             if not scene:
-                print(f"  [LLM] Shot {i+1}: still failing - generic fallback scene (sentence kept)")
                 shot_type = shot_type or "MS"
                 angle = angle or "eye-level"
                 character = character or "NONE"
@@ -4967,34 +5033,20 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                 sfx = "NONE"
                 tone = "neutral"
                 parsed = {}
-
-        # Normalize character name: strip role-y artifacts, keep the name itself
-        # (Joe 2026-08-13: 'ION CECAN, NONE' / 'Robert Pagliarini, attorney, tax
-        # person' -> clean real names so titles + real-ref lookups are correct).
         character = _clean_character_field(character)
         character_role = (character_role or "").strip()
-        # If role field is absurdly long, the model squeezed scene text into it -
-        # salvage: if scene is empty, use the tail of the long role as the scene
         if len(character_role) > 120:
             if not scene:
                 scene = character_role
             character_role = "character in the story"
-        # Validate SFX
         if sfx not in SFX_LIBRARY:
-            sfx = "NONE"
-        # Don't repeat the same SFX in consecutive shots
-        if shots and shots[-1].get("sfx") == sfx and sfx != "NONE":
             sfx = "NONE"
         if tone not in ("suspense", "neutral", "triumphant"):
             tone = "neutral"
         if not scene:
-            print(f"  [LLM] Shot {i+1}: parse failed, skipping ({text[:60]!r})")
-            continue
-        # MACHINE-SLOP REWRITE (Joe 2026-08-10): if a BUSINESS shot's scene
-        # drifted to an abstract machine/engine structure, rewrite it to a real
-        # building-with-logo / screen-with-logo scene so the image matches the
-        # company, not a "big machine engine thing".
-        if _is_business_shot_meta(character, scene, paragraph_context := sentence_para_map.get(i, para)):
+            print(f"  [LLM] Shot {_i+1}: parse failed, skipping ({text[:60]!r})")
+            return None
+        if _is_business_shot_meta(character, scene, sentence_para_map.get(_i, _para)):
             if _is_machine_slop(scene):
                 scene = (
                     "The exterior of the company's real office building, the "
@@ -5002,13 +5054,12 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
                     "signage, employees going about their day outside, realistic "
                     "corporate architecture"
                 )
-                print(f"  [LLM] Shot {i+1}: business machine-slop scene -> "
+                print(f"  [LLM] Shot {_i+1}: business machine-slop scene -> "
                       f"rewrote to building-with-logo")
-
-        shots.append({
-            "narration": para,
-            "paragraph_context": sentence_para_map.get(i, para),
-            "narration_idx": i,
+        return {
+            "narration": _para,
+            "paragraph_context": sentence_para_map.get(_i, _para),
+            "narration_idx": _i,
             "shot_type": shot_type,
             "angle": angle,
             "character": character,
@@ -5017,17 +5068,57 @@ def _build_shot_list(narration_paras: list[str], bible: Optional[dict] = None,
             "sfx": sfx,
             "tone": tone,
             "broll": parsed.get("broll", ""),
-        })
-        # Director's bible: hero beats get ECU magnification + a riser SFX
-        if (i + 1) in hero_set:
-            shots[-1]["hero"] = True
-            if shots[-1]["shot_type"] not in ("ECU", "CU"):
-                shots[-1]["shot_type"] = "ECU"
-            if shots[-1]["sfx"] == "NONE":
-                shots[-1]["sfx"] = "mixkit-cinematic-trailer-riser-790.wav"
-        print(f"  [LLM] Shot {len(shots)}: [{shot_type}|{angle}] char={character} {scene[:50]}... (sfx={sfx}, tone={tone})")
-        time.sleep(0.3)
+        }
 
+    _pool = {_i: None for _i in range(_total)}
+    _checkpoint_every = max(1, int(checkpoint_every or os.environ.get("SHOT_CHECKPOINT_EVERY", "25")))
+    _done = 0
+
+    def _maybe_checkpoint():
+        # Main-thread, order-preserving partial snapshot for crash recovery.
+        if not checkpoint_cb or _done < _checkpoint_every or _done % _checkpoint_every != 0:
+            return
+        _partial = [(_pool.get(_j)) for _j in range(_total) if _pool.get(_j) is not None]
+        try:
+            checkpoint_cb(_partial)
+        except Exception as _ce:
+            print(f"  [LLM] checkpoint save failed: {_ce}")
+
+    if _max_workers <= 1:
+        for _i in range(_total):
+            _pool[_i] = _gen_one(_i, narration_paras[_i])
+            _done += 1
+            _maybe_checkpoint()
+    else:
+        with _cf.ThreadPoolExecutor(max_workers=_max_workers) as _ex:
+            _futs = {_ex.submit(_gen_one, _i, narration_paras[_i]): _i
+                     for _i in range(_total)}
+            for _fu in _cf.as_completed(_futs):
+                _i = _futs[_fu]
+                try:
+                    _pool[_i] = _fu.result()
+                except Exception as _e:
+                    print(f"  [LLM] Shot {_i+1} worker error: {_e}")
+                    _pool[_i] = None
+                _done += 1
+                _maybe_checkpoint()
+    # Re-assemble IN ORDER (same as the serial loop), dropping the None skips.
+    shots = []
+    for _i in range(_total):
+        _s = _pool.get(_i)
+        if _s is not None:
+            shots.append(_s)
+    # Hero beats + SFX no-repeat are order-dependent - apply in a final pass.
+    for _i, _s in enumerate(shots):
+        if (_s.get("narration_idx", -1) + 1) in hero_set:
+            _s["hero"] = True
+            if _s["shot_type"] not in ("ECU", "CU"):
+                _s["shot_type"] = "ECU"
+            if _s["sfx"] == "NONE":
+                _s["sfx"] = "mixkit-cinematic-trailer-riser-790.wav"
+        if _i > 0 and _s.get("sfx") == shots[_i-1].get("sfx") and _s.get("sfx") != "NONE":
+            _s["sfx"] = "NONE"
+        print(f"  [LLM] Shot {_i+1}: [{_s.get('shot_type')}|{_s.get('angle')}] char={_s.get('character')} {_s.get('scene','')[:50]}... (sfx={_s.get('sfx')}, tone={_s.get('tone')})")
     if not shots:
         print("  [LLM] Shot list failed, building fallback from narration")
         for i, para in enumerate(narration_paras[:12]):
@@ -9452,7 +9543,11 @@ def _generate_all_shots(shots: list[dict], character_sheets: Optional[dict] = No
                 print(f"  [SHOT {idx+1}/{len(shots)}] resume: keep "
                       f"{os.path.basename(shot['image_path'])}")
             return
-        seed = 10000 + idx * 137 + random.randint(0, 999)
+        # SEED LOCK (Joe 2026-08-17): reuse the seed that produced the
+        # original art when this shot is being regenerated, so the re-render
+        # matches the stored frame instead of drifting.
+        seed = int(shot.get("seed") or 0) or (10000 + idx * 137 + random.randint(0, 999))
+        shot["seed"] = seed
         # Reuse the prompt verified in the PRE-VERIFICATION pass (Joe 2026-08-09)
         # when it exists; otherwise build + gate inline (fallback for resume or
         # when the gate was off during the pre-pass).
@@ -12066,6 +12161,32 @@ def _resume_file_for(ep_num: int) -> Path:
             if ep_num and int(ep_num) > 0
             else PROJECT_DIR / ".resume_state.json")
 
+def _shotlist_incomplete_file(ep_num: int) -> Path:
+    """Marker that the previous run died MID shot-list (per-shot checkpoint
+    fired). Resume checks it and auto-runs _regenerate_shot_list_for_resume
+    to fill the missing tail, so a kill during the longest LLM phase
+    recovers the already-generated shots instead of starting over."""
+    if ep_num and int(ep_num) > 0:
+        return PROJECT_DIR / f".shotlist_incomplete.ep{int(ep_num):03d}"
+    return PROJECT_DIR / ".shotlist_incomplete"
+
+def _mark_shotlist_incomplete(ep_num: int) -> None:
+    try:
+        _shotlist_incomplete_file(ep_num).write_text("1", encoding="utf-8")
+    except Exception:
+        pass
+
+def _clear_shotlist_incomplete(ep_num: int) -> None:
+    try:
+        _f = _shotlist_incomplete_file(ep_num)
+        if _f.exists():
+            _f.unlink()
+    except Exception:
+        pass
+
+def _shotlist_incomplete(ep_num: int) -> bool:
+    return _shotlist_incomplete_file(ep_num).exists()
+
 
 def _save_resume_state(stage: str, episode_num: int, article_url: str = "", topic: str = "",
                        shots: Optional[list] = None, character_sheets: Optional[dict] = None,
@@ -12875,6 +12996,19 @@ def _resume_episode(state: dict) -> None:
     # filling the gaps. SKIP_RESUME_MENU=1 restores the old gap-fill-only flow.
     regen_tts = False
     _wants_img_regen = False
+    # Per-shot checkpoint recovery (Joe 2026-08-17): if the previous run died
+    # MID shot-list (incomplete marker set), regenerate the missing tail so
+    # the partially-generated shots are recovered instead of the episode
+    # restarting the whole LLM phase from scratch.
+    if _shotlist_incomplete(episode_num) and state.get("narration"):
+        print("  [RESUME] previous run died mid-shot-list - regenerating "
+              "the missing shots...")
+        _new_shots = _regenerate_shot_list_for_resume(state)
+        if _new_shots and len(_new_shots) > len(shots):
+            shots = _new_shots
+            print(f"  [SHOTLIST] recovered partial shot list -> {len(shots)} shots "
+                  f"(missing tail regenerated)")
+        _clear_shotlist_incomplete(episode_num)
     if not os.environ.get("SKIP_RESUME_MENU"):
         print("  [RESUME] What would you like to rebuild? (enter for No):")
         _regen_script = _yn("    Rebuild the narration SCRIPT from the article? [y/N]: ")
@@ -13718,6 +13852,28 @@ def _phase_llm(config: dict):
     topic = config.get("article_title") or config.get("topic") or ""
     target_paras = config["target_paras"]
 
+    # PRE-ROLL REACHABILITY GATE (Joe 2026-08-17): probe the selected writer
+    # backend ONCE and auto-switch if it's down/busy, so the whole LLM phase
+    # doesn't grind into per-call 420s timeouts.
+    if not _llm_fail_disable() and not _llm_kill_switched():
+        _writer_ok = True
+        if LLM_PROVIDER == "codex":
+            _writer_ok = _codex_script_reachable()
+        else:
+            _writer_ok = _llm_fast_reachable()
+        if not _writer_ok and _llm_kill_switch_available():
+            _oldp = LLM_PROVIDER
+            if LLM_PROVIDER == "codex":
+                LLM_PROVIDER = "lmstudio"
+                NARRATIVE_MODEL = LLM_MODEL or NARRATIVE_MODEL
+            else:
+                LLM_PROVIDER = "codex"
+                NARRATIVE_MODEL = CODEX_SCRIPT_MODEL
+                CODEX_SCRIPT_MODEL = NARRATIVE_MODEL
+            _LLM_KILL_SWITCHED = True
+            print(f"  [PRE-ROLL] writer backend {_oldp} unreachable - switched to "
+                  f"{LLM_PROVIDER} for this episode")
+
     # FAIL-FAST script-backend gate (Joe 2026-08-14): script writing now runs
     # through the Codex CLI (gpt-5.4) unless SCRIPT_BACKEND=lmstudio. Probe codex
     # ONCE up front with a short timeout so a dead/not-installed/throttled codex
@@ -13809,32 +13965,41 @@ def _phase_llm(config: dict):
     _shot_bible = dict(bible or {})
     if story_bible and story_bible.get("characters"):
         _shot_bible["characters"] = story_bible["characters"]
+    # PER-SHOT CHECKPOINT (Joe 2026-08-17): as each shot is generated the
+    # partial shot list is saved (with the incomplete marker). A kill during
+    # the longest LLM phase then resumes by filling the missing tail instead
+    # of restarting.
+    def _chk_save(_partial):
+        _cint = 0
+        if intro:
+            _cint = len([_s for _s in
+                         re.split(r"(?<=[.!?])\s+", intro[0]) if _s.strip()])
+        _save_resume_state("story", episode_num, article_url, topic, _partial,
+                           {}, chapter_events=chapter_events,
+                           anchor_events=anchor_events,
+                           location_sheets={}, prop_assets={},
+                           target_paras=target_paras,
+                           narration=narration, context=context, bible=bible,
+                           sentence_para_map=sentence_para_map,
+                           establishing_map=establishing_map,
+                           intro_count=_cint)
+        _mark_shotlist_incomplete(episode_num)
+
+    _shots_sofar = []
+    def _chk_cb(_partial):
+        _chk_save(_partial)
+        _shots_sofar[:] = _partial
+
     shots = _build_shot_list(narration, bible=_shot_bible, context=context,
                              establishing_map=establishing_map,
-                             sentence_para_map=sentence_para_map)
+                             sentence_para_map=sentence_para_map,
+                             checkpoint_cb=_chk_cb, checkpoint_every=int(
+                                 os.environ.get("SHOT_CHECKPOINT_EVERY", "25")))
+    _clear_shotlist_incomplete(episode_num)  # full shot list now on disk
+    if _shots_sofar:
+        print(f"  [CHECKPOINT] shot list built with incremental saves "
+              f"({len(shots)} shots final) - crash-safe throughout")
     _apply_plan_to_shots(shots, sentence_para_map, plan)  # key words + foley onto shots
-
-    # CRASH-WINDOW CHECKPOINT (Joe 2026-08-17): the shot-list phase is the
-    # longest LLM stretch (one call per sentence, up to MAX_SHOTS) and a
-    # timeout/interrupt there used to lose EVERYTHING (the first resume save
-    # only happened at the end of this function). Persist shots immediately;
-    # the final save below overwrites with the complete state. On resume,
-    # _resume_episode rebuilds missing character sheets from saved narration.
-    _chk_intro_count = 0
-    if intro:
-        _chk_intro_count = len([_s for _s in
-                                re.split(r"(?<=[.!?])\s+", intro[0]) if _s.strip()])
-    _save_resume_state("story", episode_num, article_url, topic, shots,
-                       {}, chapter_events=chapter_events,
-                       anchor_events=anchor_events,
-                       location_sheets={}, prop_assets={},
-                       target_paras=target_paras,
-                       narration=narration, context=context, bible=bible,
-                       sentence_para_map=sentence_para_map,
-                       establishing_map=establishing_map,
-                       intro_count=_chk_intro_count)
-    print(f"  [CHECKPOINT] shots saved for resume ({len(shots)} shots) - "
-          f"crash-safe from here")
 
     easter_egg = _ask_easter_egg()
     if easter_egg:
