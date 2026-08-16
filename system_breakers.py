@@ -6537,10 +6537,12 @@ def _generate_chapter_card(shot: dict, episode_num: int,
     ep_dir = _episode_dir(episode_num)
     ep_dir.mkdir(parents=True, exist_ok=True)
     out = str(ep_dir / _chapter_filename(n, title))
-    # REGEN_CHAPTERS controls chapter-card regeneration independently of shots
-    # (Joe 2026-08-09). REGEN_IMAGES is honoured as the legacy "regen all".
-    _regen = ((os.environ.get("REGEN_CHAPTERS", "").strip().lower() in ("1", "yes", "y", "true"))
-              or (os.environ.get("REGEN_IMAGES", "0").strip().lower() in ("1", "yes", "y", "true")))
+    # REGEN_CHAPTERS is the ONLY control for chapter-card regeneration (Joe
+    # 2026-08-16). REGEN_IMAGES (shots) must NOT cascade into cards - the user
+    # answers shots and chapter cards as two separate resume questions, so a
+    # shot regen (e.g. a style change) must never wipe existing cards they
+    # chose to keep.
+    _regen = os.environ.get("REGEN_CHAPTERS", "").strip().lower() in ("1", "yes", "y", "true")
     if _regen and os.path.isfile(out):
         try:
             os.remove(out)
@@ -12665,16 +12667,15 @@ def _resume_episode(state: dict) -> None:
             missing_img.append(_s)
     # Chapter title cards (codex/fal): generate any missing card images on
     # resume too, so a mid-run crash doesn't leave a chapter on a black card.
-    # Under REGEN_IMAGES=1 the stale cards are force-regenerated (they may be
-    # corrupted - ep11 had character panels stretched onto the cards).
-    # The stored image_path is reconciled against the deterministic
-    # chapter_XX_slug.png on disk so an already-generated card is picked up
-    # (Joe 2026-08-16).
+    # Chapter-card regen is controlled ONLY by REGEN_CHAPTERS (Joe 2026-08-16) -
+    # REGEN_IMAGES (a style-change shot regen) must NOT cascade into cards. The
+    # stored image_path is reconciled against the deterministic chapter_XX_slug.png
+    # on disk so an already-generated card is picked up.
+    _regen_chapters = os.environ.get("REGEN_CHAPTERS", "").strip().lower() in ("1", "yes", "y", "true")
     _chap_missing = [s for s in shots
                      if s.get("is_chapter")
                      and _active_image_backend() in ("codex", "fal")
-                     and not (not _force_regen
-                              and _reconcile_chapter_card(s, episode_num))]
+                     and not (_reconcile_chapter_card(s, episode_num) and not _regen_chapters)]
     if _chap_missing:
         _cn2 = _image_concurrency()
         print(f"\n[IMAGES] Generating {len(_chap_missing)} missing chapter title cards "

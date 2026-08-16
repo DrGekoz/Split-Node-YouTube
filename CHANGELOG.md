@@ -2,6 +2,12 @@
 
 All notable changes to Split Node.
 
+## [1.63.0] - 2026-08-16
+
+### Fix: chapter-card regen no longer cascades from a shot regen
+
+- Chapter-card regeneration is now controlled ONLY by `REGEN_CHAPTERS`. Previously `REGEN_IMAGES` (which a style-change shot regen sets) was also honoured as a legacy "regen all", so choosing "no" to regenerate chapter cards was overridden whenever you picked a new style and it force-regenerated every card anyway. Now `_generate_chapter_card` drops an existing card only when `REGEN_CHAPTERS=1`, and the resume `_chap_missing` detection regenerates cards only when `REGEN_CHAPTERS=1` or the card is genuinely missing on disk. A shot-only regen (style change) keeps your existing chapter cards. Joe 2026-08-16.
+
 ## [1.62.0] - 2026-08-16
 
 ### Fix: resume reconciles shots + chapter cards against disk + API-backend batch overlap
