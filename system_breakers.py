@@ -12520,6 +12520,14 @@ def _rebuild_script_for_resume(state: dict) -> dict:
             establishing_map, anchor_events)
     context = _build_episode_context(topic, paragraphs)
     bible = _build_directors_bible(topic, narration)
+    # Merge the STORY bible's character roster into the state bible (Joe
+    # 2026-08-17): the directors bible has no 'characters' key, and persisting
+    # only the directors bible made every resume see an EMPTY character roster
+    # ("0 character sheets / character not found"). The merged dict is what
+    # gets saved to the resume state so characters survive a crash.
+    _state_bible = dict(bible or {})
+    if story_bible and story_bible.get("characters"):
+        _state_bible["characters"] = story_bible["characters"]
     _build_scene_board(narration, topic, episode_num)
     _plan_durations(narration)
 
@@ -13019,6 +13027,7 @@ def _resume_episode(state: dict) -> None:
         _swap_model = _yn("    Swap the image-gen model (backend/model)? [y/N]: ")
         _regen_shotlist = _yn("    Regenerate the SHOT LIST (re-run shot-list LLM to fill parse-failed/missing shots)? [y/N]: ")
         _regen_keywords = _yn("    Regenerate key-words from existing narration? [y/N]: ")
+        _regen_bible = _yn("    Regenerate STORY BIBLE (character detection, rebuilds sheets/refs)? [y/N]: ")
         if _regen_clips:
             os.environ["REGEN_CLIPS"] = "1"
             print("  [RESUME] Regenerating ALL video clips (reuse disabled)")
@@ -13065,6 +13074,36 @@ def _resume_episode(state: dict) -> None:
             os.environ["REGEN_CLIPS"] = "1"
             print("  [RESUME] Key-words regenerated from existing narration -> "
                   "video will re-render to bake the new highlights")
+        if _regen_bible:
+            # Re-run character detection from the article (re-fetched) or the
+            # saved narration, then rebuild the character sheets so a character
+            # the bible missed is finally locked in. No full script rebuild -
+            # narration, shots and TTS stay untouched. (Joe 2026-08-17)
+            _bible_src = None
+            if article_url:
+                try:
+                    _bible_src = fetch_article_paragraphs(article_url)
+                except Exception as _fe:
+                    print(f"  [BIBLE] article re-fetch failed ({_fe}) - using saved narration")
+            if not _bible_src:
+                _bible_src = state.get("narration") or [
+                    s.get("narration", "") for s in shots if s.get("narration")]
+            if not _bible_src:
+                print("  [BIBLE] no narration/article to detect characters from - "
+                      "cannot regenerate the story bible")
+            else:
+                _rebuilt_bible = _build_story_bible(topic, list(_bible_src))
+                _resume_bible = _rebuilt_bible
+                character_sheets = _build_character_sheets(
+                    shots, state.get("narration")
+                    or [s.get("narration", "") for s in shots],
+                    bible=_rebuilt_bible)
+                _wants_img_regen = True
+                os.environ["REGEN_IMAGES"] = "1"
+                os.environ["REGEN_CLIPS"] = "1"  # clips embed the image - must re-render
+                print(f"  [BIBLE] story bible regenerated -> "
+                      f"{len(_rebuilt_bible.get('characters') or [])} character(s), "
+                      f"{len(character_sheets)} sheet def(s) -> forcing image regeneration")
         if _swap_model:
             _ask_image_model_swap()
             os.environ["REGEN_IMAGES"] = "1"
@@ -13151,17 +13190,34 @@ def _resume_episode(state: dict) -> None:
                            thumb_path, video_path, video_id,
                            chapter_events, anchor_events,
                            location_sheets, prop_assets,
-                           target_paras=target_paras)
+                           target_paras=target_paras,
+                           narration=state.get("narration") or [],
+                           context=state.get("context") or {},
+                           bible=_resume_bible,
+                           sentence_para_map=state.get("sentence_para_map") or {},
+                           establishing_map=state.get("establishing_map") or {},
+                           intro_count=int(state.get("intro_count", 0) or 0))
 
-    # 0a. Rebuild character sheets if the crash-window checkpoint left them
+    # 0a. Restore the story bible (Joe 2026-08-17): carry the locked character
+    #     roster through resume saves so character sheets/refs are never lost.
+    #     If the saved bible is empty (old-state / LLM miss), rebuild sheets
+    #     from the narration so image gen still has identity refs.
+    _resume_bible = state.get("bible") or {}
+
+    # 0b. Rebuild character sheets if the crash-window checkpoint left them
     #     empty (shot list saved, sheets not yet built) so image gen still
-    #     has identity refs for every character (Joe 2026-08-17).
-    if not character_sheets and shots and state.get("narration"):
-        character_sheets = _build_character_sheets(
-            shots, state.get("narration") or [], bible=state.get("bible") or None)
-        print(f"  [RESUME] rebuilt {len(character_sheets)} character sheet(s) "
-              f"from the checkpoint (they were not saved yet)")
-        _save("story")
+    #     has identity refs for every character (Joe 2026-08-17). Falls back
+    #     to per-shot narration when the state's narration list is missing
+    #     (an old _save dropped it - Joe 2026-08-17).
+    if not character_sheets and shots:
+        _sheet_narr = state.get("narration") or [
+            s.get("narration", "") for s in shots if s.get("narration")]
+        if _sheet_narr:
+            character_sheets = _build_character_sheets(
+                shots, _sheet_narr, bible=_resume_bible)
+            print(f"  [RESUME] rebuilt {len(character_sheets)} character sheet(s) "
+                  f"from the checkpoint (they were not saved yet)")
+            _save("story")
 
     # 0. TTS GAP-FILL FIRST (Joe 2026-08-09): generate any missing narration
     #    clips BEFORE image generation, so images are never rendered against
@@ -13947,6 +14003,14 @@ def _phase_llm(config: dict):
 
     context = _build_episode_context(topic, paragraphs)
     bible = _build_directors_bible(topic, narration)
+    # Merge the STORY bible's character roster into the state bible (Joe
+    # 2026-08-17): the directors bible has no 'characters' key, and persisting
+    # only the directors bible made every resume see an EMPTY character roster
+    # ("0 character sheets / character not found"). The merged dict is what
+    # gets saved to the resume state so characters survive a crash.
+    _state_bible = dict(bible or {})
+    if story_bible and story_bible.get("characters"):
+        _state_bible["characters"] = story_bible["characters"]
     _build_scene_board(narration, topic, episode_num)
     _plan_durations(narration)
 
@@ -13980,7 +14044,7 @@ def _phase_llm(config: dict):
                            anchor_events=anchor_events,
                            location_sheets={}, prop_assets={},
                            target_paras=target_paras,
-                           narration=narration, context=context, bible=bible,
+                           narration=narration, context=context, bible=_state_bible,
                            sentence_para_map=sentence_para_map,
                            establishing_map=establishing_map,
                            intro_count=_cint)
@@ -14039,7 +14103,7 @@ def _phase_llm(config: dict):
                        anchor_events=anchor_events,
                        location_sheets=location_sheets, prop_assets=prop_assets,
                        target_paras=target_paras,
-                       narration=narration, context=context, bible=bible,
+                       narration=narration, context=context, bible=_state_bible,
                        sentence_para_map=sentence_para_map,
                        establishing_map=establishing_map,
                        intro_count=_intro_count)
