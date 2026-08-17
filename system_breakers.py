@@ -13846,6 +13846,7 @@ def _episode_setup(default_ep: int):
 def _phase_llm(config: dict):
     """Run ALL the LLM stages for one episode (article -> narration -> shots ->
     world assets) and START its TTS worker. Returns an ep_ctx dict, or None."""
+    global LLM_PROVIDER, NARRATIVE_MODEL, CODEX_SCRIPT_MODEL
     _apply_config_env(config)
     episode_num = config["episode_num"]
     article_url = config["article_url"]
