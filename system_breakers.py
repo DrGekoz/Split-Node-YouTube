@@ -14014,19 +14014,6 @@ def _phase_llm(config: dict):
     _build_scene_board(narration, topic, episode_num)
     _plan_durations(narration)
 
-    # Style test frame (no human gate - Joe 2026-08-09)
-    style_test = str(_episode_dir(episode_num) / "style_test.png")
-    st_env = ", ".join(context.get("environments", [])) or "the primary setting"
-    print(f"\n[STYLE] generating style test frame ({_active_image_backend()})...")
-    _krea_generate(
-        f"{RENDER_STYLE}. A moody establishing frame of the episode's main "
-        f"environment: {st_env}. 16:9 widescreen cinematic documentary frame",
-        4242 + episode_num, style_test)
-    if os.path.isfile(style_test):
-        print(f"  [STYLE] test frame: {style_test}")
-    else:
-        print("  [STYLE] test frame failed (ComfyUI not running?) - continuing")
-
     _shot_bible = dict(bible or {})
     if story_bible and story_bible.get("characters"):
         _shot_bible["characters"] = story_bible["characters"]
