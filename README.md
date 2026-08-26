@@ -506,11 +506,11 @@ split-node/
 ### Story Discovery
 - **Custom article URL** — at startup you can **paste your own article URL** (press Enter for RSS, or type/paste any `http(s)` link). The pipeline fetches that article directly, skips RSS entirely, and runs the full script/image/render/upload pipeline on it
 - **RSS "beat the system" ingestion** — hack / lottery / loophole keywords with junk-article filtering (cookie, newsletter, paywall, sponsored, boilerplate stripped before paragraph extraction)
-- **Recency-first selection** — candidate articles are sorted **most recent first** (matching the filters), so fresh stories surface before older ones instead of the same few looping
+- **Deterministic weighted selection** — candidates are ranked by money-priority, curated-seed confidence, weighted niche/trend/engagement score, then recency; set `TOPIC_DISCOVERY_SHUFFLE=1` only when exploratory feed/query order is wanted
 - **Rejection cooldown** — if you say **no** to an article, it's recorded and **not re-presented for 7 days** (`REJECT_COOLDOWN_DAYS`), so rejected links stop repeating every run; used articles are never re-shown
 - **Story resolve-and-retry** — every candidate is **parsed before it's presented**: `_pick_story` fetches + extracts each link up front, and a link that's blocked / dead / paywalled / empty is **auto-skipped** (no prompt) and you're offered the next working story — you only ever see links that actually resolve (`STORY_RESOLVE_ATTEMPTS`, default 5)
-- **LLM relevance scoring** — every paragraph scored 0-10 vs the topic; off-topic beats discarded (fail-open keep-on-error)
-- **Trend scoring toolkit** — SerpAPI demand + YouTube competition analysis to pick topics with actual demand (cached 24h)
+- **Relevance filtering** — heuristic candidate scoring happens before selection, then extracted article paragraphs can be scored 0-10 by the LLM; off-topic beats are discarded (fail-open keep-on-error)
+- **Trend scoring toolkit** — SerpAPI/Google Trends demand plus a bounded YouTube competition estimate using view velocity and large-channel share (cached 24h)
 
 ### Script Generation
 - **Story bible (NEW) — built from the article BEFORE the script** (FERN + Isaac framework): locks the visual hook (the thing the viewer must SEE), the deeper question the episode answers, surface + deeper problem, the protagonist's transformation arc, hero's-journey beats, and the **REAL character roster** extracted from the article (with per-character best-guess **gender + age** inferred from the article). The narration script is then written to **follow this bible**, and the shot list may only use those exact character names — so every episode is written fresh from its own story (no template reuse, no leaked names from a previous episode). The bible **retries up to 3×** on an empty/incomplete result so a transient LM timeout can never silently disable the roster lock

@@ -1370,8 +1370,9 @@ def _seed_candidates(used: set, skip: set) -> list[dict]:
             "category": cat,
             "final_score": round(min(50 + cat_boost * 10, 100), 1),
         })
-    # Order: money/loophole/glitch categories first, then higher score.
-    out.sort(key=lambda x: (x.get("category", ""), x.get("final_score", 0)),
+    # Curated entries already carry a category boost; rank by that score rather
+    # than by category name so the order is meaningful and reproducible.
+    out.sort(key=lambda x: (x.get("final_score", 0), x.get("title", "")),
              reverse=True)
     if SEED_MAX and SEED_MAX > 0:
         out = out[:SEED_MAX]
@@ -1554,7 +1555,8 @@ def _collect_candidate_stories(used: set, skip: set,
 
     # -- Secondary: HN Algolia niche search --
     queries = HN_SEARCH_QUERIES[:]
-    random.shuffle(queries)
+    if _topic_discovery_shuffle_enabled():
+        random.shuffle(queries)
     for query in queries:
         items = _fetch_hn_algolia(query)
         for it in items:
@@ -1582,18 +1584,21 @@ def _collect_candidate_stories(used: set, skip: set,
             break
         time.sleep(0.4)
 
-    # MONEY-HACK / lottery-loophole stories first (flagship topic), then MOST
-    # RECENT, then final_score as the tiebreak. Money stories always surface
-    # before hacker/tech/AI regardless of recency (Joe 2026-08-12).
+    # MONEY-HACK / lottery-loophole stories first (flagship topic), then
+    # curated confidence, weighted quality/demand score, recency, and source
+    # engagement. Recency is a tiebreaker rather than the ranking objective.
     matches.sort(key=lambda x: (x.get("money_priority", 0),
-                                _parse_item_date(x), x.get("final_score", 0),
+                                1 if x.get("from_seed") else 0,
+                                x.get("final_score", 0),
+                                _parse_item_date(x),
                                 x.get("hn_points", 0)), reverse=True)
 
     # -- Fallback: RSS feeds if Algolia gave nothing usable --
     if not matches:
         print("  [RSS] HN Algolia found nothing, scanning feeds...")
         feeds = RSS_FEEDS[:]
-        random.shuffle(feeds)
+        if _topic_discovery_shuffle_enabled():
+            random.shuffle(feeds)
         for feed_url in feeds:
             items = _fetch_rss_feed(feed_url)
             for it in items:
@@ -1627,9 +1632,17 @@ def _collect_candidate_stories(used: set, skip: set,
                 break
             time.sleep(0.3)
         matches.sort(key=lambda x: (x.get("money_priority", 0),
-                                    _parse_item_date(x),
-                                    x.get("final_score", 0)), reverse=True)
+                                    1 if x.get("from_seed") else 0,
+                                    x.get("final_score", 0),
+                                    _parse_item_date(x)), reverse=True)
     return matches
+
+
+def _topic_discovery_shuffle_enabled() -> bool:
+    """Keep discovery reproducible unless exploratory shuffling is requested."""
+    return os.environ.get("TOPIC_DISCOVERY_SHUFFLE", "0").strip().lower() in (
+        "1", "true", "yes"
+    )
 
 
 def _fetch_page_title(url: str) -> str:

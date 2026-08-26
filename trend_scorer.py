@@ -16,6 +16,7 @@ so the pipeline never blocks on scoring.
 """
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -36,6 +37,7 @@ TOOLKIT = PROJECT_DIR / "trend_toolkit" / "trends_serpapi.py"
 YT_API = "https://www.googleapis.com/youtube/v3/"
 TIMEOUT = 30
 TREND_CACHE = PROJECT_DIR / "trend_scan_cache.json"
+TREND_CACHE_SCHEMA = 2
 
 SERPAPI_KEY = ""  # read lazily at call time (pipeline loads .env after import)
 
@@ -48,8 +50,8 @@ def _serpapi_key() -> str:
     return os.environ.get("SERPAPI_API_KEY", "") or SERPAPI_KEY
 
 
-# Category -> candidate topic terms (one SerpAPI TIMESERIES call per category,
-# so a full scan is 5 calls; cached for TREND_SCAN_CACHE_HOURS, default 24h)
+# Category -> candidate topic terms (one demand call per category, so a full
+# scan is 6 calls; cached for TREND_SCAN_CACHE_HOURS, default 24h).
 TREND_CATEGORIES = {
     "money-hack": ["money hack", "side hustle", "passive income", "cashback", "credit card rewards", "lottery loophole"],
     "hacker": ["hacker", "cybercrime", "data breach", "ethical hacking", "ransomware"],
@@ -72,7 +74,7 @@ def scan_topics(creds_fn=None, cache_hours: int = 24) -> dict:
             age = time.time() - TREND_CACHE.stat().st_mtime
             if age < cache_hours * 3600:
                 cached = json.loads(TREND_CACHE.read_text())
-                if cached.get("categories"):
+                if cached.get("schema") == TREND_CACHE_SCHEMA and cached.get("categories"):
                     print("  [TREND] topic scan cache reused "
                           f"({int(age // 3600)}h old)")
                     return cached["categories"]
@@ -116,7 +118,8 @@ def scan_topics(creds_fn=None, cache_hours: int = 24) -> dict:
                         "score": round(score, 1)}
         results[cat] = best or entry
     try:
-        TREND_CACHE.write_text(json.dumps({"categories": results}, indent=2))
+        TREND_CACHE.write_text(json.dumps({"schema": TREND_CACHE_SCHEMA,
+                                            "categories": results}, indent=2))
     except Exception:
         pass
     print("  [TREND] topic scan (rising + under-served):")
@@ -298,10 +301,27 @@ def _yt_competition(token: str, terms: list[str], max_results: int = 25) -> dict
             "sample_size": len(rows),
             "median_view_velocity_per_day": med_vel,
             "large_channel_share": share,
-            "room_to_rank": round(100 * med_vel / (med_vel or 1) * (1 - share), 1)
-            if med_vel else 0.0,
+            "room_to_rank": _room_to_rank(med_vel, share),
         }
     return out
+
+
+def _room_to_rank(median_view_velocity_per_day: float,
+                  large_channel_share: float) -> float:
+    """Return a bounded room-to-rank estimate from competition pressure.
+
+    View velocity is converted to a logarithmic pressure score so one viral
+    result cannot dominate the scale. Large-channel share contributes the
+    remaining pressure. Higher values mean more room for a smaller channel.
+    """
+    velocity = max(float(median_view_velocity_per_day or 0.0), 0.0)
+    share = min(max(float(large_channel_share or 0.0), 0.0), 1.0)
+    if velocity <= 0:
+        return 0.0
+    velocity_pressure = min(math.log10(velocity + 1.0) / 6.0 * 100.0, 100.0)
+    channel_pressure = share * 100.0
+    room = 100.0 - (0.6 * velocity_pressure + 0.4 * channel_pressure)
+    return round(min(max(room, 0.0), 100.0), 1)
 
 
 # ---------------------------------------------------------------------------
